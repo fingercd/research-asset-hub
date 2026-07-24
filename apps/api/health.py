@@ -10,7 +10,7 @@ from time import perf_counter
 from typing import Literal
 
 import httpx
-import psycopg
+import psycopg as psycopg
 from pydantic import BaseModel
 
 from apps.api.config import ApiSettings

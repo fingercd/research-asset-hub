@@ -49,24 +49,55 @@ def test_model_schema_round_trip_uses_json_safe_values() -> None:
 
 def test_sqlalchemy_metadata_contains_required_tables() -> None:
     pytest.importorskip("sqlalchemy")
-    from packages.domain.models import Base
+    from packages.domain.models import Base, Job, PaperProfile, SyncConflict
 
     required = {
+        "activities",
+        "annotation_revisions",
         "sources",
         "source_records",
+        "source_record_versions",
+        "source_record_assets",
         "assets",
+        "paper_profiles",
+        "repository_profiles",
         "external_identifiers",
+        "field_claims",
+        "field_resolutions",
+        "identity_candidates",
+        "asset_redirects",
         "representations",
+        "representation_mounts",
         "relations",
+        "relation_evidence",
         "reading_states",
         "annotations",
         "import_runs",
         "audit_events",
+        "jobs",
+        "job_attempts",
+        "document_chunks",
+        "index_states",
+        "outbox_events",
+        "provider_usage",
+        "chat_sessions",
+        "chat_messages",
+        "citations",
+        "saved_views",
+        "integrations",
+        "integration_objects",
+        "sync_runs",
+        "sync_snapshots",
+        "sync_conflicts",
+        "tombstones",
+        "backup_runs",
     }
     assert required <= set(Base.metadata.tables)
 
-    external_constraints = Base.metadata.tables["external_identifiers"].constraints
-    assert any(
-        getattr(constraint, "name", None) == "uq_external_identifier_authority"
-        for constraint in external_constraints
-    )
+    external_indexes = Base.metadata.tables["external_identifiers"].indexes
+    assert {index.name for index in external_indexes} >= {
+        "uq_external_identifier_identity"
+    }
+    assert Job.__tablename__ == "jobs"
+    assert PaperProfile.__tablename__ == "paper_profiles"
+    assert SyncConflict.__tablename__ == "sync_conflicts"

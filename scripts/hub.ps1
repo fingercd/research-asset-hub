@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('preflight', 'inventory', 'ingest', 'validate', 'status', 'start', 'stop')]
+    [ValidateSet('preflight', 'inventory', 'ingest', 'validate', 'status', 'start', 'dev', 'stop')]
     [string]$Command = 'status',
 
     [switch]$All,
@@ -23,6 +23,7 @@ else {
 $stateDirectory = Join-Path $projectRoot 'work\state'
 $logDirectory = Join-Path $projectRoot 'work\logs'
 $processStatePath = Join-Path $stateDirectory 'processes.json'
+$script:wslKeepAliveRecord = $null
 
 if (-not $pythonPath) {
     Write-Error 'Python was not found on PATH.'
@@ -116,7 +117,72 @@ function Stop-HubProcessTree {
     return $true
 }
 
-if ($Command -eq 'start') {
+function Invoke-HubCompose {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $composePath = Join-Path $projectRoot 'deploy\compose.yaml'
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($docker) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # Docker Compose writes ordinary progress to stderr.  Windows
+            # PowerShell 5 promotes that stream to NativeCommandError when
+            # the script-wide preference is Stop, even when Compose exits 0.
+            $ErrorActionPreference = 'Continue'
+            $composeOutput = & $docker.Source compose -f $composePath @Arguments 2>&1
+            $composeExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        $composeOutput | ForEach-Object { Write-Host $_ }
+        return $composeExitCode -eq 0
+    }
+
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wsl) {
+        return $false
+    }
+    $resolvedComposePath = [IO.Path]::GetFullPath($composePath)
+    if (
+        $resolvedComposePath.Length -lt 4 -or
+        $resolvedComposePath[1] -ne ':' -or
+        $resolvedComposePath[2] -ne '\'
+    ) {
+        return $false
+    }
+    $drive = $resolvedComposePath.Substring(0, 1).ToLowerInvariant()
+    $relativePath = $resolvedComposePath.Substring(3).Replace('\', '/')
+    $wslComposePath = "/mnt/$drive/$relativePath"
+    if ($Arguments -contains 'up') {
+        $script:wslKeepAliveRecord = Start-HubProcess `
+            -Name 'wsl-keepalive' `
+            -FilePath $wsl.Source `
+            -ArgumentList @(
+                '-d',
+                'Ubuntu',
+                '-u',
+                'root',
+                '--',
+                'sh',
+                '-lc',
+                'while true; do sleep 3600; done'
+            )
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $composeOutput = & $wsl.Source -d Ubuntu -u root -- docker compose -f $wslComposePath @Arguments 2>&1
+        $composeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $composeOutput | ForEach-Object { Write-Host $_ }
+    return $composeExitCode -eq 0
+}
+
+if ($Command -in @('start', 'dev')) {
     New-Item -ItemType Directory -Force -Path $stateDirectory, $logDirectory | Out-Null
     $alreadyRunning = @(Get-RecordedProcesses | Where-Object { Test-RecordedProcess $_ })
     if ($alreadyRunning.Count -gt 0) {
@@ -125,41 +191,105 @@ if ($Command -eq 'start') {
         exit 0
     }
 
-    $docker = Get-Command docker -ErrorAction SilentlyContinue
-    if ($docker) {
-        & $docker.Source compose -f (Join-Path $projectRoot 'deploy\compose.yaml') up -d
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'Infrastructure containers did not start; application services will run degraded.'
+    if ($Command -eq 'start') {
+        $webIndex = Join-Path $projectRoot 'apps\web\dist\index.html'
+        if (-not (Test-Path -LiteralPath $webIndex)) {
+            Write-Error 'Production web assets are missing. Build apps\web\dist before hub start.'
+            exit 2
         }
     }
     else {
-        Write-Warning 'Docker is unavailable; PostgreSQL, Meilisearch, and Qdrant will remain degraded.'
+        $node = Get-Command node -ErrorAction SilentlyContinue
+        $viteCli = Join-Path $projectRoot 'apps\web\node_modules\vite\bin\vite.js'
+        if (-not $node) {
+            Write-Error 'Node.js was not found on PATH.'
+            exit 2
+        }
+        if (-not (Test-Path -LiteralPath $viteCli)) {
+            Write-Error 'Vite dependencies are missing. Run .\scripts\bootstrap.ps1 first.'
+            exit 2
+        }
     }
 
-    $node = Get-Command node -ErrorAction SilentlyContinue
-    $viteCli = Join-Path $projectRoot 'apps\web\node_modules\vite\bin\vite.js'
-    if (-not $node) {
-        Write-Error 'Node.js was not found on PATH.'
-        exit 2
+    if ([string]::IsNullOrWhiteSpace($env:HUB_GATEWAY_SECRET)) {
+        $secretBytes = New-Object byte[] 48
+        $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try {
+            $randomGenerator.GetBytes($secretBytes)
+        }
+        finally {
+            $randomGenerator.Dispose()
+        }
+        $env:HUB_GATEWAY_SECRET = [Convert]::ToBase64String($secretBytes)
     }
-    if (-not (Test-Path -LiteralPath $viteCli)) {
-        Write-Error 'Vite dependencies are missing. Run .\scripts\bootstrap.ps1 first.'
-        exit 2
+    if ([string]::IsNullOrWhiteSpace($env:HUB_DATABASE_URL)) {
+        $postgresPassword = if ([string]::IsNullOrWhiteSpace($env:HUB_POSTGRES_PASSWORD)) {
+            'research_hub_local'
+        }
+        else {
+            [uri]::EscapeDataString($env:HUB_POSTGRES_PASSWORD)
+        }
+        $postgresPort = if ([string]::IsNullOrWhiteSpace($env:HUB_POSTGRES_PORT)) {
+            '5432'
+        }
+        else {
+            $env:HUB_POSTGRES_PORT
+        }
+        $env:HUB_DATABASE_URL = "postgresql://research_hub:$postgresPassword@127.0.0.1:$postgresPort/research_asset_hub"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
+        $env:DATABASE_URL = $env:HUB_DATABASE_URL -replace '^postgresql://', 'postgresql+psycopg://'
     }
 
-    $started = @(
+    $infrastructureReady = Invoke-HubCompose -Arguments @('up', '-d', '--wait')
+    if (-not $infrastructureReady) {
+        Write-Warning 'Infrastructure containers did not start; application services will run degraded.'
+    }
+    else {
+        Push-Location $projectRoot
+        try {
+            & $pythonPath -m alembic -c 'migrations/alembic.ini' upgrade head
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning 'Database migrations did not complete; database-backed APIs will report degraded.'
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    if ($Command -eq 'start') {
+        $webProcess = Start-HubProcess `
+            -Name 'web' `
+            -FilePath $pythonPath `
+            -ArgumentList @('-m', 'apps.api.web_host')
+    }
+    else {
+        $webProcess = Start-HubProcess `
+            -Name 'web-dev' `
+            -FilePath $node.Source `
+            -ArgumentList @($viteCli, '--host', '127.0.0.1', '--port', '8765') `
+            -WorkingDirectory (Join-Path $projectRoot 'apps\web')
+    }
+
+    $started = @()
+    if ($script:wslKeepAliveRecord) {
+        $started += $script:wslKeepAliveRecord
+    }
+    $started += @(
         Start-HubProcess -Name 'api' -FilePath $pythonPath -ArgumentList @('-m', 'apps.api.main')
         Start-HubProcess -Name 'worker' -FilePath $pythonPath -ArgumentList @('-m', 'apps.worker.main')
         Start-HubProcess -Name 'asset-gateway' -FilePath $pythonPath -ArgumentList @('-m', 'apps.asset_gateway.main')
-        Start-HubProcess -Name 'web' -FilePath $node.Source -ArgumentList @($viteCli, '--host', '127.0.0.1', '--port', '8765') -WorkingDirectory (Join-Path $projectRoot 'apps\web')
+        $webProcess
     )
     $state = [pscustomobject]@{
         schema_version = 1
         project_root = $projectRoot
+        mode = $Command
         processes = $started
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $processStatePath -Encoding UTF8
-    Write-Host 'Research Asset Hub started. Web: http://127.0.0.1:8765'
+    Write-Host "Research Asset Hub $Command mode started. Web: http://127.0.0.1:8765"
     $started | Select-Object name, pid | Format-Table -AutoSize
     exit 0
 }
@@ -174,10 +304,7 @@ if ($Command -eq 'stop') {
     if (Test-Path -LiteralPath $processStatePath) {
         Remove-Item -LiteralPath $processStatePath -Force
     }
-    $docker = Get-Command docker -ErrorAction SilentlyContinue
-    if ($docker) {
-        & $docker.Source compose -f (Join-Path $projectRoot 'deploy\compose.yaml') down
-    }
+    Invoke-HubCompose -Arguments @('down') | Out-Null
     exit 0
 }
 

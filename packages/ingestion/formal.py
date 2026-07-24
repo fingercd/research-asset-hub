@@ -1,0 +1,1220 @@
+"""Transactional, idempotent import of adapter records into the operational store.
+
+The importer deliberately never mutates a source root.  Every discovered file is
+addressed through ``source_id + root_key + path_ref`` and the original manifest
+record is retained as immutable provenance in ``source_record_versions``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import mimetypes
+import os
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path, PureWindowsPath
+from typing import Any
+from urllib.parse import urlparse
+from uuid import UUID
+
+from sqlalchemy import Select, func, select
+from sqlalchemy.orm import Session
+
+from packages.adapters import DEFAULT_REGISTRY
+from packages.cli.config import PROJECT_ROOT, LoadedSource
+from packages.domain.enums import (
+    ActivityStatus,
+    AuditAction,
+    ConfirmationStatus,
+    FieldClaimStatus,
+    FieldResolutionKind,
+    ImportStatus,
+    MaterializationKind,
+    OutboxStatus,
+    RepresentationAvailability,
+    SourceAssetRole,
+)
+from packages.domain.models import (
+    Activity,
+    Asset,
+    AuditEvent,
+    ExternalIdentifierModel,
+    FieldClaim,
+    FieldResolution,
+    ImportRun,
+    OutboxEvent,
+    PaperProfile,
+    Relation,
+    RelationEvidenceModel,
+    RepositoryProfile,
+    Representation,
+    RepresentationMount,
+    Source,
+    SourceRecord,
+    SourceRecordAsset,
+    SourceRecordVersion,
+    utc_now,
+)
+from packages.domain.schemas import (
+    AssetReference,
+    NormalizedRecord,
+    RelationCandidate,
+    RepresentationCandidate,
+    SourceConfig,
+)
+
+from .dry_run import _source_config
+from .reconciliation import (
+    canonical_identifier,
+    normalize_title,
+    reconcile_records,
+    record_fingerprint,
+)
+
+IMPORTER_VERSION = "1.0"
+_CLAIM_FIELDS = (
+    "title",
+    "title_zh",
+    "subtitle",
+    "authors",
+    "year",
+    "venue",
+    "language",
+    "abstract",
+    "summary",
+    "content",
+    "analysis",
+    "source_urls",
+    "domain_slugs",
+    "tags",
+    "attributes",
+)
+
+
+def _json_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@lru_cache(maxsize=4096)
+def _sha256_file_cached(path_value: str, size: int, mtime_ns: int) -> str:
+    del size, mtime_ns
+    path = Path(path_value)
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=1024)
+def _directory_digest_cached(path_value: str, mtime_ns: int) -> str:
+    """Return a cheap, deterministic tree fingerprint without reading file bodies."""
+
+    del mtime_ns
+    path = Path(path_value)
+    digest = hashlib.sha256()
+    for child in sorted(path.rglob("*"), key=lambda item: item.as_posix().casefold()):
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        relative = child.relative_to(path).as_posix()
+        kind = "d" if child.is_dir() else "f"
+        digest.update(f"{kind}\0{relative}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def canonical_repository_url(value: str) -> str:
+    """Normalize a logical repository URL while preserving meaningful subpaths."""
+
+    normalized = value.strip().rstrip("/")
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+    parsed = urlparse(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return normalized
+    scheme = parsed.scheme.casefold()
+    host = parsed.netloc.casefold()
+    path = parsed.path.rstrip("/")
+    return f"{scheme}://{host}{path}"
+
+
+def _repository_title(url: str) -> str:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return parts[-1] if parts else parsed.netloc
+
+
+def _repository_profile(url: str) -> dict[str, str | None]:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    return {
+        "host": parsed.netloc.casefold() or None,
+        "owner": parts[0] if parts else None,
+        "name": parts[1] if len(parts) > 1 else (parts[0] if parts else None),
+    }
+
+
+def _stable_union(values: Iterable[Iterable[str]]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for items in values:
+        for item in items:
+            cleaned = str(item).strip()
+            key = cleaned.casefold()
+            if cleaned and key not in seen:
+                seen.add(key)
+                result.append(cleaned)
+    return result
+
+
+def _first(records: Sequence[NormalizedRecord], field_name: str) -> Any:
+    for record in records:
+        value = getattr(record.asset, field_name)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _merged_asset_values(records: Sequence[NormalizedRecord]) -> dict[str, Any]:
+    ordered = sorted(records, key=lambda item: (item.source_id, item.source_record_id))
+    return {
+        "asset_type": str(_first(ordered, "asset_type") or "paper"),
+        "title": str(_first(ordered, "title") or "Untitled"),
+        "title_zh": _first(ordered, "title_zh"),
+        "subtitle": _first(ordered, "subtitle"),
+        "authors": _stable_union(record.asset.authors for record in ordered),
+        "year": _first(ordered, "year"),
+        "venue": _first(ordered, "venue"),
+        "language": _first(ordered, "language"),
+        "abstract": _first(ordered, "abstract"),
+        "summary": _first(ordered, "summary"),
+        "content": _first(ordered, "content"),
+        "analysis": _first(ordered, "analysis") or {},
+        "visibility": str(_first(ordered, "visibility") or "private"),
+        "source_urls": _stable_union(
+            [str(value) for value in record.asset.source_urls] for record in ordered
+        ),
+        "domain_slugs": _stable_union(record.asset.domain_slugs for record in ordered),
+        "tags": _stable_union(record.asset.tags for record in ordered),
+        "attributes": _first(ordered, "attributes") or {},
+    }
+
+
+class _UnionFind:
+    def __init__(self, keys: Iterable[str]) -> None:
+        self.parent = {key: key for key in keys}
+
+    def find(self, key: str) -> str:
+        parent = self.parent[key]
+        if parent != key:
+            self.parent[key] = self.find(parent)
+        return self.parent[key]
+
+    def union(self, left: str, right: str) -> None:
+        left_root = self.find(left)
+        right_root = self.find(right)
+        if left_root != right_root:
+            self.parent[max(left_root, right_root)] = min(left_root, right_root)
+
+
+def identity_groups(
+    records: Sequence[NormalizedRecord],
+) -> tuple[list[list[NormalizedRecord]], dict[str, Any]]:
+    """Apply the approved strong and reviewed title/year merge decisions."""
+
+    reconciliation = reconcile_records(records)
+    keyed = {f"{item.source_id}:{item.source_record_id}": item for item in records}
+    union = _UnionFind(keyed)
+    approved = [
+        *reconciliation["auto_merge_groups"],
+        *reconciliation["needs_review_groups"],
+    ]
+    for group in approved:
+        keys = [
+            f"{item['source_id']}:{item['source_record_id']}" for item in group["records"]
+        ]
+        for key in keys[1:]:
+            union.union(keys[0], key)
+
+    grouped: dict[str, list[NormalizedRecord]] = defaultdict(list)
+    for key, record in keyed.items():
+        grouped[union.find(key)].append(record)
+    return (
+        [
+            sorted(items, key=lambda item: (item.source_id, item.source_record_id))
+            for _, items in sorted(grouped.items())
+        ],
+        reconciliation,
+    )
+
+
+@dataclass(slots=True)
+class ImportCounters:
+    source_records_seen: int = 0
+    source_records_created: int = 0
+    source_record_versions_created: int = 0
+    paper_assets_created: int = 0
+    repository_assets_created: int = 0
+    representations_created: int = 0
+    representations_reused: int = 0
+    representations_available: int = 0
+    representations_missing: int = 0
+    relations_created: int = 0
+    relation_evidence_created: int = 0
+    relation_candidates_resolved: int = 0
+    relation_candidates_unresolved: int = 0
+    field_claims_created: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            field_name: int(getattr(self, field_name))
+            for field_name in self.__dataclass_fields__
+        }
+
+
+@dataclass(slots=True)
+class ImportContext:
+    session: Session
+    sources: dict[str, LoadedSource]
+    source_models: dict[str, Source]
+    run: ImportRun
+    counters: ImportCounters = field(default_factory=ImportCounters)
+    record_models: dict[str, SourceRecord] = field(default_factory=dict)
+    record_versions: dict[str, SourceRecordVersion] = field(default_factory=dict)
+    record_assets: dict[str, Asset] = field(default_factory=dict)
+    repository_assets: dict[str, Asset] = field(default_factory=dict)
+    unresolved_relations: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _load_all_records(sources: Sequence[LoadedSource]) -> list[NormalizedRecord]:
+    DEFAULT_REGISTRY.discover_entry_points()
+    records: list[NormalizedRecord] = []
+    for source in sources:
+        config = _source_config(source)
+        adapter = DEFAULT_REGISTRY.create(config.adapter, config, base_dir=PROJECT_ROOT)
+        records.extend(adapter.load())
+    return records
+
+
+def _persisted_source_path(path: Path) -> str:
+    """Translate a container mount back to the host path used by the gateway."""
+
+    container_root = os.environ.get("HUB_CONTAINER_WORKSPACE_ROOT")
+    host_root = os.environ.get("HUB_HOST_WORKSPACE_ROOT")
+    if not container_root or not host_root:
+        return str(path)
+    try:
+        relative = path.resolve().relative_to(Path(container_root).resolve())
+    except ValueError:
+        return str(path)
+    if len(host_root) >= 2 and host_root[1] == ":":
+        return str(PureWindowsPath(host_root, *relative.parts))
+    return str(Path(host_root) / relative)
+
+
+def _upsert_sources(session: Session, sources: Sequence[LoadedSource]) -> dict[str, Source]:
+    result: dict[str, Source] = {}
+    for loaded in sources:
+        model = session.scalar(select(Source).where(Source.alias == loaded.source_id))
+        config = dict(loaded.raw)
+        config["asset_roots"] = dict(config.get("asset_roots") or {})
+        if model is None:
+            model = Source(
+                alias=loaded.source_id,
+                label=loaded.label,
+                adapter=loaded.adapter,
+                root_path=_persisted_source_path(loaded.root),
+                manifest_path=_persisted_source_path(loaded.manifest),
+                read_only=True,
+                enabled=True,
+                config=config,
+            )
+            session.add(model)
+            session.flush()
+        else:
+            model.label = loaded.label
+            model.adapter = loaded.adapter
+            model.root_path = _persisted_source_path(loaded.root)
+            model.manifest_path = _persisted_source_path(loaded.manifest)
+            model.read_only = True
+            model.enabled = True
+            model.config = config
+        result[loaded.source_id] = model
+    return result
+
+
+def _existing_asset_for_group(
+    session: Session,
+    source_models: dict[str, Source],
+    records: Sequence[NormalizedRecord],
+) -> Asset | None:
+    conditions = [
+        (source_models[record.source_id].id, record.source_record_id) for record in records
+    ]
+    assets: dict[UUID, Asset] = {}
+    for source_id, record_id in conditions:
+        existing = session.scalar(
+            select(SourceRecord).where(
+                SourceRecord.source_id == source_id,
+                SourceRecord.source_record_id == record_id,
+            )
+        )
+        if existing is not None and existing.asset_id is not None:
+            asset = session.get(Asset, existing.asset_id)
+            if asset is not None:
+                assets[asset.id] = asset
+    if not assets:
+        return None
+    # A previous importer may have created separate records before a merge rule was
+    # approved.  Deterministically retain the smallest UUID and leave redirect
+    # creation to the explicit merge service; normal fresh imports have one asset.
+    return assets[min(assets, key=str)]
+
+
+def _apply_asset_values(
+    session: Session,
+    asset: Asset,
+    values: dict[str, Any],
+) -> None:
+    for name, value in values.items():
+        setattr(asset, name, value)
+    overrides = session.scalars(
+        select(FieldResolution).where(
+            FieldResolution.entity_type == "asset",
+            FieldResolution.entity_id == asset.id,
+            FieldResolution.resolution_kind == FieldResolutionKind.OVERRIDE.value,
+        )
+    ).all()
+    for resolution in overrides:
+        field_name = resolution.field_path.removeprefix("/")
+        if "/" not in field_name and field_name in _CLAIM_FIELDS:
+            setattr(asset, field_name, resolution.override_value)
+    asset.deleted_at = None
+
+
+def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord]) -> Asset:
+    values = _merged_asset_values(records)
+    asset = _existing_asset_for_group(ctx.session, ctx.source_models, records)
+    created = asset is None
+    if asset is None:
+        asset = Asset(**values)
+        ctx.session.add(asset)
+        ctx.session.flush()
+        ctx.counters.paper_assets_created += 1
+    else:
+        _apply_asset_values(ctx.session, asset, values)
+
+    profile = ctx.session.get(PaperProfile, asset.id)
+    if profile is None:
+        ctx.session.add(PaperProfile(asset_id=asset.id))
+
+    for record in records:
+        key = f"{record.source_id}:{record.source_record_id}"
+        ctx.record_assets[key] = asset
+        for identifier in record.asset.external_identifiers:
+            canonical = identifier.canonical or canonical_identifier(
+                identifier.scheme, identifier.value
+            ).split(":", 1)[-1]
+            existing = ctx.session.scalar(
+                select(ExternalIdentifierModel).where(
+                    ExternalIdentifierModel.scheme == identifier.scheme,
+                    ExternalIdentifierModel.scope == identifier.scope,
+                    ExternalIdentifierModel.canonical == canonical,
+                    ExternalIdentifierModel.asset_id == asset.id,
+                )
+            )
+            if existing is None:
+                ctx.session.add(
+                    ExternalIdentifierModel(
+                        asset_id=asset.id,
+                        scheme=identifier.scheme,
+                        scope=identifier.scope,
+                        value=identifier.value,
+                        canonical=canonical,
+                        is_identity=bool(identifier.is_identity),
+                    )
+                )
+
+    ctx.session.add(
+        AuditEvent(
+            entity_type="asset",
+            entity_id=asset.id,
+            action=AuditAction.IMPORT.value,
+            actor="importer",
+            after={
+                "asset_type": asset.asset_type,
+                "title": asset.title,
+                "created": created,
+            },
+            details={"import_run_id": str(ctx.run.id)},
+        )
+    )
+    ctx.session.add(
+        OutboxEvent(
+            aggregate_type="asset",
+            aggregate_id=asset.id,
+            event_type="asset.imported",
+            payload={"asset_id": str(asset.id), "created": created},
+            status=OutboxStatus.PENDING.value,
+            dedupe_key=f"import:{ctx.run.id}:asset:{asset.id}",
+        )
+    )
+    return asset
+
+
+def _upsert_source_record(
+    ctx: ImportContext,
+    record: NormalizedRecord,
+    asset: Asset,
+) -> tuple[SourceRecord, SourceRecordVersion]:
+    key = f"{record.source_id}:{record.source_record_id}"
+    source = ctx.source_models[record.source_id]
+    ctx.counters.source_records_seen += 1
+    model = ctx.session.scalar(
+        select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.source_record_id == record.source_record_id,
+        )
+    )
+    normalized = record.model_dump(mode="json", by_alias=False)
+    normalized_digest = record_fingerprint(record)
+    if model is None:
+        model = SourceRecord(
+            source_id=source.id,
+            source_record_id=record.source_record_id,
+            asset_id=asset.id,
+            import_run_id=ctx.run.id,
+            outcome=str(record.outcome),
+            raw_data=dict(record.raw),
+            source_fields=dict(record.source_fields),
+            normalized_digest=normalized_digest,
+            warnings=[warning.model_dump(mode="json") for warning in record.warnings],
+        )
+        ctx.session.add(model)
+        ctx.session.flush()
+        ctx.counters.source_records_created += 1
+    else:
+        model.asset_id = asset.id
+        model.import_run_id = ctx.run.id
+        model.outcome = str(record.outcome)
+        model.raw_data = dict(record.raw)
+        model.source_fields = dict(record.source_fields)
+        model.normalized_digest = normalized_digest
+        model.warnings = [warning.model_dump(mode="json") for warning in record.warnings]
+        model.last_seen_at = utc_now()
+
+    version = ctx.session.scalar(
+        select(SourceRecordVersion).where(
+            SourceRecordVersion.source_record_id == model.id,
+            SourceRecordVersion.raw_digest == normalized_digest,
+        )
+    )
+    if version is None:
+        version = SourceRecordVersion(
+            source_record_id=model.id,
+            import_run_id=ctx.run.id,
+            adapter_version=record.adapter_version,
+            raw_data=normalized,
+            source_fields=dict(record.source_fields),
+            raw_digest=normalized_digest,
+        )
+        ctx.session.add(version)
+        ctx.session.flush()
+        ctx.counters.source_record_versions_created += 1
+
+    link = ctx.session.scalar(
+        select(SourceRecordAsset).where(
+            SourceRecordAsset.source_record_id == model.id,
+            SourceRecordAsset.asset_id == asset.id,
+            SourceRecordAsset.role == SourceAssetRole.PRIMARY.value,
+        )
+    )
+    if link is None:
+        ctx.session.add(
+            SourceRecordAsset(
+                source_record_id=model.id,
+                asset_id=asset.id,
+                source_record_version_id=version.id,
+                role=SourceAssetRole.PRIMARY.value,
+                evidence={"import_run_id": str(ctx.run.id)},
+            )
+        )
+    else:
+        link.source_record_version_id = version.id
+        link.deleted_at = None
+    ctx.record_models[key] = model
+    ctx.record_versions[key] = version
+    return model, version
+
+
+def _write_claims(
+    ctx: ImportContext,
+    record: NormalizedRecord,
+    asset: Asset,
+    version: SourceRecordVersion,
+) -> None:
+    asset_payload = record.asset.model_dump(mode="json")
+    for field_name in _CLAIM_FIELDS:
+        value = asset_payload.get(field_name)
+        if value in (None, "", [], {}):
+            continue
+        field_path = f"/{field_name}"
+        value_digest = _json_digest(value)
+        source_key = f"{record.source_id}:{record.source_record_id}"
+        claim = ctx.session.scalar(
+            select(FieldClaim).where(
+                FieldClaim.entity_type == "asset",
+                FieldClaim.entity_id == asset.id,
+                FieldClaim.field_path == field_path,
+                FieldClaim.value_digest == value_digest,
+                FieldClaim.source_key == source_key,
+            )
+        )
+        if claim is None:
+            claim = FieldClaim(
+                entity_type="asset",
+                entity_id=asset.id,
+                field_path=field_path,
+                value_json=value,
+                value_digest=value_digest,
+                source_record_version_id=version.id,
+                provider=record.adapter_name,
+                source_pointer=f"/asset/{field_name}",
+                source_key=source_key,
+                authority=100,
+                confidence=1.0,
+                status=FieldClaimStatus.ACTIVE.value,
+            )
+            ctx.session.add(claim)
+            ctx.session.flush()
+            ctx.counters.field_claims_created += 1
+
+        resolved_value = getattr(asset, field_name)
+        if _json_digest(resolved_value) != value_digest:
+            continue
+        resolution = ctx.session.scalar(
+            select(FieldResolution).where(
+                FieldResolution.entity_type == "asset",
+                FieldResolution.entity_id == asset.id,
+                FieldResolution.field_path == field_path,
+            )
+        )
+        if resolution is None:
+            ctx.session.add(
+                FieldResolution(
+                    entity_type="asset",
+                    entity_id=asset.id,
+                    field_path=field_path,
+                    resolution_kind=FieldResolutionKind.CLAIM.value,
+                    selected_claim_id=claim.id,
+                    reason="deterministic import resolution",
+                    resolved_by="importer",
+                )
+            )
+
+
+def _representation_path(
+    loaded: LoadedSource,
+    config: SourceConfig,
+    candidate: RepresentationCandidate,
+) -> Path | None:
+    if candidate.path_ref is None:
+        return None
+    root_value = config.asset_roots.get(candidate.root_key)
+    root = (loaded.root / root_value).resolve() if root_value else loaded.root.resolve()
+    candidate_path = (root / candidate.path_ref).resolve()
+    try:
+        candidate_path.relative_to(root)
+    except ValueError:
+        return None
+    return candidate_path
+
+
+def _representation_state(
+    path: Path | None,
+    candidate: RepresentationCandidate,
+    existing: Representation | None,
+) -> tuple[
+    str,
+    str,
+    str | None,
+    int | None,
+    str | None,
+    dict[str, Any],
+    bool,
+]:
+    attributes = dict(candidate.metadata)
+    if path is None:
+        return (
+            RepresentationAvailability.AVAILABLE.value
+            if candidate.url is not None
+            else RepresentationAvailability.MISSING.value,
+            MaterializationKind.URL.value,
+            candidate.sha256,
+            candidate.size_bytes,
+            candidate.mime_type,
+            attributes,
+            existing is not None,
+        )
+    if not path.exists():
+        attributes["_fingerprint_strategy"] = "missing"
+        return (
+            RepresentationAvailability.MISSING.value,
+            str(candidate.materialization_kind),
+            candidate.sha256,
+            candidate.size_bytes,
+            candidate.mime_type,
+            attributes,
+            existing is not None,
+        )
+    stat = path.stat()
+    attributes["_source_mtime_ns"] = stat.st_mtime_ns
+    attributes["_source_size"] = stat.st_size
+    if path.is_dir():
+        cached = (
+            existing is not None
+            and existing.tree_digest is not None
+            and (
+                (
+                    candidate.revision is not None
+                    and existing.revision == candidate.revision
+                )
+                or (
+                    existing.attributes.get("_source_mtime_ns") == stat.st_mtime_ns
+                    and existing.attributes.get("_source_size") == stat.st_size
+                )
+            )
+        )
+        digest = (
+            existing.tree_digest
+            if cached and existing is not None
+            else candidate.tree_digest
+            or _directory_digest_cached(str(path), stat.st_mtime_ns)
+        )
+        attributes["_fingerprint_strategy"] = (
+            "revision-or-stat-cache" if cached else "directory-tree-stat"
+        )
+        return (
+            RepresentationAvailability.AVAILABLE.value,
+            MaterializationKind.DIRECTORY.value,
+            digest,
+            None,
+            candidate.mime_type,
+            attributes,
+            cached,
+        )
+    cached = (
+        existing is not None
+        and existing.sha256 is not None
+        and existing.attributes.get("_source_mtime_ns") == stat.st_mtime_ns
+        and existing.attributes.get("_source_size") == stat.st_size
+    )
+    digest = (
+        existing.sha256
+        if cached and existing is not None
+        else candidate.sha256
+        or _sha256_file_cached(str(path), stat.st_size, stat.st_mtime_ns)
+    )
+    attributes["_fingerprint_strategy"] = "size-mtime-cache" if cached else "sha256"
+    return (
+        RepresentationAvailability.AVAILABLE.value,
+        MaterializationKind.FILE.value,
+        digest,
+        stat.st_size,
+        candidate.mime_type or mimetypes.guess_type(path.name)[0],
+        attributes,
+        cached,
+    )
+
+
+def _upsert_repository(
+    ctx: ImportContext,
+    record: NormalizedRecord,
+    candidate: RepresentationCandidate,
+) -> Asset:
+    assert candidate.url is not None
+    canonical_url = canonical_repository_url(str(candidate.url))
+    cached = ctx.repository_assets.get(canonical_url)
+    if cached is not None:
+        return cached
+    profile = ctx.session.scalar(
+        select(RepositoryProfile).where(RepositoryProfile.canonical_url == canonical_url)
+    )
+    if profile is not None:
+        asset = ctx.session.get(Asset, profile.asset_id)
+        assert asset is not None
+        ctx.repository_assets[canonical_url] = asset
+        return asset
+
+    details = _repository_profile(canonical_url)
+    asset = Asset(
+        asset_type="repository",
+        title=_repository_title(canonical_url),
+        authors=[],
+        visibility="private",
+        source_urls=[canonical_url],
+        domain_slugs=list(record.asset.domain_slugs),
+        tags=[],
+        analysis={},
+        attributes={"logical_repository": True},
+    )
+    ctx.session.add(asset)
+    ctx.session.flush()
+    ctx.session.add(
+        RepositoryProfile(
+            asset_id=asset.id,
+            canonical_url=canonical_url,
+            host=details["host"],
+            owner=details["owner"],
+            name=details["name"],
+            pinned_revision=candidate.revision,
+            license_spdx=str(candidate.metadata.get("license") or "") or None,
+            code_status=str(candidate.metadata.get("status") or "unknown"),
+            attributes=dict(candidate.metadata),
+        )
+    )
+    scheme = "github" if details["host"] == "github.com" else "url"
+    ctx.session.add(
+        ExternalIdentifierModel(
+            asset_id=asset.id,
+            scheme=scheme,
+            scope="",
+            value=canonical_url,
+            canonical=canonical_url,
+            is_identity=True,
+        )
+    )
+    ctx.repository_assets[canonical_url] = asset
+    ctx.counters.repository_assets_created += 1
+    return asset
+
+
+def _representation_query(
+    source_id: UUID,
+    asset_id: UUID,
+    candidate: RepresentationCandidate,
+) -> Select[tuple[Representation]]:
+    query = select(Representation).where(
+        Representation.asset_id == asset_id,
+        Representation.source_id == source_id,
+        Representation.root_key == candidate.root_key,
+        Representation.role == str(candidate.role),
+    )
+    if candidate.path_ref is not None:
+        return query.where(Representation.path_ref == candidate.path_ref)
+    return query.where(
+        Representation.path_ref.is_(None),
+        Representation.external_url == (str(candidate.url) if candidate.url else None),
+    )
+
+
+def _upsert_representation(
+    ctx: ImportContext,
+    record: NormalizedRecord,
+    candidate: RepresentationCandidate,
+    paper: Asset,
+) -> tuple[Representation, Asset]:
+    source_model = ctx.source_models[record.source_id]
+    source_record = ctx.record_models[f"{record.source_id}:{record.source_record_id}"]
+    loaded = ctx.sources[record.source_id]
+    config = _source_config(loaded)
+
+    target = paper
+    if str(candidate.representation_type) == "repository" and candidate.url is not None:
+        target = _upsert_repository(ctx, record, candidate)
+        link = ctx.session.scalar(
+            select(SourceRecordAsset).where(
+                SourceRecordAsset.source_record_id == source_record.id,
+                SourceRecordAsset.asset_id == target.id,
+                SourceRecordAsset.role == SourceAssetRole.REPOSITORY.value,
+            )
+        )
+        if link is None:
+            ctx.session.add(
+                SourceRecordAsset(
+                    source_record_id=source_record.id,
+                    asset_id=target.id,
+                    source_record_version_id=ctx.record_versions[
+                        f"{record.source_id}:{record.source_record_id}"
+                    ].id,
+                    role=SourceAssetRole.REPOSITORY.value,
+                    evidence={"repository_url": str(candidate.url)},
+                )
+            )
+
+    model = ctx.session.scalar(
+        _representation_query(source_model.id, target.id, candidate)
+    )
+    path = _representation_path(loaded, config, candidate)
+    (
+        availability,
+        materialization,
+        digest,
+        size,
+        mime_type,
+        representation_attributes,
+        fingerprint_reused,
+    ) = _representation_state(path, candidate, model)
+    if model is None:
+        model = Representation(
+            asset_id=target.id,
+            source_id=source_model.id,
+            source_record_id=source_record.id,
+            representation_type=str(candidate.representation_type),
+            role=str(candidate.role),
+            materialization_kind=materialization,
+            availability=availability,
+            root_key=candidate.root_key,
+            path_ref=candidate.path_ref,
+            external_url=str(candidate.url) if candidate.url else None,
+            entrypoint=candidate.entrypoint,
+            revision=candidate.revision,
+            tree_digest=(
+                digest if materialization == MaterializationKind.DIRECTORY.value else None
+            ),
+            sha256=digest if materialization != MaterializationKind.DIRECTORY.value else None,
+            mime_type=mime_type,
+            size_bytes=size,
+            network_required=candidate.network_required,
+            attributes=representation_attributes,
+            verified_at=utc_now(),
+        )
+        ctx.session.add(model)
+        ctx.session.flush()
+        ctx.counters.representations_created += 1
+    else:
+        existing_attributes = dict(model.attributes or {})
+        for derived_key in (
+            "sandbox_policy",
+            "sandbox_policy_source",
+            "sandbox_policy_content_sha256",
+        ):
+            if derived_key in existing_attributes:
+                representation_attributes[derived_key] = existing_attributes[derived_key]
+        persisted_policy = str(
+            representation_attributes.get("sandbox_policy") or ""
+        )
+        model.asset_id = target.id
+        model.source_record_id = source_record.id
+        model.representation_type = str(candidate.representation_type)
+        model.materialization_kind = materialization
+        model.availability = availability
+        model.external_url = str(candidate.url) if candidate.url else None
+        model.entrypoint = candidate.entrypoint
+        model.revision = candidate.revision
+        model.tree_digest = (
+            digest if materialization == MaterializationKind.DIRECTORY.value else None
+        )
+        model.sha256 = digest if materialization != MaterializationKind.DIRECTORY.value else None
+        model.mime_type = mime_type
+        model.size_bytes = size
+        model.network_required = (
+            candidate.network_required or persisted_policy == "network_required"
+        )
+        model.attributes = representation_attributes
+        model.verified_at = utc_now()
+        model.deleted_at = None
+    if fingerprint_reused:
+        ctx.counters.representations_reused += 1
+
+    if availability == RepresentationAvailability.AVAILABLE.value:
+        ctx.counters.representations_available += 1
+    elif availability == RepresentationAvailability.MISSING.value:
+        ctx.counters.representations_missing += 1
+
+    if candidate.path_ref is not None:
+        mount = ctx.session.scalar(
+            select(RepresentationMount).where(
+                RepresentationMount.representation_id == model.id,
+                RepresentationMount.mount_path == "/",
+            )
+        )
+        if mount is None:
+            ctx.session.add(
+                RepresentationMount(
+                    representation_id=model.id,
+                    mount_path="/",
+                    source_id=source_model.id,
+                    root_key=candidate.root_key,
+                    path_ref=candidate.path_ref,
+                    read_only=True,
+                )
+            )
+    return model, target
+
+
+def _resolve_reference(
+    ctx: ImportContext,
+    reference: AssetReference,
+    default_source: str,
+) -> Asset | None:
+    if reference.asset_id is not None:
+        return ctx.session.get(Asset, reference.asset_id)
+    if reference.source_record_id is not None:
+        source_id = reference.source_id or default_source
+        return ctx.record_assets.get(f"{source_id}:{reference.source_record_id}")
+    identifier = reference.external_identifier
+    if identifier is None:
+        return None
+    if identifier.scheme in {"github", "url"}:
+        repository_url = canonical_repository_url(
+            identifier.canonical or identifier.value
+        )
+        return ctx.repository_assets.get(repository_url)
+    if identifier.scheme == "source":
+        value = identifier.canonical or identifier.value
+        prefix = f"{default_source}:label:"
+        if value.startswith(prefix):
+            label = normalize_title(value[len(prefix) :])
+            candidates = [
+                asset
+                for key, asset in ctx.record_assets.items()
+                if key.startswith(f"{default_source}:")
+                and label in {normalize_title(asset.title), normalize_title(asset.title_zh or "")}
+            ]
+            unique = {asset.id: asset for asset in candidates}
+            if len(unique) == 1:
+                return next(iter(unique.values()))
+    model = ctx.session.scalar(
+        select(ExternalIdentifierModel).where(
+            ExternalIdentifierModel.scheme == identifier.scheme,
+            ExternalIdentifierModel.scope == identifier.scope,
+            ExternalIdentifierModel.canonical == identifier.canonical,
+            ExternalIdentifierModel.is_identity.is_(True),
+        )
+    )
+    return ctx.session.get(Asset, model.asset_id) if model is not None else None
+
+
+def _candidate_payload(candidate: RelationCandidate) -> dict[str, Any]:
+    return candidate.model_dump(mode="json", by_alias=False)
+
+
+def _upsert_relation(
+    ctx: ImportContext,
+    record: NormalizedRecord,
+    candidate: RelationCandidate,
+    index: int,
+) -> None:
+    paper = ctx.record_assets[f"{record.source_id}:{record.source_record_id}"]
+    subject = (
+        _resolve_reference(ctx, candidate.subject, record.source_id)
+        if candidate.subject is not None
+        else paper
+    )
+    target = _resolve_reference(ctx, candidate.object, record.source_id)
+    outcome = {
+        "source_id": record.source_id,
+        "source_record_id": record.source_record_id,
+        "candidate_index": index,
+        "relation_type": str(candidate.relation_type),
+    }
+    if subject is None or target is None or subject.id == target.id:
+        outcome["outcome"] = "unresolved" if target is None else "self_edge_rejected"
+        outcome["candidate"] = _candidate_payload(candidate)
+        ctx.unresolved_relations.append(outcome)
+        ctx.counters.relation_candidates_unresolved += 1
+        return
+
+    relation = ctx.session.scalar(
+        select(Relation).where(
+            Relation.subject_asset_id == subject.id,
+            Relation.relation_type == str(candidate.relation_type),
+            Relation.object_asset_id == target.id,
+            Relation.source_key == "canonical",
+        )
+    )
+    if relation is None:
+        relation = Relation(
+            subject_asset_id=subject.id,
+            object_asset_id=target.id,
+            relation_type=str(candidate.relation_type),
+            source_key="canonical",
+            evidence={},
+            confidence=candidate.confidence,
+            confirmation_status=(
+                ConfirmationStatus.CONFIRMED.value
+                if candidate.confirmed
+                else ConfirmationStatus.CANDIDATE.value
+            ),
+            attributes=dict(candidate.metadata),
+        )
+        ctx.session.add(relation)
+        ctx.session.flush()
+        ctx.counters.relations_created += 1
+
+    evidence = candidate.evidence.model_dump(mode="json")
+    evidence_hash = _json_digest(
+        {
+            "record": f"{record.source_id}:{record.source_record_id}",
+            "relation": _candidate_payload(candidate),
+        }
+    )
+    existing_evidence = ctx.session.scalar(
+        select(RelationEvidenceModel).where(
+            RelationEvidenceModel.relation_id == relation.id,
+            RelationEvidenceModel.evidence_hash == evidence_hash,
+        )
+    )
+    if existing_evidence is None:
+        ctx.session.add(
+            RelationEvidenceModel(
+                relation_id=relation.id,
+                source_record_version_id=ctx.record_versions[
+                    f"{record.source_id}:{record.source_record_id}"
+                ].id,
+                provider=record.adapter_name,
+                source_key=f"{record.source_id}:{record.source_record_id}:{index}",
+                evidence=evidence,
+                evidence_hash=evidence_hash,
+                confidence=candidate.confidence,
+            )
+        )
+        ctx.counters.relation_evidence_created += 1
+    ctx.counters.relation_candidates_resolved += 1
+
+
+def run_formal_import(
+    session: Session,
+    sources: Sequence[LoadedSource],
+) -> dict[str, Any]:
+    """Import all selected sources in one database transaction.
+
+    The caller controls the transaction boundary.  Raising from this function
+    leaves the session ready for rollback, so no partial import becomes visible.
+    """
+
+    started = datetime.now(UTC)
+    records = _load_all_records(sources)
+    groups, reconciliation = identity_groups(records)
+    source_models = _upsert_sources(session, sources)
+    run = ImportRun(
+        source_id=None,
+        status=ImportStatus.RUNNING.value,
+        mode="full",
+        dry_run=False,
+        adapter_name="multi-source",
+        adapter_version=IMPORTER_VERSION,
+        config_digest=_json_digest([source.raw for source in sources]),
+        started_at=started,
+    )
+    session.add(run)
+    session.flush()
+    ctx = ImportContext(
+        session=session,
+        sources={source.source_id: source for source in sources},
+        source_models=source_models,
+        run=run,
+    )
+
+    for group in groups:
+        asset = _upsert_paper_group(ctx, group)
+        for record in group:
+            _, version = _upsert_source_record(ctx, record, asset)
+            _write_claims(ctx, record, asset, version)
+
+    # Materialize repositories before resolving any implemented_by edge.
+    for record in records:
+        paper = ctx.record_assets[f"{record.source_id}:{record.source_record_id}"]
+        for representation_candidate in record.representations:
+            _upsert_representation(ctx, record, representation_candidate, paper)
+
+    for record in records:
+        for index, relation_candidate in enumerate(record.relations):
+            _upsert_relation(ctx, record, relation_candidate, index)
+
+    finished = datetime.now(UTC)
+    counters = ctx.counters.as_dict()
+    counters.update(
+        {
+            "paper_assets_total": len(groups),
+            "repository_assets_total": len(ctx.repository_assets),
+            "source_record_candidates": len(records),
+            "representation_candidates": sum(len(item.representations) for item in records),
+            "relation_candidates": sum(len(item.relations) for item in records),
+            "strong_merge_groups": len(reconciliation["auto_merge_groups"]),
+            "reviewed_merge_groups": len(reconciliation["needs_review_groups"]),
+        }
+    )
+    run.status = ImportStatus.SUCCEEDED.value
+    run.finished_at = finished
+    run.counters = counters
+    session.add(
+        Activity(
+            activity_type="relation_reconciliation",
+            tool_name="formal-importer",
+            tool_version=IMPORTER_VERSION,
+            status=ActivityStatus.SUCCEEDED.value,
+            input_digest=run.config_digest,
+            output_digest=_json_digest(counters),
+            parameters={"import_run_id": str(run.id)},
+            result={
+                "counts": {
+                    "resolved": ctx.counters.relation_candidates_resolved,
+                    "unresolved": ctx.counters.relation_candidates_unresolved,
+                },
+                "unresolved_candidates": ctx.unresolved_relations,
+            },
+            started_at=started,
+            finished_at=finished,
+        )
+    )
+    session.flush()
+    return {
+        "schema_version": 1,
+        "status": "passed",
+        "import_run_id": str(run.id),
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "source_roots_modified": False,
+        "counters": counters,
+        "unresolved_relation_candidates": ctx.unresolved_relations,
+    }
+
+
+def database_counts(session: Session) -> dict[str, int]:
+    """Return release-gate counts from the current PostgreSQL or SQLite store."""
+
+    def count(model: type[Any], *where: Any) -> int:
+        statement = select(func.count()).select_from(model)
+        if where:
+            statement = statement.where(*where)
+        return int(session.scalar(statement) or 0)
+
+    return {
+        "assets": count(Asset, Asset.deleted_at.is_(None)),
+        "papers": count(
+            Asset, Asset.asset_type == "paper", Asset.deleted_at.is_(None)
+        ),
+        "repositories": count(
+            Asset, Asset.asset_type == "repository", Asset.deleted_at.is_(None)
+        ),
+        "source_records": count(SourceRecord),
+        "representations": count(Representation, Representation.deleted_at.is_(None)),
+        "missing_representations": count(
+            Representation,
+            Representation.availability == RepresentationAvailability.MISSING.value,
+            Representation.deleted_at.is_(None),
+        ),
+        "relations": count(Relation, Relation.deleted_at.is_(None)),
+        "implemented_by": count(
+            Relation,
+            Relation.relation_type == "implemented_by",
+            Relation.deleted_at.is_(None),
+        ),
+        "field_claims": count(FieldClaim),
+    }

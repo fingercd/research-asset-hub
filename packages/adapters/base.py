@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from importlib import metadata
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, ClassVar, TypeVar
 from urllib.parse import urlparse
 from uuid import UUID
@@ -381,6 +382,25 @@ class BaseAdapter(ABC):
                 details={"value": raw, "root_key": root_key},
             )
         declared_root = self._declared_root(root_key)
+        windows_path = PureWindowsPath(raw)
+        host_root = os.environ.get("HUB_HOST_WORKSPACE_ROOT")
+        container_root = os.environ.get("HUB_CONTAINER_WORKSPACE_ROOT")
+        if windows_path.is_absolute() and host_root and container_root:
+            try:
+                windows_relative = windows_path.relative_to(PureWindowsPath(host_root))
+            except ValueError as exc:
+                raise AdapterError(
+                    AdapterErrorCode.PATH_OUTSIDE_ROOT,
+                    "Windows asset path is outside the mapped host workspace",
+                    details={"value": raw, "root_key": root_key},
+                ) from exc
+            raw = str(Path(container_root, *windows_relative.parts))
+        elif os.name != "nt" and windows_path.is_absolute():
+            raise AdapterError(
+                AdapterErrorCode.PATH_OUTSIDE_ROOT,
+                "Windows asset path requires an explicit container path mapping",
+                details={"value": raw, "root_key": root_key},
+            )
         raw_path = Path(raw.replace("/", str(Path("/"))))
         candidates: list[Path] = []
         if raw_path.is_absolute():
@@ -389,9 +409,9 @@ class BaseAdapter(ABC):
             candidates.extend((self.source_root / raw_path, declared_root / raw_path))
 
         for candidate in candidates:
-            relative = self._relative_if_within(candidate, declared_root)
-            if relative and ".." not in PurePosixPath(relative).parts:
-                return relative
+            candidate_relative = self._relative_if_within(candidate, declared_root)
+            if candidate_relative and ".." not in PurePosixPath(candidate_relative).parts:
+                return candidate_relative
         raise AdapterError(
             AdapterErrorCode.PATH_OUTSIDE_ROOT,
             f"Discovered path escapes declared root '{root_key}': {raw}",

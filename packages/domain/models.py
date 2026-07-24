@@ -36,13 +36,17 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship
 
 from .enums import (
+    AnchorKind,
+    AnchorStatus,
     AnnotationKind,
     AuditAction,
     ConfirmationStatus,
     ImportOutcome,
     ImportStatus,
+    MaterializationKind,
     ReadingStatus,
     RelationType,
+    RepresentationAvailability,
     RepresentationRole,
     RepresentationType,
     Visibility,
@@ -229,12 +233,21 @@ class Asset(TimestampVersionMixin, Base):
 class ExternalIdentifierModel(Base):
     __tablename__ = "external_identifiers"
     __table_args__ = (
-        UniqueConstraint("scheme", "canonical", name="uq_external_identifier_authority"),
         UniqueConstraint(
             "asset_id",
             "scheme",
+            "scope",
             "canonical",
             name="uq_external_identifier_per_asset",
+        ),
+        Index(
+            "uq_external_identifier_identity",
+            "scheme",
+            "scope",
+            "canonical",
+            unique=True,
+            postgresql_where=text("is_identity"),
+            sqlite_where=text("is_identity = 1"),
         ),
     )
 
@@ -245,8 +258,20 @@ class ExternalIdentifierModel(Base):
         index=True,
     )
     scheme: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope: Mapped[str] = mapped_column(
+        String(255),
+        default="",
+        server_default=text("''"),
+        nullable=False,
+    )
     value: Mapped[str] = mapped_column(Text, nullable=False)
     canonical: Mapped[str] = mapped_column(Text, nullable=False)
+    is_identity: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,
@@ -329,15 +354,24 @@ class Representation(TimestampVersionMixin, Base):
             name="representation_role",
         ),
         CheckConstraint(
+            f"materialization_kind IN {_enum_check(MaterializationKind)}",
+            name="representation_materialization_kind",
+        ),
+        CheckConstraint(
+            f"availability IN {_enum_check(RepresentationAvailability)}",
+            name="representation_availability",
+        ),
+        CheckConstraint(
             "path_ref IS NOT NULL OR external_url IS NOT NULL",
             name="representation_location",
         ),
         UniqueConstraint(
+            "asset_id",
             "source_id",
             "root_key",
             "path_ref",
             "role",
-            name="uq_representation_source_path_role",
+            name="uq_representation_asset_source_path_role",
         ),
     )
 
@@ -351,11 +385,31 @@ class Representation(TimestampVersionMixin, Base):
         ForeignKey("sources.id", ondelete="RESTRICT"),
         index=True,
     )
+    source_record_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("source_records.id", ondelete="SET NULL"),
+        index=True,
+    )
     representation_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
+    materialization_kind: Mapped[str] = mapped_column(
+        String(16),
+        default=MaterializationKind.FILE.value,
+        server_default=MaterializationKind.FILE.value,
+        nullable=False,
+    )
+    availability: Mapped[str] = mapped_column(
+        String(16),
+        default=RepresentationAvailability.UNKNOWN.value,
+        server_default=RepresentationAvailability.UNKNOWN.value,
+        nullable=False,
+        index=True,
+    )
     root_key: Mapped[str] = mapped_column(String(63), default="source", nullable=False)
     path_ref: Mapped[str | None] = mapped_column(Text)
     external_url: Mapped[str | None] = mapped_column(Text)
+    entrypoint: Mapped[str | None] = mapped_column(Text)
+    revision: Mapped[str | None] = mapped_column(String(255), index=True)
+    tree_digest: Mapped[str | None] = mapped_column(String(64), index=True)
     sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     mime_type: Mapped[str | None] = mapped_column(String(255))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
@@ -366,6 +420,7 @@ class Representation(TimestampVersionMixin, Base):
         nullable=False,
     )
     attributes: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, default=dict, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     asset: Mapped[Asset] = relationship(back_populates="representations")
@@ -469,6 +524,14 @@ class Annotation(TimestampVersionMixin, Base):
             f"kind IN {_enum_check(AnnotationKind)}",
             name="annotation_kind",
         ),
+        CheckConstraint(
+            f"anchor_kind IS NULL OR anchor_kind IN {_enum_check(AnchorKind)}",
+            name="annotation_anchor_kind",
+        ),
+        CheckConstraint(
+            f"anchor_status IN {_enum_check(AnchorStatus)}",
+            name="annotation_anchor_status",
+        ),
         Index("ix_annotations_asset_pinned", "asset_id", "pinned"),
     )
 
@@ -492,6 +555,14 @@ class Annotation(TimestampVersionMixin, Base):
     summary: Mapped[str | None] = mapped_column(String(512))
     body_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
     anchor: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT)
+    anchor_kind: Mapped[str | None] = mapped_column(String(32))
+    anchor_digest: Mapped[str | None] = mapped_column(String(64))
+    anchor_status: Mapped[str] = mapped_column(
+        String(16),
+        default=AnchorStatus.CURRENT.value,
+        server_default=AnchorStatus.CURRENT.value,
+        nullable=False,
+    )
     pinned: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -530,3 +601,38 @@ class AuditEvent(Base):
         nullable=False,
         index=True,
     )
+
+
+# Importing the post-0001 models here registers them on Base.metadata whenever
+# callers import ``packages.domain.models.Base`` (Alembic's normal path).
+from . import platform_models as _platform_models  # noqa: E402
+
+Activity = _platform_models.Activity
+AnnotationRevision = _platform_models.AnnotationRevision
+AssetRedirect = _platform_models.AssetRedirect
+BackupRun = _platform_models.BackupRun
+ChatMessage = _platform_models.ChatMessage
+ChatSession = _platform_models.ChatSession
+Citation = _platform_models.Citation
+DocumentChunk = _platform_models.DocumentChunk
+FieldClaim = _platform_models.FieldClaim
+FieldResolution = _platform_models.FieldResolution
+IdentityCandidate = _platform_models.IdentityCandidate
+IndexState = _platform_models.IndexState
+Integration = _platform_models.Integration
+IntegrationObject = _platform_models.IntegrationObject
+Job = _platform_models.Job
+JobAttempt = _platform_models.JobAttempt
+OutboxEvent = _platform_models.OutboxEvent
+PaperProfile = _platform_models.PaperProfile
+ProviderUsage = _platform_models.ProviderUsage
+RelationEvidenceModel = _platform_models.RelationEvidenceModel
+RepositoryProfile = _platform_models.RepositoryProfile
+RepresentationMount = _platform_models.RepresentationMount
+SavedView = _platform_models.SavedView
+SourceRecordAsset = _platform_models.SourceRecordAsset
+SourceRecordVersion = _platform_models.SourceRecordVersion
+SyncConflict = _platform_models.SyncConflict
+SyncRun = _platform_models.SyncRun
+SyncSnapshot = _platform_models.SyncSnapshot
+Tombstone = _platform_models.Tombstone

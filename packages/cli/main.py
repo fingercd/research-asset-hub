@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from .config import DEFAULT_SOURCES_CONFIG, load_sources, select_sources
 from .inspection import (
@@ -113,21 +116,43 @@ def _run_validate(args: argparse.Namespace) -> int:
 
 
 def _run_ingest(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print(
-            "Refusing non-dry-run ingestion in the first safety checkpoint. Run with --dry-run.",
-            file=sys.stderr,
-        )
-        return 2
-    try:
+    if args.dry_run:
         from packages.ingestion.dry_run import run_dry_run
-    except ImportError as exc:
-        print(f"Dry-run ingestion is not ready: {exc}", file=sys.stderr)
-        return 2
 
+        sources = select_sources(load_sources(args.config), args.source, args.all)
+        report = run_dry_run(sources)
+        path = write_report(report, "ingest-dry-run.json")
+        report["report_path"] = str(path)
+        _emit(report, args.json)
+        return 1 if report["status"] == "failed" else 0
+
+    from packages.ingestion.formal import run_formal_import
+
+    database_url = (
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("HUB_DATABASE_URL")
+        or (
+            "postgresql+psycopg://research_hub:research_hub_local"
+            "@127.0.0.1:5432/research_asset_hub"
+        )
+    )
     sources = select_sources(load_sources(args.config), args.source, args.all)
-    report = run_dry_run(sources)
-    path = write_report(report, "ingest-dry-run.json")
+    engine = create_engine(database_url, pool_pre_ping=True)
+    try:
+        with Session(engine) as session:
+            report = run_formal_import(session, sources)
+            session.commit()
+    except Exception as exc:
+        report = {
+            "schema_version": 1,
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "source_roots_modified": False,
+        }
+    finally:
+        engine.dispose()
+    path = write_report(report, "ingest-formal.json")
     report["report_path"] = str(path)
     _emit(report, args.json)
     return 1 if report["status"] == "failed" else 0

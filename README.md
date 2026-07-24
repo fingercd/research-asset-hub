@@ -1,135 +1,195 @@
 # Research Asset Hub
 
-Research Asset Hub 是六个现有论文领域之上的非破坏式本地管理层。它不会移动或改写来源资料；后续通过适配器读取来源清单，将论文、PDF、代码、导读、交互 HTML、阅读状态和批注汇总到统一网站。
+Research Asset Hub 是一个只在本机运行的个人科研数字资产平台。它把七个来源目录中的论文、代码仓库、导读和历史 HTML 注册到统一数据库、搜索与关系图谱中，同时保持来源目录只读：不移动、不重命名、不覆盖原文件，也不复制原始大文件。
 
-当前仓库已完成第一批安全基础与全量 dry-run：
+当前 v1 数据基线：
 
-- `apps/api`：FastAPI API；`/api/health` 汇总 PostgreSQL、Meilisearch、Qdrant 和 worker 状态。
-- `apps/worker`：后台 worker 占位进程，定期写入本地 heartbeat。
-- `apps/asset_gateway`：独立 origin 的只读资产网关占位服务；尚未注册来源时不会暴露文件。
-- `apps/web`：React、TypeScript 和 Vite 构建的本地平台壳。
-- `packages/domain`：统一数据契约、数据库模型和开放导出器。
-- `packages/adapters`：六领域适配器、通用 manifest 适配器和插件注册。
-- `packages/ingestion`：稳定指纹、跨领域合并候选和只读试导入。
-- `deploy/compose.yaml`：只启动 PostgreSQL、Meilisearch 和 Qdrant，宿主机端口全部绑定到 loopback。
+- 7 个领域来源、518 条来源记录
+- 483 篇论文、316 个代码仓库，共 799 个规范资产
+- 2,408 个表示，其中 2,399 个可用、9 个明确标记为缺失
+- 1,753 个关系候选，逻辑边去重，多来源依据单独保存在 `relation_evidence`
+- 228,704 个可追溯文本/代码 chunk
+- 799 个资产和 62,704 个 chunk 使用本地 BGE-M3 向量索引
 
-六个来源共 428 条记录已全部通过共享 schema。当前仍停在人工审查点，非 dry-run 写入会被主动拒绝；搜索、详情页、批注、图谱和语义问答尚未实现。
+## 功能
 
-## 先决条件
-
-- Windows PowerShell 5.1 或 PowerShell 7
-- Python 3.11+
-- Node.js 20+，以及 pnpm 11 或可用的 Corepack
-- Docker Desktop（用于 PostgreSQL、Meilisearch、Qdrant）
-- 推荐安装 [uv](https://docs.astral.sh/uv/)，未安装时 bootstrap 会退回到标准 `venv + pip`
-
-## 首次初始化
-
-在项目根目录运行：
-
-```powershell
-.\scripts\bootstrap.ps1
-```
-
-bootstrap 会安装 Python 开发依赖和前端依赖，并在 Docker 可用时校验 Compose 配置。若希望同时启动三个基础设施容器：
-
-```powershell
-.\scripts\bootstrap.ps1 -StartInfrastructure
-```
-
-本地开发默认值是方便单机启动的开发配置，不应直接用于未来云部署。可通过环境变量覆盖，常用变量见下表。
-
-| 变量 | 默认值 | 用途 |
-|---|---|---|
-| `HUB_API_HOST` | `127.0.0.1` | API 监听地址 |
-| `HUB_API_PORT` | `8767` | API 端口；Vite 将 `/api` 代理至此 |
-| `HUB_ASSET_GATEWAY_HOST` | `127.0.0.1` | 资产网关监听地址 |
-| `HUB_ASSET_GATEWAY_PORT` | `8766` | 资产网关端口 |
-| `HUB_DATABASE_URL` | 本地 Compose 数据库 | API 数据库健康探测 |
-| `HUB_MEILISEARCH_URL` | `http://127.0.0.1:7700` | 全文索引健康探测 |
-| `HUB_MEILISEARCH_API_KEY` | 本地 Compose 开发密钥 | Meilisearch 认证 |
-| `HUB_QDRANT_URL` | `http://127.0.0.1:6333` | 向量索引健康探测 |
-| `HUB_WORKER_HEARTBEAT_PATH` | `work/state/worker-heartbeat.json` | worker/API 共用的状态文件 |
-| `HUB_WORKER_STALE_AFTER_SECONDS` | `30` | heartbeat 过期阈值 |
+- 跨领域精确、混合与语义搜索；支持题名、DOI、arXiv、作者、代码符号、批注及组合筛选。
+- 搜索卡片直接打开 PDF、代码、导读或原始 HTML，并显示阅读状态与约 60 字批语摘要；没有批注时显示“无”。
+- 统一资产详情页：元数据、阅读状态、批注、PDF、代码、导读、关系、相似论文和隔离 HTML。
+- PostgreSQL 关系图谱，支持邻居、1–3 跳、最短路径、共同邻居和状态过滤。
+- 2–4 篇论文并排比较、保存比较视图及 Markdown 导出。
+- DeepSeek 资料库问答：本地混合召回、引用锚点验证、prompt-injection 隔离和硬预算控制。
+- Obsidian 三方同步、Zotero/Better BibTeX 审查式导入包、开放 JSONL/Markdown/RO-Crate 导出。
+- 持久作业队列、lease/heartbeat/retry/dead-letter、事务 Outbox、软删除、审计与版本冲突保护。
+- Restic 加密本机备份及独立 Compose 环境恢复演练。
 
 ## 本地启动
 
-可以使用统一脚本：
+先决条件：Windows PowerShell 5.1+、Python 3.11+、Node.js 20+、pnpm 11，以及可工作的 Docker Desktop/WSL2 后端。
+
+首次安装依赖：
+
+```powershell
+.\scripts\bootstrap.ps1 -StartInfrastructure
+pnpm --filter @research-asset-hub/web build
+```
+
+启动生产构建：
 
 ```powershell
 .\scripts\hub.ps1 start
 .\scripts\hub.ps1 status
 ```
 
-也可以在四个终端中分别启动，便于调试：
+打开：
 
-```powershell
-docker compose -f .\deploy\compose.yaml up -d
-uv run rah-api
-uv run rah-worker
-uv run rah-asset-gateway
-pnpm dev:web
-```
-
-若 bootstrap 使用了 `venv + pip` 回退路径，把前三条 `uv run ...` 替换为：
-
-```powershell
-.\.venv\Scripts\rah-api.exe
-.\.venv\Scripts\rah-worker.exe
-.\.venv\Scripts\rah-asset-gateway.exe
-```
-
-启动后：
-
-- 平台壳：<http://127.0.0.1:8765>
+- 网站：<http://127.0.0.1:8765>
 - API 文档：<http://127.0.0.1:8767/docs>
-- 聚合健康状态：<http://127.0.0.1:8767/api/health>
-- 资产网关健康状态：<http://127.0.0.1:8766/health>
+- 健康检查：<http://127.0.0.1:8767/api/health>
+- 隔离资产网关：<http://127.0.0.1:8766/health>
 
-如果基础设施或 worker 尚未启动，API 仍会正常响应；顶层状态为 `degraded`，各组件包含独立错误和延迟信息。所有组件就绪时状态变为 `healthy`。
-
-## 只读检查与试导入
+`start` 只提供 `apps/web/dist` 中的构建产物；需要 Vite 热更新时使用：
 
 ```powershell
-.\scripts\preflight.ps1
-.\scripts\hub.ps1 inventory -All
-.\scripts\hub.ps1 ingest -All -DryRun
+.\scripts\hub.ps1 dev
 ```
 
-报告写入 `work/validation/`。最近一次基线为 6 个来源、428 条记录、2,161 个表示候选和 1,753 个关系候选，且没有写入来源目录或数据库。
-
-增加现有领域中的论文后，更新该领域正式 manifest 并重新执行 dry-run。增加新领域时，在 `config/sources.yaml` 注册来源；常见 JSON 结构可使用 `generic_manifest`，特殊结构再注册独立适配器。
-
-## 停止与数据保留
+停止应用与基础设施：
 
 ```powershell
 .\scripts\hub.ps1 stop
 ```
 
-或只停止基础设施：
+普通停止不会删除数据库和索引卷。不要给 Compose 添加 `--volumes`，除非明确要永久删除本地状态。
+
+## 日常更新资料
+
+先做只读检查，再正式增量导入：
 
 ```powershell
-docker compose -f .\deploy\compose.yaml down
+.\scripts\hub.ps1 preflight
+.\scripts\hub.ps1 inventory -All
+.\scripts\hub.ps1 ingest -All -DryRun
+.\scripts\hub.ps1 ingest -All
 ```
 
-普通 `down` 不会删除命名卷。不要添加 `--volumes`，除非明确要永久删除本地数据库和索引状态。
+正式导入是幂等的；连续执行两次时，第二次的论文、仓库、关系和表示新增数应全部为 0。报告写入 `work/validation/`。
 
-## 开发检查
+增加现有领域论文时，更新相应来源 manifest。增加新领域时，只需在 `config/sources.yaml` 注册新的只读来源；常见 JSON manifest 使用通用适配器即可，不需要修改前端领域枚举。
+
+重新抽取和构建正式索引：
 
 ```powershell
-uv run ruff check apps packages migrations tests
-uv run ruff format --check apps packages migrations tests
-uv run mypy apps packages
-uv run pytest
-pnpm lint
-pnpm typecheck
-pnpm build
-docker compose -f .\deploy\compose.yaml config --quiet
+.\.venv\Scripts\python.exe scripts\seed_jobs.py
+.\.venv\Scripts\python.exe -m apps.worker.main
+.\.venv\Scripts\python.exe scripts\build_indexes.py `
+  --version bge_m3_v1 `
+  --report work\validation\index-build-bge-m3.json
 ```
+
+只更新 Meilisearch 而保留向量：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_indexes.py `
+  --version bge_m3_v1 `
+  --keyword-only `
+  --report work\validation\index-build-keywords.json
+```
+
+## 开放导出与外部工具
+
+生成不包含来源二进制的开放目录：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_catalog.py
+```
+
+输出位于 `outputs/open-catalog/`。每个资产包含稳定 `asset_id`、`asset.json`、`note.md`、表示清单、关系与溯源；原文件只以来源别名、相对路径和 hash 引用。
+
+Obsidian 默认同步到现有 Vault 的 `00_Home/Research Asset Hub`：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\sync_obsidian.py --preview-only
+.\.venv\Scripts\python.exe scripts\sync_obsidian.py
+```
+
+同步采用 base/hub/external 三方比较；同字段冲突进入网站的“同步冲突”页，不会静默覆盖。
+
+生成 Zotero 审查式导入包：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_zotero.py
+```
+
+在 Zotero 中安装 Better BibTeX 后，人工确认导入 `outputs/zotero/research-assets.csl.json` 或 `research-assets.bib`。平台读取 Zotero 本地 API；当前不会直接修改 Zotero SQLite。
+
+## DeepSeek 问答
+
+DeepSeek 密钥只存 Windows Credential Manager，服务名为 `research-asset-hub`，账户名为 `deepseek-api-key`；不要写入 `.env`、源码或命令日志。模型通过官方 `/models` 动态发现，业务代码不固定模型 ID。
+
+默认硬预算：
+
+- 单次任务不超过 ¥5
+- 单日不超过 ¥10
+- 单月不超过 ¥50
+- 预留 20% 安全余量
+
+未知价格、预算超限、模型不可用或引用校验失败时，平台保留本地检索证据并停止生成；不返回未经验证的模型引用。
+
+## 备份与恢复
+
+备份仓库默认为：
+
+`C:\Users\ExampleUser\Documents\ResearchAssetHubBackups`
+
+创建加密快照：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\create_backup.py `
+  --report work\validation\backup-final.json
+```
+
+恢复演练必须使用该次输出的 `snapshot_id`，并使用唯一 `run-id`：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\restore_rehearsal.py `
+  --snapshot <snapshot_id> `
+  --run-id <unique-run-id>
+```
+
+演练使用独立 Compose project、卷、数据库和端口，恢复后重建 Meilisearch/Qdrant 并验证固定查询，不覆盖活跃环境。当前仓库仍是同机副本，发布报告会持续标记 `local-copy-only` 风险；重要资料还应增加外置硬盘、NAS 或云端副本。
+
+## 验证与发布报告
+
+```powershell
+.\.venv\Scripts\ruff.exe check apps packages scripts tests
+.\.venv\Scripts\mypy.exe --strict apps packages scripts
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe scripts\verify_source_integrity.py
+pnpm --filter @research-asset-hub/web lint
+pnpm --filter @research-asset-hub/web typecheck
+pnpm --filter @research-asset-hub/web test -- --run
+pnpm --filter @research-asset-hub/web test:e2e
+pnpm --filter @research-asset-hub/web build
+```
+
+完成最终备份与恢复演练后生成发布报告：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\generate_release_report.py `
+  --restore-report work\restore-tests\<run-id>\report.json
+```
+
+推荐交付入口：
+
+- `outputs/release/release-report.md`
+- `outputs/release/release-report.json`
+- `outputs/open-catalog/`
 
 ## 安全边界
 
-- 所有宿主机监听地址默认为 `127.0.0.1`，当前版本不适合直接暴露到互联网。
-- 资产网关使用独立端口，并在来源注册功能完成前拒绝文件请求。
-- Compose 中的默认口令只用于本机开发。未来上云前必须改用外部密钥、TLS、认证、授权和异盘备份。
-- 六个现有领域目录是只读来源；运行骨架本身不会扫描、移动、改名或删除其中任何文件。
+- Web、API、资产网关、PostgreSQL、Meilisearch 和 Qdrant 均只监听 `127.0.0.1`。
+- 网关只接受已登记 `representation_id` 的短时签名会话，不接受任意绝对路径。
+- 原始 HTML 在独立 origin 中按静态、可信本地交互或需要联网三类 CSP/sandbox 策略打开。
+- 所有业务写操作在同一事务写审计和 Outbox；删除默认是软删除，来源文件永不随 API 删除。
+- `deploy/cloud/` 只提供未来 Caddy/TLS、OIDC、secret 注入和私有存储接口模板；当前没有公开部署。

@@ -57,6 +57,7 @@ def test_external_identifier_is_canonical_and_unique() -> None:
     )
     assert identifier.scheme == "doi"
     assert identifier.canonical == "10.1000/abc"
+    assert identifier.is_identity is True
 
     with pytest.raises(ValidationError, match="must not contain duplicates"):
         NormalizedAsset(
@@ -66,6 +67,20 @@ def test_external_identifier_is_canonical_and_unique() -> None:
                 {"scheme": "doi", "value": "https://doi.org/10.1000/abc"},
             ],
         )
+
+
+def test_external_identifier_scope_distinguishes_zotero_libraries() -> None:
+    asset = NormalizedAsset(
+        title="Shared item key",
+        external_identifiers=[
+            {"scheme": "zotero", "scope": "library-a", "value": "ABC123"},
+            {"scheme": "zotero", "scope": "library-b", "value": "ABC123"},
+            {"scheme": "url", "value": "https://example.org/landing"},
+        ],
+    )
+
+    assert len(asset.external_identifiers) == 3
+    assert asset.external_identifiers[-1].is_identity is False
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,88 @@
+import { Check, GitCompareArrows } from "lucide-react";
+import { Link } from "react-router-dom";
+import { getAssetDomains, getReadingStatus, type Asset } from "../api/types";
+import { annotationSnippet, formatAuthors } from "../lib/format";
+import { useCompare } from "../state/CompareContext";
+import { ReadingStatusControl } from "./ReadingStatusControl";
+import { RepresentationActions } from "./RepresentationActions";
+
+export function AssetCard({
+  asset,
+  compact = false,
+}: {
+  asset: Asset;
+  compact?: boolean;
+}) {
+  const compare = useCompare();
+  const selected = compare.has(asset.id);
+  const domains = getAssetDomains(asset);
+
+  return (
+    <article className={`asset-card ${compact ? "is-compact" : ""}`}>
+      <div className="asset-card-main">
+        <div className="asset-card-kicker">
+          <span className="asset-type">{asset.asset_type ?? asset.type ?? "asset"}</span>
+          {asset.year && <span>{asset.year}</span>}
+          {asset.venue && <span>{asset.venue}</span>}
+        </div>
+        <h3>
+          <Link to={`/assets/${encodeURIComponent(asset.id)}`}>
+            {asset.title_zh || asset.title}
+          </Link>
+        </h3>
+        {asset.title_zh && asset.title_zh !== asset.title && (
+          <p className="original-title">{asset.title}</p>
+        )}
+        <p className="asset-authors">{formatAuthors(asset.authors)}</p>
+        {!compact && (
+          <p className="asset-summary">
+            {asset.summary || asset.abstract || "暂无摘要。"}
+          </p>
+        )}
+        <p className="annotation-snippet">
+          <strong>批注：</strong>
+          {annotationSnippet(asset)}
+        </p>
+        {!!domains.length && (
+          <div className="tag-row" aria-label="所属领域">
+            {domains.slice(0, 4).map((domain) => (
+              <Link to={`/domains/${encodeURIComponent(domain)}`} key={domain}>
+                {domain}
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="asset-card-side">
+        <ReadingStatusControl
+          assetId={asset.id}
+          value={getReadingStatus(asset)}
+          compact
+        />
+        <button
+          className={`compare-toggle ${selected ? "is-selected" : ""}`}
+          type="button"
+          aria-pressed={selected}
+          title={!selected && compare.assets.length >= 4 ? "最多对比 4 篇" : undefined}
+          onClick={() => compare.toggle(asset)}
+          disabled={!selected && compare.assets.length >= 4}
+        >
+          {selected ? (
+            <Check size={14} aria-hidden="true" />
+          ) : (
+            <GitCompareArrows size={14} aria-hidden="true" />
+          )}
+          {selected ? "已加入对比" : "加入对比"}
+        </button>
+      </div>
+      {!compact && (
+        <div className="asset-card-footer">
+          <RepresentationActions representations={asset.representations} />
+          {typeof asset.score === "number" && (
+            <span className="score">相关度 {Math.round(asset.score * 100)}%</span>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}

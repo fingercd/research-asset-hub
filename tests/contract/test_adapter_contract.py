@@ -208,6 +208,30 @@ def test_path_traversal_has_structured_error(tmp_path: Path) -> None:
     assert captured.value.code == AdapterErrorCode.PATH_OUTSIDE_ROOT
 
 
+def test_windows_manifest_path_maps_safely_inside_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HUB_HOST_WORKSPACE_ROOT", "D:\\Research")
+    monkeypatch.setenv("HUB_CONTAINER_WORKSPACE_ROOT", "/workspace")
+    adapter = GenericManifestAdapter(
+        SourceConfig(
+            id="generic",
+            label="Generic",
+            adapter="generic_manifest",
+            root="/workspace/domain",
+            manifest="manifest.json",
+            asset_roots={"repository": "code"},
+        )
+    )
+    assert (
+        adapter.path_ref(
+            "D:\\Research\\domain\\code\\owner--repo",
+            root_key="repository",
+        )
+        == "owner--repo"
+    )
+
+
 def test_invalid_json_has_structured_error(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{invalid", encoding="utf-8")
@@ -352,12 +376,12 @@ def test_rl_stale_absolute_repository_path_is_safely_relocated(
     assert "path_outside_root" not in warning_codes
 
 
-def test_real_six_source_record_counts_when_collections_are_present() -> None:
+def test_real_seven_source_record_counts_when_collections_are_present() -> None:
     sources_file = PROJECT_ROOT / "config" / "sources.yaml"
     document = yaml.safe_load(sources_file.read_text(encoding="utf-8"))
     configured = [SourceConfig.model_validate(item) for item in document["sources"]]
     if not all((PROJECT_ROOT / config.root_path).resolve().is_dir() for config in configured):
-        pytest.skip("The six local collections are not present beside the project")
+        pytest.skip("The seven local collections are not present beside the project")
 
     actual: dict[str, int] = {}
     reinforcement_learning_records: list[NormalizedRecord] = []
@@ -382,6 +406,7 @@ def test_real_six_source_record_counts_when_collections_are_present() -> None:
         "reinforcement_learning": 108,
         "fine_tuning": 67,
         "generation": 64,
+        "llm_tech_reports": 90,
     }
     rl_warning_codes = [
         warning.code for record in reinforcement_learning_records for warning in record.warnings

@@ -1,0 +1,260 @@
+name: research-asset-hub-cloud
+
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      HUB_ACME_EMAIL: ${HUB_ACME_EMAIL:?set HUB_ACME_EMAIL}
+      HUB_ASSET_DOMAIN: ${HUB_ASSET_DOMAIN:?set HUB_ASSET_DOMAIN}
+      HUB_DOMAIN: ${HUB_DOMAIN:?set HUB_DOMAIN}
+    ports:
+      - "0.0.0.0:${HUB_HTTP_PORT:-80}:80"
+      - "0.0.0.0:${HUB_HTTPS_PORT:-443}:443"
+      - "0.0.0.0:${HUB_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      hub:
+        condition: service_healthy
+      oauth2-proxy:
+        condition: service_started
+    networks:
+      edge:
+        ipv4_address: ${HUB_CADDY_EDGE_IP:-172.30.0.10}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.2
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=${HUB_OIDC_ISSUER_URL:?set HUB_OIDC_ISSUER_URL}
+      - --client-id=${HUB_OIDC_CLIENT_ID:?set HUB_OIDC_CLIENT_ID}
+      - --client-secret-file=/run/secrets/oidc_client_secret
+      - --cookie-secret-file=/run/secrets/oidc_cookie_secret
+      - --authenticated-emails-file=/run/secrets/oidc_allowed_emails
+      - --email-domain=*
+      - --redirect-url=https://${HUB_DOMAIN:?set HUB_DOMAIN}/oauth2/callback
+      - --whitelist-domain=${HUB_COOKIE_DOMAIN:?set HUB_COOKIE_DOMAIN}
+      - --cookie-domain=${HUB_COOKIE_DOMAIN:?set HUB_COOKIE_DOMAIN}
+      - --cookie-name=__Secure-rah_oidc
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      - --cookie-expire=8h
+      - --cookie-refresh=1h
+      - --code-challenge-method=S256
+      - --scope=openid profile email
+      - --http-address=0.0.0.0:4180
+      - --upstream=static://202
+      - --reverse-proxy=true
+      - --trusted-proxy-ip=${HUB_CADDY_EDGE_IP:-172.30.0.10}
+      - --set-xauthrequest=true
+      - --pass-access-token=false
+      - --pass-authorization-header=false
+      - --skip-provider-button=true
+      - --silence-ping-logging=true
+    secrets:
+      - oidc_allowed_emails
+      - oidc_client_secret
+      - oidc_cookie_secret
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  hub:
+    image: ${HUB_APP_IMAGE:-research-asset-hub:cloud-template}
+    build:
+      context: ../..
+      dockerfile: deploy/cloud/Dockerfile.cloud
+    environment:
+      HUB_API_HOST: 0.0.0.0
+      HUB_ASSET_GATEWAY_HOST: 0.0.0.0
+      HUB_DATABASE_URL_FILE: /run/secrets/postgres_password
+      HUB_GATEWAY_ORIGIN: https://${HUB_ASSET_DOMAIN:?set HUB_ASSET_DOMAIN}
+      HUB_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
+      HUB_MEILISEARCH_API_KEY_FILE: /run/secrets/meilisearch_master_key
+      HUB_MEILISEARCH_URL: http://meilisearch:7700
+      HUB_QDRANT_URL: http://qdrant:6333
+      HUB_SOURCES_CONFIG_PATH: /etc/research-asset-hub/sources.yaml
+      HUB_WEB_HOST: 0.0.0.0
+      HUB_WEB_ORIGIN: https://${HUB_DOMAIN:?set HUB_DOMAIN}
+      HUB_WORKER_HEARTBEAT_PATH: /var/lib/research-asset-hub/worker-heartbeat.json
+      HF_HOME: /var/lib/research-asset-hub/models
+    secrets:
+      - gateway_secret
+      - meilisearch_master_key
+      - postgres_password
+    volumes:
+      - ./sources.cloud.example.yaml:/etc/research-asset-hub/sources.yaml:ro
+      - type: bind
+        source: ${HUB_PRIVATE_ASSET_ROOT:?set HUB_PRIVATE_ASSET_ROOT}
+        target: /srv/research-assets
+        read_only: true
+        bind:
+          create_host_path: false
+      - hub-state:/var/lib/research-asset-hub
+      - hub-outputs:/app/outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; [urllib.request.urlopen(u, timeout=3).read() for u in ('http://127.0.0.1:8765/','http://127.0.0.1:8767/api/health','http://127.0.0.1:8766/health')]",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+    networks:
+      - edge
+      - data
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: research_asset_hub
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_USER: research_hub
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research_hub -d research_asset_hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - data
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export MEILI_MASTER_KEY="$$(cat /run/secrets/meilisearch_master_key)"
+        exec /bin/meilisearch
+    environment:
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+    secrets:
+      - meilisearch_master_key
+    volumes:
+      - meilisearch-data:/meili_data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - --header=\"Authorization: Bearer $$(cat /run/secrets/meilisearch_master_key)\" http://127.0.0.1:7700/health | grep -q available",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    networks:
+      - data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    networks:
+      - data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: ${HUB_EDGE_SUBNET:-172.30.0.0/24}
+  data:
+    internal: true
+
+volumes:
+  caddy-config:
+  caddy-data:
+  hub-outputs:
+  hub-state:
+  meilisearch-data:
+  postgres-data:
+  qdrant-data:
+
+secrets:
+  gateway_secret:
+    file: ${HUB_SECRET_DIR:-./secrets}/gateway_secret
+  meilisearch_master_key:
+    file: ${HUB_SECRET_DIR:-./secrets}/meilisearch_master_key
+  oidc_allowed_emails:
+    file: ${HUB_SECRET_DIR:-./secrets}/oidc_allowed_emails
+  oidc_client_secret:
+    file: ${HUB_SECRET_DIR:-./secrets}/oidc_client_secret
+  oidc_cookie_secret:
+    file: ${HUB_SECRET_DIR:-./secrets}/oidc_cookie_secret
+  postgres_password:
+    file: ${HUB_SECRET_DIR:-./secrets}/postgres_password

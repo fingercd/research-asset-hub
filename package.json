@@ -7,6 +7,7 @@
     "dev:web": "pnpm --filter @research-asset-hub/web dev",
     "build": "pnpm --filter @research-asset-hub/web build",
     "lint": "pnpm --filter @research-asset-hub/web lint",
-    "typecheck": "pnpm --filter @research-asset-hub/web typecheck"
+    "typecheck": "pnpm --filter @research-asset-hub/web typecheck",
+    "test": "pnpm --filter @research-asset-hub/web test"
   }
 }

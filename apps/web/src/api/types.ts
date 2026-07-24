@@ -1,0 +1,252 @@
+export type ReadingStatus = "unread" | "reading" | "read";
+export type SearchMode = "exact" | "hybrid" | "semantic";
+
+export interface ApiList<T> {
+  items: T[];
+  next_cursor: string | null;
+  total?: number;
+}
+
+export interface Representation {
+  id: string;
+  asset_id?: string;
+  representation_type?: string;
+  type?: string;
+  role?: string;
+  label?: string;
+  materialization_kind?: string;
+  availability?: string;
+  path_ref?: string | null;
+  entrypoint?: string | null;
+  external_url?: string | null;
+  open_url?: string | null;
+  url?: string | null;
+  mime_type?: string | null;
+  size_bytes?: number | null;
+  sha256?: string | null;
+  network_required?: boolean;
+  attributes?: Record<string, unknown>;
+  row_version?: number;
+}
+
+export interface Annotation {
+  id: string;
+  asset_id: string;
+  representation_id?: string | null;
+  kind?: string;
+  title?: string | null;
+  summary?: string | null;
+  body_markdown?: string;
+  body?: string;
+  pinned?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  row_version?: number;
+}
+
+export interface Asset {
+  id: string;
+  asset_type?: string;
+  type?: string;
+  title: string;
+  title_zh?: string | null;
+  subtitle?: string | null;
+  authors?: string[];
+  year?: number | null;
+  venue?: string | null;
+  language?: string | null;
+  abstract?: string | null;
+  summary?: string | null;
+  content?: string | null;
+  analysis?: Record<string, unknown>;
+  attributes?: Record<string, unknown>;
+  domain_slugs?: string[];
+  domains?: Array<string | { slug: string; label?: string }>;
+  tags?: string[];
+  source_urls?: string[];
+  reading_status?: ReadingStatus;
+  reading_state?: { status?: ReadingStatus } | ReadingStatus | null;
+  annotation_summary?: string | null;
+  annotations?: Annotation[];
+  representations?: Representation[];
+  score?: number;
+  updated_at?: string;
+  created_at?: string;
+  deleted_at?: string | null;
+  row_version?: number;
+  [key: string]: unknown;
+}
+
+export interface Dashboard {
+  stats?: {
+    assets?: number;
+    papers?: number;
+    unread?: number;
+    reading?: number;
+    read?: number;
+    domains?: number;
+    relations?: number;
+    annotations?: number;
+  };
+  total_assets?: number;
+  total_papers?: number;
+  unread_count?: number;
+  reading_count?: number;
+  read_count?: number;
+  domain_count?: number;
+  relation_count?: number;
+  annotation_count?: number;
+  recent_assets?: Asset[];
+  continue_reading?: Asset[];
+  domains?: Domain[];
+  index?: IndexState;
+  index_state?: IndexState;
+}
+
+export interface IndexState {
+  status?: "ready" | "building" | "stale" | "unavailable" | string;
+  indexed_assets?: number;
+  pending_assets?: number;
+  updated_at?: string;
+  detail?: string;
+}
+
+export interface Domain {
+  slug: string;
+  label?: string;
+  name?: string;
+  description?: string | null;
+  asset_count?: number;
+  paper_count?: number;
+  annotation_count?: number;
+  reading_counts?: Partial<Record<ReadingStatus, number>>;
+  tags?: string[];
+  recent_assets?: Asset[];
+  updated_at?: string;
+  [key: string]: unknown;
+}
+
+export interface GraphNode {
+  id: string;
+  label?: string;
+  title?: string;
+  asset_type?: string;
+  domain_slugs?: string[];
+  year?: number | null;
+  reading_status?: ReadingStatus;
+}
+
+export interface GraphEdge {
+  id?: string;
+  source?: string;
+  target?: string;
+  subject_asset_id?: string;
+  object_asset_id?: string;
+  relation_type?: string;
+  label?: string;
+  confidence?: number | null;
+}
+
+export interface GraphResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  truncated?: boolean;
+}
+
+export interface Comparison {
+  id?: string;
+  title?: string;
+  asset_ids?: string[];
+  assets?: Asset[];
+  columns?: Array<{
+    key?: string;
+    label?: string;
+    values?: Record<string, string | string[] | number | null>;
+  }>;
+  synthesis?: string | null;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface ChatCitation {
+  asset_id?: string;
+  title?: string;
+  excerpt?: string;
+  representation_id?: string;
+  url?: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations?: ChatCitation[];
+  conversation_id?: string;
+}
+
+export interface Job {
+  id: string;
+  type?: string;
+  name?: string;
+  status?: "pending" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  progress?: number | null;
+  detail?: string | null;
+  error?: string | { detail?: string; message?: string } | null;
+  created_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  row_version?: number;
+  [key: string]: unknown;
+}
+
+export interface SyncConflict {
+  id: string;
+  entity_type?: string;
+  asset_id?: string | null;
+  title?: string;
+  field?: string;
+  status?: string;
+  local_value?: unknown;
+  incoming_value?: unknown;
+  source?: string;
+  detected_at?: string;
+  row_version?: number;
+  [key: string]: unknown;
+}
+
+export interface Settings {
+  app?: Record<string, unknown>;
+  search?: Record<string, unknown>;
+  rag?: Record<string, unknown>;
+  sources?: Array<Record<string, unknown>>;
+  integrations?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface ComponentHealth {
+  status: "healthy" | "unavailable" | "stale" | string;
+  detail?: string;
+  latency_ms?: number | null;
+}
+
+export interface HealthResponse {
+  service: string;
+  status: "healthy" | "degraded";
+  checked_at: string;
+  components: Record<string, ComponentHealth>;
+}
+
+export function getReadingStatus(asset: Asset): ReadingStatus {
+  if (asset.reading_status) return asset.reading_status;
+  if (typeof asset.reading_state === "string") return asset.reading_state;
+  return asset.reading_state?.status ?? "unread";
+}
+
+export function getAssetDomains(asset: Asset): string[] {
+  if (asset.domain_slugs?.length) return asset.domain_slugs;
+  return (asset.domains ?? []).map((domain) =>
+    typeof domain === "string" ? domain : domain.slug,
+  );
+}
+
+export function getRepresentationType(representation: Representation): string {
+  return (representation.representation_type ?? representation.type ?? "").toLowerCase();
+}

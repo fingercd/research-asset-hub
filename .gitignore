@@ -25,10 +25,11 @@ state/backups/
 state/catalog-export/
 outputs/reports/
 outputs/releases/
+outputs/open-catalog/
+outputs/zotero/
 
 # Editors and operating systems
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-

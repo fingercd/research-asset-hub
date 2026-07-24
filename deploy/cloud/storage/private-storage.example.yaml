@@ -1,0 +1,12 @@
+apiVersion: research-asset-hub/v1alpha1
+kind: PrivateAssetStorage
+spec:
+  driver: filesystem
+  readOnly: true
+  capabilities:
+    - stat
+    - range-read
+    - list
+    - checksum
+  filesystem:
+    containerPath: /srv/research-assets

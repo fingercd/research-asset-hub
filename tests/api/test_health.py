@@ -43,7 +43,7 @@ class FakeConnection:
 
 
 def settings(**overrides: Any) -> ApiSettings:
-    values = {
+    values: dict[str, Any] = {
         "database_url": "postgresql://research_hub:local-secret@127.0.0.1/research",
         "health_timeout_seconds": 0.5,
     }

@@ -18,7 +18,7 @@ def test_full_dry_run_accounts_for_sources_without_modifying_manifests() -> None
     assert report["commit_performed"] is False
     assert report["source_roots_modified"] is False
     assert report["totals"]["configured_sources"] == len(sources)
-    assert report["totals"]["normalized_records"] == expected_records == 428
+    assert report["totals"]["normalized_records"] == expected_records == 518
     assert report["reconciliation"]["unique_source_record_keys"] == expected_records
     assert report["reconciliation"]["duplicate_source_record_keys"] == []
     assert before == after
