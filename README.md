@@ -23,6 +23,13 @@ Research Asset Hub 是一个只在本机运行的个人科研数字资产平台�
 - 持久作业队列、lease/heartbeat/retry/dead-letter、事务 Outbox、软删除、审计与版本冲突保护。
 - Restic 加密本机备份及独立 Compose 环境恢复演练。
 
+## 文档入口
+
+- [完整使用手册](docs/USER_MANUAL.md)
+- [用户自行增加知识库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)
+- [后续 Agent 知识库增量规范](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)
+- [全部文档索引](docs/README.md)
+
 ## 本地启动
 
 先决条件：Windows PowerShell 5.1+、Python 3.11+、Node.js 20+、pnpm 11，以及可工作的 Docker Desktop/WSL2 后端。
@@ -75,7 +82,7 @@ pnpm --filter @research-asset-hub/web build
 
 正式导入是幂等的；连续执行两次时，第二次的论文、仓库、关系和表示新增数应全部为 0。报告写入 `work/validation/`。
 
-增加现有领域论文时，更新相应来源 manifest。增加新领域时，只需在 `config/sources.yaml` 注册新的只读来源；常见 JSON manifest 使用通用适配器即可，不需要修改前端领域枚举。
+以后由 Agent 增加资料时，不修改七个既有来源；在 `config/intake/<source-id>/manifest.json` 创建冻结的旁车清单，并在 `config/sources.yaml` 注册新的只读来源。增加新领域时，还要在 `config/taxonomy.yaml` 登记稳定领域 slug；常见 JSON manifest 使用通用适配器即可，不需要修改前端领域枚举。
 
 重新抽取和构建正式索引：
 

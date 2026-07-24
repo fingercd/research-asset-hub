@@ -4,13 +4,40 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
 from packages.backup.release_report import (
     ReleaseReportInputs,
     build_release_report,
+    collect_database_snapshot,
     render_release_markdown,
     write_release_report,
 )
+from packages.domain.models import Base, Source
 from scripts.generate_release_report import _discover_reports
+
+_IDEMPOTENCY_COUNTERS = (
+    "source_records_created",
+    "source_record_versions_created",
+    "paper_assets_created",
+    "repository_assets_created",
+    "representations_created",
+    "relations_created",
+    "relation_evidence_created",
+    "field_claims_created",
+)
+_REQUIRED_FORMAL_COUNTERS = (
+    *_IDEMPOTENCY_COUNTERS,
+    "relation_candidates",
+    "relation_candidates_resolved",
+    "relation_candidates_unresolved",
+    "representation_candidates",
+    "representations_available",
+    "representations_missing",
+    "unapproved_merge_groups",
+)
 
 
 def _database() -> dict[str, object]:
@@ -19,7 +46,23 @@ def _database() -> dict[str, object]:
         "sources": {
             "count": 7,
             "all_read_only": True,
-            "items": [{"alias": "legacy", "read_only": True, "enabled": True}],
+            "items": [
+                *[
+                    {
+                        "alias": f"legacy-{index}",
+                        "read_only": True,
+                        "enabled": True,
+                        "frozen_manifest_sha256": f"{index:x}" * 64,
+                    }
+                    for index in range(6)
+                ],
+                {
+                    "alias": "new-domain",
+                    "read_only": True,
+                    "enabled": True,
+                    "frozen_manifest_sha256": "b" * 64,
+                },
+            ],
         },
         "assets": {
             "total": 801,
@@ -139,21 +182,38 @@ def _reports() -> dict[str, dict[str, object]]:
             source_count=6, records=428, include_new=False
         ),
         "formal_import": {
+            "schema_version": 2,
             "status": "passed",
             "source_roots_modified": False,
+            "validated_dry_run": {
+                "status": "passed",
+                "generated_at": "2026-07-25T00:00:00+00:00",
+                "normalized_records": 518,
+                "unapproved_review_groups": 0,
+            },
             "counters": {
+                "source_records_seen": 518,
                 "source_records_created": 0,
+                "source_record_versions_created": 0,
                 "paper_assets_created": 0,
                 "repository_assets_created": 0,
                 "representations_created": 0,
+                "representations_reused": 2408,
                 "relations_created": 0,
                 "relation_evidence_created": 0,
+                "field_claims_created": 0,
+                "paper_assets_total": 483,
+                "repository_assets_total": 316,
+                "source_record_candidates": 518,
                 "relation_candidates": 1753,
                 "relation_candidates_resolved": 385,
                 "relation_candidates_unresolved": 1368,
                 "representation_candidates": 2408,
                 "representations_available": 2399,
                 "representations_missing": 9,
+                "strong_merge_groups": 25,
+                "reviewed_merge_groups": 5,
+                "unapproved_merge_groups": 0,
             },
         },
         "source_integrity": {
@@ -247,6 +307,17 @@ def _reports() -> dict[str, dict[str, object]]:
     }
 
 
+def _gate(report: dict[str, object], identifier: str) -> dict[str, object]:
+    gates = report["gates"]
+    assert isinstance(gates, list)
+    result = next(
+        item
+        for item in gates
+        if isinstance(item, dict) and item.get("id") == identifier
+    )
+    return result
+
+
 def test_new_domain_growth_does_not_fail_legacy_exact_counts() -> None:
     report = build_release_report(
         ReleaseReportInputs(
@@ -266,6 +337,95 @@ def test_new_domain_growth_does_not_fail_legacy_exact_counts() -> None:
     assert report["scope"]["growth"]["domain_delta"] == 1
     assert report["source_integrity"]["added_sources"] == ["new-domain"]
     assert report["status"] == "warn"
+
+
+def test_database_snapshot_projects_frozen_manifest_digest_without_source_config() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            Source(
+                alias="intake-example",
+                label="Example",
+                adapter="generic_manifest",
+                root_path="config/intake/intake-example",
+                manifest_path="manifest.json",
+                read_only=True,
+                enabled=True,
+                config={
+                    "_frozen_manifest_sha256": "A" * 64,
+                    "private_config_value": "must-not-be-exported",
+                },
+            )
+        )
+        session.commit()
+
+        snapshot = collect_database_snapshot(session)
+
+    source_items = snapshot["sources"]["items"]
+    assert source_items == [
+        {
+            "alias": "intake-example",
+            "read_only": True,
+            "enabled": True,
+            "frozen_manifest_sha256": "a" * 64,
+        }
+    ]
+    assert "private_config_value" not in json.dumps(snapshot)
+
+
+@pytest.mark.parametrize(
+    "failure_kind,expected_field",
+    [
+        ("missing_frozen", "missing_frozen_fingerprints"),
+        ("mismatch", "frozen_fingerprint_mismatches"),
+        ("missing_database_source", "missing_database_sources"),
+        ("missing_inventory_source", "missing_inventory_sources"),
+    ],
+)
+def test_source_fingerprint_gate_requires_frozen_digest_for_every_current_source(
+    failure_kind: str,
+    expected_field: str,
+) -> None:
+    database = _database()
+    reports = _reports()
+    database_sources = database["sources"]
+    assert isinstance(database_sources, dict)
+    database_items = database_sources["items"]
+    assert isinstance(database_items, list)
+    current_inventory = reports["inventory_current"]
+    current_sources = current_inventory["sources"]
+    assert isinstance(current_sources, list)
+
+    if failure_kind == "missing_inventory_source":
+        current_sources[:] = [
+            item
+            for item in current_sources
+            if isinstance(item, dict) and item.get("id") != "new-domain"
+        ]
+    else:
+        new_database_source = next(
+            item
+            for item in database_items
+            if isinstance(item, dict) and item.get("alias") == "new-domain"
+        )
+        if failure_kind == "missing_frozen":
+            new_database_source.pop("frozen_manifest_sha256")
+        elif failure_kind == "mismatch":
+            new_database_source["frozen_manifest_sha256"] = "c" * 64
+        else:
+            database_items.remove(new_database_source)
+
+    report = build_release_report(
+        ReleaseReportInputs(database=database, reports=reports)
+    )
+    gate = _gate(report, "source-fingerprints")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+
+    assert gate["status"] == "fail"
+    assert observed[expected_field]
+    assert report["status"] == "fail"
 
 
 def test_source_representation_mismatch_is_a_release_failure() -> None:
@@ -299,6 +459,166 @@ def test_source_representation_mismatch_is_a_release_failure() -> None:
     assert report["failures"]["source_representation_mismatches"][0][
         "reasons"
     ] == ["sha256_mismatch"]
+
+
+def test_unapproved_weak_merge_is_a_release_failure() -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    counters = formal_import["counters"]
+    assert isinstance(counters, dict)
+    counters["unapproved_merge_groups"] = 1
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = next(
+        item for item in report["gates"] if item["id"] == "idempotent-import"
+    )
+
+    assert gate["status"] == "fail"
+    assert report["status"] == "fail"
+
+
+@pytest.mark.parametrize("schema_version", [None, 0, 1, 3, "2", True])
+def test_formal_import_gate_rejects_missing_or_old_schema(
+    schema_version: object,
+) -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    if schema_version is None:
+        formal_import.pop("schema_version")
+    else:
+        formal_import["schema_version"] = schema_version
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = _gate(report, "idempotent-import")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+
+    assert gate["status"] == "fail"
+    assert observed["schema_valid"] is False
+    assert report["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("validated_dry_run", None),
+        ("status", None),
+        ("status", "failed"),
+        ("unapproved_review_groups", None),
+        ("unapproved_review_groups", 1),
+        ("unapproved_review_groups", True),
+        ("unapproved_review_groups", "0"),
+    ],
+)
+def test_formal_import_gate_requires_successful_validated_dry_run(
+    field_name: str,
+    field_value: object,
+) -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    if field_name == "validated_dry_run":
+        formal_import.pop(field_name)
+    else:
+        validated_dry_run = formal_import["validated_dry_run"]
+        assert isinstance(validated_dry_run, dict)
+        if field_value is None:
+            validated_dry_run.pop(field_name)
+        else:
+            validated_dry_run[field_name] = field_value
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = _gate(report, "idempotent-import")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+    validated_observed = observed["validated_dry_run"]
+    assert isinstance(validated_observed, dict)
+
+    assert gate["status"] == "fail"
+    assert validated_observed["valid"] is False
+    assert report["status"] == "fail"
+
+
+@pytest.mark.parametrize("counter_name", _REQUIRED_FORMAL_COUNTERS)
+def test_formal_import_gate_rejects_each_missing_required_counter(
+    counter_name: str,
+) -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    counters = formal_import["counters"]
+    assert isinstance(counters, dict)
+    counters.pop(counter_name)
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = _gate(report, "idempotent-import")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+
+    assert gate["status"] == "fail"
+    assert counter_name in observed["missing_required_counters"]
+    assert report["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "counter_name,invalid_value",
+    [
+        ("source_records_created", -1),
+        ("source_record_versions_created", True),
+        ("field_claims_created", 0.0),
+        ("unapproved_merge_groups", "0"),
+    ],
+)
+def test_formal_import_gate_rejects_invalid_required_counter(
+    counter_name: str,
+    invalid_value: object,
+) -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    counters = formal_import["counters"]
+    assert isinstance(counters, dict)
+    counters[counter_name] = invalid_value
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = _gate(report, "idempotent-import")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+
+    assert gate["status"] == "fail"
+    assert counter_name in observed["invalid_required_counters"]
+    assert report["status"] == "fail"
+
+
+@pytest.mark.parametrize("counter_name", _IDEMPOTENCY_COUNTERS)
+def test_formal_import_gate_rejects_each_nonzero_idempotency_counter(
+    counter_name: str,
+) -> None:
+    reports = _reports()
+    formal_import = reports["formal_import"]
+    counters = formal_import["counters"]
+    assert isinstance(counters, dict)
+    counters[counter_name] = 1
+
+    report = build_release_report(
+        ReleaseReportInputs(database=_database(), reports=reports)
+    )
+    gate = _gate(report, "idempotent-import")
+    observed = gate["observed"]
+    assert isinstance(observed, dict)
+    created_counters = observed["created_counters"]
+    assert isinstance(created_counters, dict)
+
+    assert gate["status"] == "fail"
+    assert created_counters[counter_name] == 1
+    assert report["status"] == "fail"
 
 
 def test_report_exposes_failures_without_private_text_or_absolute_paths() -> None:

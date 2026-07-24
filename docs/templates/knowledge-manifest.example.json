@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "example-paper-2026",
+      "title": "Example Paper Title",
+      "title_zh": "示例论文标题",
+      "authors": [
+        "First Author",
+        "Second Author"
+      ],
+      "year": 2026,
+      "venue": "Example Venue",
+      "abstract": "论文原始摘要；没有时可以设为 null。",
+      "summary": "供个人检索和浏览的简短中文导读；没有时可以设为 null。",
+      "tags": [
+        "example-topic"
+      ],
+      "source_urls": [
+        "https://example.org/paper"
+      ],
+      "doi": null,
+      "arxiv_id": null,
+      "representations": {
+        "pdf": {
+          "path": "paper.pdf",
+          "url": null,
+          "sha256": null
+        },
+        "code": {
+          "path": "code",
+          "url": "https://github.com/example/example-repository"
+        },
+        "guide": {
+          "path": "guide.html"
+        },
+        "html": {
+          "path": null
+        },
+        "note": {
+          "path": "note.md"
+        }
+      },
+      "relations": {
+        "related_record_ids": []
+      }
+    }
+  ]
+}

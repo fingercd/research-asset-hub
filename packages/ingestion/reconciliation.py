@@ -5,14 +5,32 @@ import json
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from packages.domain.schemas import NormalizedRecord
 
 _PUNCTUATION = re.compile(r"[^\w]+", re.UNICODE)
 _SPACE = re.compile(r"\s+")
+DEFAULT_WEAK_MERGE_APPROVALS = (
+    Path(__file__).resolve().parents[2] / "config" / "identity-merge-approvals.yaml"
+)
+
+
+class UnapprovedWeakMergeError(ValueError):
+    """Raised before database writes when a weak identity group lacks approval."""
+
+    def __init__(self, groups: list[dict[str, Any]]) -> None:
+        self.groups = groups
+        rendered = json.dumps(groups, ensure_ascii=False, sort_keys=True)
+        super().__init__(
+            "Unapproved title/year identity merge candidates must be reviewed "
+            f"and allowlisted before formal import: {rendered}"
+        )
 
 
 def normalize_title(value: str) -> str:
@@ -110,6 +128,98 @@ def _group_shared_keys(key_to_records: dict[str, list[RecordLocator]]) -> list[d
             }
         )
     return groups
+
+
+def load_approved_weak_merges(
+    path: Path = DEFAULT_WEAK_MERGE_APPROVALS,
+) -> dict[str, frozenset[str]]:
+    """Load exact title/year merge approvals from the audited project config."""
+
+    if not path.is_file():
+        raise ValueError(f"Weak merge approval file does not exist: {path}")
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
+        raise ValueError("Weak merge approval file must use schema_version: 1")
+    entries = document.get("approved_weak_merge_groups")
+    if not isinstance(entries, list):
+        raise ValueError("approved_weak_merge_groups must be a list")
+
+    approvals: dict[str, frozenset[str]] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"approved_weak_merge_groups[{index}] must be an object")
+        identity_key = str(entry.get("identity_key", "")).strip()
+        records = entry.get("records")
+        if not identity_key.startswith("title-year:"):
+            raise ValueError(
+                f"approved_weak_merge_groups[{index}] must use a title-year identity key"
+            )
+        if not isinstance(records, list):
+            raise ValueError(f"approved_weak_merge_groups[{index}].records must be a list")
+        record_keys: set[str] = set()
+        for record_index, record in enumerate(records):
+            if not isinstance(record, Mapping):
+                raise ValueError(
+                    f"approved_weak_merge_groups[{index}].records[{record_index}] "
+                    "must be an object"
+                )
+            source_id = str(record.get("source_id", "")).strip()
+            source_record_id = str(record.get("source_record_id", "")).strip()
+            if not source_id or not source_record_id:
+                raise ValueError(
+                    f"approved_weak_merge_groups[{index}].records[{record_index}] "
+                    "requires source_id and source_record_id"
+                )
+            record_keys.add(f"{source_id}:{source_record_id}")
+        if len(record_keys) < 2:
+            raise ValueError(
+                f"approved_weak_merge_groups[{index}] must contain at least two records"
+            )
+        if identity_key in approvals:
+            raise ValueError(f"Duplicate weak merge approval: {identity_key}")
+        approvals[identity_key] = frozenset(record_keys)
+    return approvals
+
+
+def apply_weak_merge_approvals(
+    reconciliation: dict[str, Any],
+    *,
+    approvals: Mapping[str, frozenset[str]] | None = None,
+) -> dict[str, Any]:
+    """Classify review candidates against an exact, auditable allowlist."""
+
+    configured = dict(
+        load_approved_weak_merges() if approvals is None else approvals
+    )
+    approved: list[dict[str, Any]] = []
+    unapproved: list[dict[str, Any]] = []
+    observed_keys: set[str] = set()
+    for group in reconciliation["needs_review_groups"]:
+        identity_key = str(group["identity_key"])
+        observed_keys.add(identity_key)
+        record_keys = frozenset(
+            f"{record['source_id']}:{record['source_record_id']}"
+            for record in group["records"]
+        )
+        expected = configured.get(identity_key)
+        if expected == record_keys:
+            approved.append(group)
+            continue
+        unapproved.append(
+            {
+                **group,
+                "approval_status": (
+                    "record_set_changed" if expected is not None else "not_allowlisted"
+                ),
+            }
+        )
+
+    return {
+        **reconciliation,
+        "approved_review_groups": approved,
+        "unapproved_review_groups": unapproved,
+        "unused_approval_keys": sorted(set(configured) - observed_keys),
+    }
 
 
 def reconcile_records(records: Iterable[NormalizedRecord]) -> dict[str, Any]:

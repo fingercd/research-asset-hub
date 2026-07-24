@@ -8,6 +8,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCES_CONFIG = PROJECT_ROOT / "config" / "sources.yaml"
+DEFAULT_TAXONOMY_CONFIG = PROJECT_ROOT / "config" / "taxonomy.yaml"
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,34 @@ def load_sources(path: Path = DEFAULT_SOURCES_CONFIG) -> list[LoadedSource]:
             )
         )
     return loaded
+
+
+def load_domain_slugs(path: Path = DEFAULT_TAXONOMY_CONFIG) -> set[str]:
+    document = load_yaml(path)
+    raw_domains = document.get("domains")
+    if not isinstance(raw_domains, list):
+        raise ValueError(f"'domains' must be a list: {path}")
+    slugs: set[str] = set()
+    for index, item in enumerate(raw_domains):
+        if not isinstance(item, dict):
+            raise ValueError(f"domains[{index}] must be a mapping")
+        slug = str(item.get("id", "")).strip()
+        label = str(item.get("label", "")).strip()
+        if not slug or not label:
+            raise ValueError(f"domains[{index}] requires id and label")
+        if slug in slugs:
+            raise ValueError(f"Duplicate domain id: {slug}")
+        slugs.add(slug)
+    return slugs
+
+
+def unregistered_source_domains(
+    sources: list[LoadedSource] | tuple[LoadedSource, ...],
+    *,
+    known_domain_slugs: set[str] | None = None,
+) -> list[str]:
+    known = load_domain_slugs() if known_domain_slugs is None else known_domain_slugs
+    return sorted({source.domain for source in sources} - known)
 
 
 def select_sources(

@@ -49,6 +49,32 @@ from packages.domain.platform_models import (
 )
 
 GateStatus = Literal["pass", "warn", "fail"]
+_FORMAL_IMPORT_SCHEMA_VERSION = 2
+_FORMAL_IMPORT_IDEMPOTENCY_COUNTERS = (
+    "source_records_created",
+    "source_record_versions_created",
+    "paper_assets_created",
+    "repository_assets_created",
+    "representations_created",
+    "relations_created",
+    "relation_evidence_created",
+    "field_claims_created",
+)
+_FORMAL_IMPORT_ACCOUNTING_COUNTERS = (
+    "relation_candidates",
+    "relation_candidates_resolved",
+    "relation_candidates_unresolved",
+    "representation_candidates",
+    "representations_available",
+    "representations_missing",
+)
+_FORMAL_IMPORT_REQUIRED_COUNTERS = frozenset(
+    (
+        *_FORMAL_IMPORT_IDEMPOTENCY_COUNTERS,
+        *_FORMAL_IMPORT_ACCOUNTING_COUNTERS,
+        "unapproved_merge_groups",
+    )
+)
 _REDACTED_KEYS = frozenset(
     {
         "abstract",
@@ -216,7 +242,12 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
     )
 
     sources = session.execute(
-        select(Source.alias, Source.read_only, Source.enabled).order_by(Source.alias)
+        select(
+            Source.alias,
+            Source.read_only,
+            Source.enabled,
+            Source.config,
+        ).order_by(Source.alias)
     ).all()
     representations = session.execute(
         select(
@@ -456,6 +487,9 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
                     "alias": row.alias,
                     "read_only": bool(row.read_only),
                     "enabled": bool(row.enabled),
+                    "frozen_manifest_sha256": _sha256_or_none(
+                        _mapping(row.config).get("_frozen_manifest_sha256")
+                    ),
                 }
                 for row in sources
             ],
@@ -605,6 +639,25 @@ def _mapping(value: object) -> Mapping[str, Any]:
 def _integer(mapping: Mapping[str, Any], key: str) -> int:
     value = mapping.get(key)
     return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _is_nonnegative_integer(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+    )
+
+
+def _sha256_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().casefold()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        return None
+    return normalized
 
 
 def _report_summary(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -937,10 +990,69 @@ def build_release_report(
     changed_fingerprints = inventory.get("changed_manifest_fingerprints")
     removed_sources = inventory.get("removed_sources")
     common_sources = int(inventory.get("common_sources_compared") or 0)
+    inventory_source_items = inventory.get("sources")
+    inventory_manifest_by_alias = {
+        str(item.get("alias")): _sha256_or_none(item.get("manifest_sha256"))
+        for item in (
+            inventory_source_items
+            if isinstance(inventory_source_items, Sequence)
+            and not isinstance(inventory_source_items, (str, bytes))
+            else []
+        )
+        if isinstance(item, Mapping) and item.get("alias")
+    }
+    database_source_items = sources.get("items")
+    frozen_manifest_by_alias = {
+        str(item.get("alias")): _sha256_or_none(
+            item.get("frozen_manifest_sha256")
+        )
+        for item in (
+            database_source_items
+            if isinstance(database_source_items, Sequence)
+            and not isinstance(database_source_items, (str, bytes))
+            else []
+        )
+        if isinstance(item, Mapping) and item.get("alias")
+    }
+    inventory_aliases = set(inventory_manifest_by_alias)
+    database_aliases = set(frozen_manifest_by_alias)
+    missing_database_sources = sorted(inventory_aliases - database_aliases)
+    missing_inventory_sources = sorted(database_aliases - inventory_aliases)
+    missing_frozen_fingerprints = sorted(
+        alias
+        for alias in inventory_aliases & database_aliases
+        if frozen_manifest_by_alias[alias] is None
+    )
+    missing_inventory_fingerprints = sorted(
+        alias
+        for alias, digest in inventory_manifest_by_alias.items()
+        if digest is None
+    )
+    frozen_fingerprint_mismatches = [
+        {
+            "source": alias,
+            "inventory_sha256": inventory_manifest_by_alias[alias],
+            "frozen_sha256": frozen_manifest_by_alias[alias],
+        }
+        for alias in sorted(inventory_aliases & database_aliases)
+        if inventory_manifest_by_alias[alias] is not None
+        and frozen_manifest_by_alias[alias] is not None
+        and inventory_manifest_by_alias[alias] != frozen_manifest_by_alias[alias]
+    ]
+    frozen_fingerprints_ok = not any(
+        (
+            missing_database_sources,
+            missing_inventory_sources,
+            missing_frozen_fingerprints,
+            missing_inventory_fingerprints,
+            frozen_fingerprint_mismatches,
+        )
+    )
     fingerprints_ok = (
         common_sources >= legacy.domain_count
         and not changed_fingerprints
         and not removed_sources
+        and frozen_fingerprints_ok
     )
     gates.append(
         _gate(
@@ -952,9 +1064,20 @@ def build_release_report(
                 "removed": removed_sources,
                 "added": inventory.get("added_sources"),
                 "common_sources_compared": common_sources,
+                "missing_database_sources": missing_database_sources,
+                "missing_inventory_sources": missing_inventory_sources,
+                "missing_frozen_fingerprints": missing_frozen_fingerprints,
+                "missing_inventory_fingerprints": missing_inventory_fingerprints,
+                "frozen_fingerprint_mismatches": frozen_fingerprint_mismatches,
             },
-            expected="共同来源 hash/mtime 不变；新增领域允许",
-            detail="新增领域属于扩展，不会被旧六领域精确数量门禁误判。",
+            expected=(
+                "共同来源 hash/mtime 不变；每个当前来源 inventory SHA-256 "
+                "精确匹配数据库冻结值"
+            ),
+            detail=(
+                "新增来源允许扩展，但首次正式导入后也必须具有冻结 digest；"
+                "缺来源、缺 digest 或不一致均阻止发布。"
+            ),
         )
     )
     integrity_counts = _mapping(source_integrity.get("counts"))
@@ -1104,23 +1227,53 @@ def build_release_report(
             detail="未解析候选被显式保存，不视为静默丢失。",
         )
     )
-    import_created = sum(
-        _integer(import_counters, key)
-        for key in (
-            "source_records_created",
-            "paper_assets_created",
-            "repository_assets_created",
-            "representations_created",
-            "relations_created",
-            "relation_evidence_created",
-        )
+    formal_schema_version = formal_import.get("schema_version")
+    formal_schema_valid = (
+        isinstance(formal_schema_version, int)
+        and not isinstance(formal_schema_version, bool)
+        and formal_schema_version == _FORMAL_IMPORT_SCHEMA_VERSION
     )
+    validated_dry_run = _mapping(formal_import.get("validated_dry_run"))
+    validated_dry_run_status = validated_dry_run.get("status")
+    validated_dry_run_unapproved = validated_dry_run.get(
+        "unapproved_review_groups"
+    )
+    validated_dry_run_valid = (
+        bool(validated_dry_run)
+        and validated_dry_run_status == "passed"
+        and _is_nonnegative_integer(validated_dry_run_unapproved)
+        and validated_dry_run_unapproved == 0
+    )
+    missing_required_import_counters = sorted(
+        _FORMAL_IMPORT_REQUIRED_COUNTERS - set(import_counters)
+    )
+    invalid_required_import_counters = sorted(
+        key
+        for key in _FORMAL_IMPORT_REQUIRED_COUNTERS & set(import_counters)
+        if not _is_nonnegative_integer(import_counters[key])
+    )
+    idempotency_created_counts = {
+        key: _integer(import_counters, key)
+        for key in _FORMAL_IMPORT_IDEMPOTENCY_COUNTERS
+    }
+    import_created = sum(idempotency_created_counts.values())
     import_status = formal_import.get("status")
     import_source_modified = formal_import.get("source_roots_modified")
-    if import_status != "passed" or import_source_modified is not False:
+    unapproved_merge_groups = _integer(
+        import_counters,
+        "unapproved_merge_groups",
+    )
+    if (
+        not formal_schema_valid
+        or not validated_dry_run_valid
+        or missing_required_import_counters
+        or invalid_required_import_counters
+        or import_status != "passed"
+        or import_source_modified is not False
+        or unapproved_merge_groups
+        or import_created
+    ):
         import_gate: GateStatus = "fail"
-    elif import_created:
-        import_gate = "warn"
     else:
         import_gate = "pass"
     gates.append(
@@ -1129,12 +1282,31 @@ def build_release_report(
             "第二次正式导入幂等",
             import_gate,
             observed={
+                "schema_version": formal_schema_version,
+                "schema_valid": formal_schema_valid,
+                "validated_dry_run": {
+                    "present": bool(validated_dry_run),
+                    "status": validated_dry_run_status,
+                    "unapproved_review_groups": validated_dry_run_unapproved,
+                    "valid": validated_dry_run_valid,
+                },
+                "missing_required_counters": missing_required_import_counters,
+                "invalid_required_counters": invalid_required_import_counters,
                 "status": import_status,
                 "new_entities": import_created,
+                "created_counters": idempotency_created_counts,
                 "source_roots_modified": import_source_modified,
+                "unapproved_merge_groups": unapproved_merge_groups,
             },
-            expected="状态 passed、新增实体=0、来源未修改",
-            detail="若这是新增领域的首次导入，非零新增为可解释警告；发布前再跑一次。",
+            expected=(
+                f"formal schema v{_FORMAL_IMPORT_SCHEMA_VERSION}、必需计数完整且有效、"
+                "全来源 dry-run 已通过且未批准组=0、全部幂等新增计数=0、"
+                "来源未修改、未批准弱合并=0"
+            ),
+            detail=(
+                "发布报告只接受第二次正式导入产物；首次导入的非零新增不能作为"
+                "可发布的幂等证据。"
+            ),
         )
     )
     extract_statuses = _mapping(processing.get("extract_jobs_by_status"))
@@ -1367,8 +1539,19 @@ def build_release_report(
         "source_integrity": inventory,
         "source_representation_integrity": source_integrity,
         "formal_import": {
+            "schema_version": formal_schema_version,
+            "schema_valid": formal_schema_valid,
+            "validated_dry_run": {
+                "present": bool(validated_dry_run),
+                "status": validated_dry_run_status,
+                "unapproved_review_groups": validated_dry_run_unapproved,
+                "valid": validated_dry_run_valid,
+            },
             "status": formal_import.get("status", "unavailable"),
             "source_roots_modified": formal_import.get("source_roots_modified"),
+            "missing_required_counters": missing_required_import_counters,
+            "invalid_required_counters": invalid_required_import_counters,
+            "created_counters": idempotency_created_counts,
             "counters": {
                 str(key): value
                 for key, value in import_counters.items()

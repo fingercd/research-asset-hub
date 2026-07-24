@@ -191,6 +191,73 @@ def test_generic_adapter_supports_common_root_shapes(
     assert records[0].asset.domain_slugs == ["new-domain"]
 
 
+def test_generic_representation_without_sha_field_does_not_hash_raw_record(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "guide.html").write_text("<h1>Guide</h1>", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "guide-1",
+                        "title": "Guide",
+                        "guide_path": "guide.html",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = SourceConfig(
+        id="generic",
+        label="Generic",
+        adapter="generic_manifest",
+        root=str(tmp_path),
+        manifest="manifest.json",
+        options={
+            "record_selector": "items",
+            "representations": [
+                {
+                    "type": "html",
+                    "role": "guide",
+                    "path_field": "guide_path",
+                }
+            ],
+        },
+    )
+
+    records = GenericManifestAdapter(config).load()
+
+    assert len(records[0].representations) == 1
+    assert records[0].representations[0].sha256 is None
+
+
+def test_documented_knowledge_unit_templates_match_generic_adapter_contract() -> None:
+    template_root = PROJECT_ROOT / "docs" / "templates"
+    source_document = yaml.safe_load(
+        (template_root / "knowledge-source.example.yaml").read_text(encoding="utf-8")
+    )
+    source = dict(source_document["sources"][0])
+    source["root"] = str(template_root)
+    source["manifest"] = "knowledge-manifest.example.json"
+
+    records = GenericManifestAdapter(SourceConfig.model_validate(source)).load()
+
+    assert len(records) == 1
+    assert records[0].source_record_id == "example-paper-2026"
+    assert {
+        str(representation.representation_type)
+        for representation in records[0].representations
+    } == {"pdf", "repository", "html", "markdown"}
+    assert not [
+        warning
+        for warning in records[0].warnings
+        if str(warning.severity) == "error"
+    ]
+
+
 def test_path_traversal_has_structured_error(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     manifest.write_text("[]", encoding="utf-8")

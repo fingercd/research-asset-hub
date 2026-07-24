@@ -5,10 +5,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from packages.adapters import DEFAULT_REGISTRY
-from packages.cli.config import PROJECT_ROOT, LoadedSource
+from packages.cli.config import PROJECT_ROOT, LoadedSource, unregistered_source_domains
 from packages.domain.schemas import NormalizedRecord, SourceConfig
 
-from .reconciliation import reconcile_records
+from .reconciliation import apply_weak_merge_approvals, reconcile_records
 
 
 def _utc_now() -> str:
@@ -53,11 +53,31 @@ def _record_summary(record: NormalizedRecord) -> dict[str, Any]:
     }
 
 
-def run_dry_run(sources: list[LoadedSource]) -> dict[str, Any]:
+def run_dry_run(
+    sources: list[LoadedSource],
+    *,
+    known_domain_slugs: set[str] | None = None,
+) -> dict[str, Any]:
     DEFAULT_REGISTRY.discover_entry_points()
     all_records: list[NormalizedRecord] = []
     source_reports: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    unregistered_domains = unregistered_source_domains(
+        sources,
+        known_domain_slugs=known_domain_slugs,
+    )
+    if unregistered_domains:
+        errors.append(
+            {
+                "source_id": "sources.yaml",
+                "adapter": "taxonomy",
+                "error_type": "UnregisteredDomain",
+                "error": (
+                    "Every source domain must be registered in taxonomy.yaml: "
+                    f"{unregistered_domains}"
+                ),
+            }
+        )
 
     for source in sources:
         try:
@@ -107,7 +127,7 @@ def run_dry_run(sources: list[LoadedSource]) -> dict[str, Any]:
                 }
             )
 
-    reconciliation = reconcile_records(all_records)
+    reconciliation = apply_weak_merge_approvals(reconcile_records(all_records))
     expected_total = sum(
         source.expected_records or 0 for source in sources if source.expected_records is not None
     )
@@ -116,6 +136,8 @@ def run_dry_run(sources: list[LoadedSource]) -> dict[str, Any]:
     if errors or len(all_records) != expected_total:
         status = "failed"
     if reconciliation["duplicate_source_record_keys"]:
+        status = "failed"
+    if reconciliation["unapproved_review_groups"]:
         status = "failed"
 
     return {
@@ -138,5 +160,12 @@ def run_dry_run(sources: list[LoadedSource]) -> dict[str, Any]:
         },
         "reconciliation": reconciliation,
         "errors": errors,
-        "next_step": ("Review auto-merge and needs-review groups before enabling database commit."),
+        "next_step": (
+            "Resolve every unapproved title/year merge candidate before database commit."
+            if reconciliation["unapproved_review_groups"]
+            else (
+                "All weak merge candidates are explicitly approved; "
+                "review the delta before commit."
+            )
+        ),
     }

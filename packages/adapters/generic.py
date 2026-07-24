@@ -155,6 +155,7 @@ class GenericManifestAdapter(BaseAdapter):
                 ) from exc
             path_field = string_or_none(spec.get("path_field"))
             url_field = string_or_none(spec.get("url_field"))
+            sha256_field = string_or_none(spec.get("sha256_field"))
             candidate = self.representation(
                 representation_type,
                 warnings=warnings,
@@ -162,7 +163,11 @@ class GenericManifestAdapter(BaseAdapter):
                 raw_path=get_in(raw, path_field) if path_field else None,
                 root_key=str(spec.get("root_key", "source")),
                 url=string_or_none(get_in(raw, url_field)) if url_field else None,
-                sha256=string_or_none(get_in(raw, string_or_none(spec.get("sha256_field")))),
+                sha256=(
+                    string_or_none(get_in(raw, sha256_field))
+                    if sha256_field
+                    else None
+                ),
                 mime_type=string_or_none(spec.get("mime_type")),
                 network_required=bool(spec.get("network_required", False)),
                 metadata_value={"mapping_index": index},

@@ -74,7 +74,12 @@ def _run_preflight(args: argparse.Namespace) -> int:
 def _run_inventory(args: argparse.Namespace) -> int:
     sources = select_sources(load_sources(args.config), getattr(args, "source", None), args.all)
     report = build_inventory_report(sources)
-    path = write_report(report, "baseline-inventory.json")
+    report_name = (
+        f"inventory-{args.source}.json"
+        if getattr(args, "source", None)
+        else "baseline-inventory.json"
+    )
+    path = write_report(report, report_name)
     report["report_path"] = str(path)
     _emit(report, args.json)
     return 1 if report["status"] == "failed" else 0
@@ -126,6 +131,24 @@ def _run_ingest(args: argparse.Namespace) -> int:
         _emit(report, args.json)
         return 1 if report["status"] == "failed" else 0
 
+    if args.source:
+        report = {
+            "schema_version": 2,
+            "status": "failed",
+            "error_type": "PartialFormalImportForbidden",
+            "error": (
+                "Formal import requires the complete source set so cross-source "
+                "identity candidates cannot bypass merge review. Use --all or "
+                "omit --source; --source remains available with --dry-run."
+            ),
+            "source_roots_modified": False,
+        }
+        path = write_report(report, "ingest-formal.json")
+        report["report_path"] = str(path)
+        _emit(report, args.json)
+        return 1
+
+    from packages.ingestion.dry_run import run_dry_run
     from packages.ingestion.formal import run_formal_import
 
     database_url = (
@@ -137,14 +160,41 @@ def _run_ingest(args: argparse.Namespace) -> int:
         )
     )
     sources = select_sources(load_sources(args.config), args.source, args.all)
+    dry_run_report = run_dry_run(sources)
+    write_report(dry_run_report, "ingest-dry-run.json")
+    if dry_run_report["status"] != "passed":
+        report = {
+            "schema_version": 2,
+            "status": "failed",
+            "error_type": "FormalDryRunGateFailed",
+            "error": (
+                "Formal import requires a successful dry-run over the exact "
+                "complete source configuration."
+            ),
+            "source_roots_modified": False,
+            "dry_run_status": dry_run_report["status"],
+        }
+        path = write_report(report, "ingest-formal.json")
+        report["report_path"] = str(path)
+        _emit(report, args.json)
+        return 1
+
     engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with Session(engine) as session:
             report = run_formal_import(session, sources)
+            report["validated_dry_run"] = {
+                "status": dry_run_report["status"],
+                "generated_at": dry_run_report["generated_at"],
+                "normalized_records": dry_run_report["totals"]["normalized_records"],
+                "unapproved_review_groups": len(
+                    dry_run_report["reconciliation"]["unapproved_review_groups"]
+                ),
+            }
             session.commit()
     except Exception as exc:
         report = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "failed",
             "error_type": type(exc).__name__,
             "error": str(exc),

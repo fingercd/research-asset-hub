@@ -1,0 +1,408 @@
+# 后续 Agent 知识库增量操作手册
+
+本手册面向以后替用户操作 Research Asset Hub 的 Agent。目标不是“把文件扫进数据库”，而是让每次新增都有稳定身份、明确来源、可打开表示、可重建索引、可追溯关系和恢复路径。
+
+## 1. 完成定义
+
+一次知识库新增只有同时满足以下条件才算完成：
+
+- 用户提供的每个知识单元都有唯一、稳定的 `source_record_id`；
+- 所有候选记录、PDF、代码、导读、HTML 和关系都有明确结局；
+- 来源文件没有被 Hub 移动、重命名、覆盖或删除；
+- dry-run 无错误、无重复来源键、记录数符合 manifest；
+- 新出现的题名+年份弱合并全部经过显式审批，没有自动误合并；
+- 正式导入可重复执行，第二次不产生重复资产、表示、关系或证据；
+- 新内容已完成抽取和正式索引，失败项显式可见；
+- 可以从网站搜索到，并能安全打开登记的表示；
+- 来源完整性检查通过；
+- 有导入前恢复点，并留下本次验证报告；
+- 最终说明仍需用户手工完成的步骤，例如 Zotero 导入确认。
+
+## 2. 先判断是哪种任务
+
+| 情况 | 处理方式 |
+| --- | --- |
+| 新资料与已登记来源属于同一领域 | 不修改原来源；创建新的旁车 intake source，复用 domain slug |
+| 新资料属于已有领域，但来自独立目录 | 新增 source，复用已有 domain slug |
+| 全新研究领域 | 同时新增 taxonomy 和 source |
+| 用户给出一个含 PDF、代码、HTML 的稳定目录 | 将其作为一个知识单元登记；默认不复制、不移动 |
+| 用户给出 Downloads、Codex attachment、缓存或临时解压路径 | 不正式登记；先请用户指定永久位置 |
+| 只有 URL、没有本地文件 | 可以登记 URL 表示，并明确其联网依赖 |
+| manifest 结构规则且是 JSON | 优先 `generic_manifest` |
+| 多个相互依赖的 manifest 或存在特殊解析语义 | 新增专用 adapter，并补契约 fixture 与测试 |
+
+开始前运行：
+
+```powershell
+git status --short
+./scripts/hub.ps1 status
+```
+
+保留并绕开用户已有修改。不得清理来源目录、工作树或 Docker 卷。
+
+所有已登记来源都保持只读，包括 manifest。用户明确要求 Agent 新增资料时，默认创建新的旁车 intake source；不得向七个现有来源 manifest 追加记录。若用户另行运行某个来源自己的采集/生成工程，那是独立任务，必须由该工程负责来源备份和版本化，再把冻结结果交给 Hub。
+
+## 3. 标准知识单元
+
+一个标准知识单元以论文或技术报告为主记录。原始大文件保留在用户指定的永久目录，Hub 项目只保存小型旁车 manifest：
+
+```text
+<用户永久资料目录>/
+├─ paper.pdf
+├─ code/
+├─ guide.html
+├─ original.html
+└─ note.md
+
+research-asset-hub/
+└─ config/
+   └─ intake/
+      └─ <source-id>/
+         └─ manifest.json
+```
+
+文件不是必须全部存在；只有实际存在或明确提供 URL 的表示才应填写。模板：
+
+- `docs/templates/knowledge-manifest.example.json`
+- `docs/templates/knowledge-source.example.yaml`
+
+### 稳定 ID
+
+- 推荐格式：小写英文、数字和连字符，例如 `flashattention-2022`。
+- 一旦导入不得因题名翻译、文件改名或目录调整而更换。
+- 不得使用数组序号、下载时间或临时文件名作为永久 ID。
+- 来源内由 `(source_id, source_record_id)` 唯一定位。
+
+### 必要与推荐元数据
+
+| 字段 | 要求 |
+| --- | --- |
+| `id` | 必填，来源内唯一且永久稳定 |
+| `title` | 必填，优先论文正式原文题名 |
+| `title_zh` | 推荐，明确是中文译名 |
+| `authors` | 推荐使用字符串数组，保持正式顺序 |
+| `year` | 推荐使用四位年份 |
+| `venue` | 会议、期刊、机构或技术报告系列 |
+| `doi` / `arxiv_id` | 有则必须保留，是跨来源合并的重要强标识 |
+| `abstract` | 原始摘要；不要把 Agent 推测写成原始摘要 |
+| `summary` | 可放中文导读或人工概括 |
+| `tags` | 使用稳定、可复用的标签，不堆叠同义词 |
+| `source_urls` | 论文页、项目页等可核验来源 |
+| `representations` | PDF、代码、导读、HTML、Markdown 的路径或 URL |
+| `relations` | 仅指向同一 source 中其他稳定记录 ID；跨来源关系不得写入 manifest |
+
+### 表示规则
+
+- `pdf`：主论文 PDF，角色通常为 `original`。
+- `repository`：代码目录或正式仓库 URL。正式 importer 会物化独立 repository 资产，并建立论文到仓库的 `implemented_by` 关系。
+- `html` + `guide`：生成导读使用 `role: guide`；历史原始页面使用 `role: original`，不要混为一个文件。
+- `markdown`：个人导读或结构化笔记，不替代原始论文。
+- `notebook`：按 Notebook 表示登记，不要转成无法追踪单元格的纯文本。
+- 缺失文件应登记为 `missing` 或不填写该可选表示；绝不能伪造一个存在路径。
+
+记录中的路径必须相对于对应 `asset_roots`，统一使用 `/`。绝对路径只能出现在受审查的 `config/sources.yaml` 根配置中，不能进入 manifest 记录或开放导出。
+
+### 关系引用的边界
+
+模板里的 `relations.related_record_ids` 是 generic manifest 的来源内引用：每个值只能是**当前旁车 source 的同一份 manifest 中另一条 `items[].id`**。推荐的“一知识单元一旁车 source”通常保持空数组；只有一个旁车 source 明确包含多条记录时，才在这些记录之间使用它。
+
+不要把现有资产 UUID、DOI/arXiv、外部仓库 URL 或其他 source 的 `source_record_id` 填入 `related_record_ids`。generic adapter 会按当前 source 解析 `source_record_id`；跨来源 ID 可能变成未解析候选，也可能因同名键碰撞而指向错误记录，不能用来表达已确认的跨来源关系。
+
+若两个已导入资产属于不同 source，首次导入完成后用它们的真实 asset UUID 通过正式 API 建立关系，并留下关系证据。只有关系语义已经核对时才使用 `confirmed`；仍需复核的候选应保留 `candidate`。最小示例（将 UUID 换成已核对的真实值）：
+
+```powershell
+$payload = @{
+  subject_asset_id = "11111111-1111-1111-1111-111111111111"
+  object_asset_id = "22222222-2222-2222-2222-222222222222"
+  relation_type = "related_to"
+  source_key = "manual"
+  confirmation_status = "confirmed"
+  confidence = 0.8
+  attributes = @{}
+} | ConvertTo-Json -Depth 4
+
+$relation = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8767/api/v1/relations" `
+  -ContentType "application/json" `
+  -Body $payload
+
+$evidence = @{
+  provider = "manual"
+  source_key = "manual-review"
+  evidence = @{ note = "核对题名、作者、年份和原文后确认关系。" }
+  confidence = 0.8
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8767/api/v1/relations/$($relation.id)/evidence" `
+  -ContentType "application/json" `
+  -Body $evidence
+```
+
+API 会按 asset UUID 校验两个端点并记录审计事件；关系详情和 `/evidence` 端点可用于复核。不要为了表达跨来源关系而修改已冻结的来源 manifest。
+
+## 4. 为新资料创建旁车来源
+
+1. 确认用户给出的 PDF、代码和 HTML 已位于永久目录。
+2. 选择新的稳定 source ID，例如 `intake-flashattention-notes-2026`。
+3. 创建 `config/intake/<source-id>/manifest.json`；一个知识单元通常只有一个 `items` 记录。
+4. 在 `config/sources.yaml` 新增 source 条目，`root` 指向该 intake 目录。
+5. `asset_roots` 显式指向用户永久资料目录；manifest 内只写相对于该目录的路径。
+6. 首次正式导入会自动把 manifest SHA-256 和 source 配置摘要冻结到 PostgreSQL。以后新增另一组资料时创建新 source，不改写旧旁车 manifest 或 source 条目。
+
+冻结前必须确认 ID、领域、`expected_records`、路径和 adapter 映射已经最终确定。冻结后摘要变化会被正式导入和发布报告同时拒绝；如果后来发现历史元数据错误，应创建可追溯的更正来源或使用平台 override/审计流程，不能删除冻结字段或直接改库。
+
+只检查目标来源：
+
+```powershell
+./scripts/hub.ps1 preflight
+./scripts/hub.ps1 validate -Source <source-id> -Json
+./scripts/hub.ps1 ingest -Source <source-id> -DryRun
+```
+
+随后刷新全来源 inventory 并执行全来源 dry-run，以发现跨来源 DOI/arXiv 或题名年份候选：
+
+```powershell
+./scripts/hub.ps1 inventory -All
+./scripts/hub.ps1 ingest -All -DryRun
+```
+
+## 5. 新增来源或领域
+
+### 新领域
+
+先在 `config/taxonomy.yaml` 的 `domains` 中增加：
+
+```yaml
+- id: new-domain
+  label: 新领域中文名
+  aliases: [English alias, 中文别名]
+```
+
+`id` 必须满足 `^[a-z0-9][a-z0-9-]{1,63}$`，创建后保持稳定。前端不需要新增枚举或按领域写分支。
+
+### 新来源
+
+在 `config/sources.yaml` 中增加唯一 source 条目。普通 JSON 使用：
+
+```yaml
+- id: intake-new-paper-2026
+  label: 个人新增 · 新论文
+  domain: new-domain
+  adapter: generic_manifest
+  root: config/intake/intake-new-paper-2026
+  manifest: manifest.json
+  expected_records: 1
+  read_only: true
+  asset_roots:
+    pdf: D:/ResearchAssets/new-paper-2026
+    repository: D:/ResearchAssets/new-paper-2026
+    html: D:/ResearchAssets/new-paper-2026
+    note: D:/ResearchAssets/new-paper-2026
+```
+
+然后补齐 `asset_roots` 和 `options`。直接参考 `docs/templates/knowledge-source.example.yaml`，不要整份覆盖现有 `sources.yaml`。旁车 manifest 已明确登记的 HTML 仍会进入后续 HTML 审计；无需为这种单记录 intake 另加递归 `formal_html` 扫描。
+
+旁车 manifest 根路径相对于项目根解析；外部 `asset_roots` 是受审查的稳定绝对目录。不要登记 Codex attachment、浏览器下载缓存、临时工作目录或会被其他工具自动清理的位置。
+
+## 6. 合并决策是硬门禁
+
+正式合并分两类：
+
+- DOI/arXiv 相同：强标识候选，可由 importer 自动合并；
+- 只有规范化题名和年份相同：弱标识候选，必须人工批准。
+
+已批准弱合并保存在：
+
+`config/identity-merge-approvals.yaml`
+
+批准项同时锁定：
+
+- `identity_key`；
+- 完整的 `source_id + source_record_id` 集合。
+
+如果新来源让已有候选组多出一条记录，原批准自动失效。dry-run 和正式导入都必须失败，直到 Agent：
+
+1. 核对原文题名、作者、年份、摘要、DOI/arXiv 和来源 URL；
+2. 明确判断是同一作品，而不是同名论文、版本或勘误；
+3. 获得用户确认；
+4. 只对这一确切记录集合更新 allowlist；
+5. 重新运行全来源 dry-run。
+
+不得通过删除候选、改假题名、虚构 DOI 或修改 importer 来绕过门禁。
+
+## 7. 正式导入
+
+先检查 `work/validation/ingest-dry-run.json`：
+
+- `status` 为 `passed`；
+- `errors` 为空；
+- `duplicate_source_record_keys` 为空；
+- 每个来源 `expected_count_matches` 为 true；
+- `unapproved_review_groups` 为空；
+- 新增表示路径、URL、类型和角色正确；
+- 所有 warning 已解释。
+
+不要只看顶层 `status`：当前 preflight/validate 对 `expected_records` 不匹配可能只给 warning，Agent 必须逐来源确认 `expected_count_matches`/`record_count_matches` 为 true。外部 `asset_roots` 也必须结合 inventory 和 dry-run 的 `asset_path_missing` 等 warning 核对；缺失项只能等于事先明确接受的缺失清单。
+
+正式写库前创建恢复点：
+
+```powershell
+./.venv/Scripts/python.exe scripts/create_backup.py `
+  --report work/validation/backup-before-ingest.json
+```
+
+平台 Restic 快照保护 PostgreSQL、项目配置和开放目录，不包含项目外的来源 PDF、代码或 HTML。来源目录必须由用户另行使用外置盘、NAS、版本库或其他文件级备份保护；不得把平台快照描述成来源文件副本。
+
+正式导入只允许使用全部来源，保证跨来源身份视图完整：
+
+```powershell
+./scripts/hub.ps1 ingest -All
+```
+
+CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入绕过跨来源合并门禁。
+
+`ingest -All` 在连接数据库写入前还会自动重跑一次完整 dry-run。正式 importer 会再次强制每个 source 的 `expected_records`、适配器实际输出的 taxonomy domain、弱合并审批和冻结摘要，因此不能靠跳过手工命令绕过这些检查。成功报告必须为 schema v2，并包含 `validated_dry_run.status: passed`。
+
+检查 `work/validation/ingest-formal.json` 后，在不改变输入的情况下再次执行：
+
+```powershell
+./scripts/hub.ps1 ingest -All
+```
+
+第二次的以下新增计数必须为 0：
+
+- `source_records_created`
+- `source_record_versions_created`
+- `paper_assets_created`
+- `repository_assets_created`
+- `representations_created`
+- `relations_created`
+- `relation_evidence_created`
+- `field_claims_created`
+
+如果不是 0，先解释输入变化或修复幂等问题，不能继续索引并宣称完成。
+
+## 8. 抽取、HTML 与索引
+
+`hub start` 已包含 worker。登记变化后排队：
+
+```powershell
+./.venv/Scripts/python.exe scripts/seed_jobs.py
+```
+
+在网站“后台任务”页等待 `pending/running` 清零。失败任务必须查看错误和表示状态；缺失源文件可以是明确 warning，但不能消失。
+
+新增 HTML 时：
+
+```powershell
+./.venv/Scripts/python.exe scripts/audit_html.py `
+  --report work/validation/html-audit.json `
+  --dynamic-samples 12
+./.venv/Scripts/python.exe scripts/apply_html_policies.py `
+  --report work/validation/html-policy-apply.json
+```
+
+构建正式索引：
+
+```powershell
+./.venv/Scripts/python.exe scripts/build_indexes.py `
+  --version bge_m3_v1 `
+  --report work/validation/index-build-bge-m3.json
+```
+
+正式完成条件：
+
+- embedding model 为 `BAAI/bge-m3`；
+- 向量维数为 1024；
+- `degraded` 为 false；
+- 新增资产存在于 assets 索引；
+- 新增正文/代码存在于 documents/code 索引；
+- 不存在上一版本残留的失效文档。
+
+`--hashing-only` 只能用于明确的诊断或离线降级，不能冒充正式向量索引。
+
+## 9. 验证用户真正能用
+
+来源检查：
+
+```powershell
+./.venv/Scripts/python.exe scripts/verify_source_integrity.py
+```
+
+网站检查：
+
+1. 在 <http://127.0.0.1:8765/search> 用题名、DOI/arXiv、作者和代码符号搜索。
+2. 打开资产详情，核对题名、作者、年份、领域、标签和表示。
+3. 分别测试 PDF、代码、导读和原始 HTML；缺失按钮必须明确禁用。
+4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。
+5. 读取并核对阅读状态与批注摘要。只有用户本来就要求写入阅读状态或批注时才做写入验证，不得为了 smoke test 污染用户数据。
+6. 检查相似论文、图谱邻域和 RAG 引用能定位到有效锚点。
+
+刷新开放目录：
+
+```powershell
+./.venv/Scripts/python.exe scripts/export_catalog.py
+```
+
+确认 `outputs/open-catalog/manifest.json` 中来源二进制复制数为 0。
+
+需要外部工具时：
+
+```powershell
+./.venv/Scripts/python.exe scripts/sync_obsidian.py --preview-only
+./.venv/Scripts/python.exe scripts/sync_obsidian.py
+./.venv/Scripts/python.exe scripts/export_zotero.py
+```
+
+Obsidian 冲突必须进入冲突队列。Zotero 只生成审查式 CSL JSON/BibTeX 包，Agent 不得写 Zotero SQLite；最终导入需要用户界面确认。
+
+## 10. 测试、备份与交付
+
+至少运行：
+
+```powershell
+./.venv/Scripts/ruff.exe check apps packages scripts tests
+./.venv/Scripts/mypy.exe --strict apps packages scripts
+./.venv/Scripts/python.exe -m pytest -q
+./.venv/Scripts/python.exe scripts/verify_source_integrity.py
+pnpm --filter @research-asset-hub/web lint
+pnpm --filter @research-asset-hub/web typecheck
+pnpm --filter @research-asset-hub/web test -- --run
+pnpm --filter @research-asset-hub/web build
+```
+
+涉及前端、打开链路或 HTML 时还要运行 Playwright E2E。涉及索引/RAG 时重跑相应固定评测。
+
+批量导入、新来源、新领域或准备发布时，创建最终快照并做隔离恢复演练：
+
+```powershell
+./.venv/Scripts/python.exe scripts/create_backup.py `
+  --report work/validation/backup-final.json
+./.venv/Scripts/python.exe scripts/restore_rehearsal.py `
+  --snapshot <snapshot-id> `
+  --run-id <unique-run-id>
+./.venv/Scripts/python.exe scripts/generate_release_report.py `
+  --restore-report work/restore-tests/<unique-run-id>/report.json
+```
+
+只有 release report 中 `fail=0` 才能交付。`local-copy-only`、已解释的缺失文件或旧 HTML 依赖可以是显式 warning。
+
+## 11. Agent 最终回复模板
+
+最终回复至少包含：
+
+- 新增、更新、合并的论文和仓库数量；
+- 表示候选、可用、缺失和失败数量；
+- 新增关系及未解析关系；
+- dry-run 和第二次导入的幂等结论；
+- 抽取任务与索引状态；
+- 来源完整性结果；
+- 网站中已验证的搜索与打开方式；
+- 备份 snapshot ID 和恢复演练状态；
+- 用户仍需手工执行的 Zotero、密钥轮换或外部备份步骤；
+- 相关报告和文档的绝对可点击路径。
+
+不能只说“已导入”或“测试通过”，也不能隐藏 warning。

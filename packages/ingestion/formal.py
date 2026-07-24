@@ -11,8 +11,8 @@ import hashlib
 import json
 import mimetypes
 import os
-from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -25,7 +25,12 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from packages.adapters import DEFAULT_REGISTRY
-from packages.cli.config import PROJECT_ROOT, LoadedSource
+from packages.cli.config import (
+    PROJECT_ROOT,
+    LoadedSource,
+    load_domain_slugs,
+    unregistered_source_domains,
+)
 from packages.domain.enums import (
     ActivityStatus,
     AuditAction,
@@ -69,13 +74,18 @@ from packages.domain.schemas import (
 
 from .dry_run import _source_config
 from .reconciliation import (
+    UnapprovedWeakMergeError,
+    apply_weak_merge_approvals,
     canonical_identifier,
     normalize_title,
     reconcile_records,
     record_fingerprint,
 )
 
-IMPORTER_VERSION = "1.0"
+IMPORTER_VERSION = "1.1"
+_FROZEN_MANIFEST_SHA256 = "_frozen_manifest_sha256"
+_FROZEN_SOURCE_CONFIG_SHA256 = "_frozen_source_config_sha256"
+_FROZEN_AT = "_frozen_at"
 _CLAIM_FIELDS = (
     "title",
     "title_zh",
@@ -104,6 +114,28 @@ def _json_digest(value: Any) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+class FormalImportValidationError(ValueError):
+    """The complete normalized input does not satisfy a formal-import gate."""
+
+
+class FrozenSourceChangedError(FormalImportValidationError):
+    """A source contract or manifest changed after its first formal import."""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _source_freeze_contract(source: LoadedSource) -> tuple[str, str]:
+    """Return immutable manifest and source-config digests for one source."""
+
+    return _sha256_file(source.manifest), _json_digest(source.raw)
 
 
 @lru_cache(maxsize=4096)
@@ -233,15 +265,22 @@ class _UnionFind:
 
 def identity_groups(
     records: Sequence[NormalizedRecord],
+    *,
+    approved_weak_merges: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[list[list[NormalizedRecord]], dict[str, Any]]:
     """Apply the approved strong and reviewed title/year merge decisions."""
 
-    reconciliation = reconcile_records(records)
+    reconciliation = apply_weak_merge_approvals(
+        reconcile_records(records),
+        approvals=approved_weak_merges,
+    )
+    if reconciliation["unapproved_review_groups"]:
+        raise UnapprovedWeakMergeError(reconciliation["unapproved_review_groups"])
     keyed = {f"{item.source_id}:{item.source_record_id}": item for item in records}
     union = _UnionFind(keyed)
     approved = [
         *reconciliation["auto_merge_groups"],
-        *reconciliation["needs_review_groups"],
+        *reconciliation["approved_review_groups"],
     ]
     for group in approved:
         keys = [
@@ -297,6 +336,8 @@ class ImportContext:
     record_versions: dict[str, SourceRecordVersion] = field(default_factory=dict)
     record_assets: dict[str, Asset] = field(default_factory=dict)
     repository_assets: dict[str, Asset] = field(default_factory=dict)
+    dirty_asset_ids: set[UUID] = field(default_factory=set)
+    created_asset_ids: set[UUID] = field(default_factory=set)
     unresolved_relations: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -308,6 +349,66 @@ def _load_all_records(sources: Sequence[LoadedSource]) -> list[NormalizedRecord]
         adapter = DEFAULT_REGISTRY.create(config.adapter, config, base_dir=PROJECT_ROOT)
         records.extend(adapter.load())
     return records
+
+
+def _validate_loaded_records(
+    sources: Sequence[LoadedSource],
+    records: Sequence[NormalizedRecord],
+    *,
+    known_domain_slugs: set[str],
+) -> None:
+    """Fail closed before writes when adapter output violates the source contract."""
+
+    configured = {source.source_id: source for source in sources}
+    counts = Counter(record.source_id for record in records)
+    unknown_sources = sorted(set(counts) - set(configured))
+    if unknown_sources:
+        raise FormalImportValidationError(
+            "Adapters emitted records for undeclared sources: "
+            f"{unknown_sources}"
+        )
+
+    count_errors: list[str] = []
+    for source in sources:
+        if source.expected_records is None:
+            count_errors.append(f"{source.source_id}: expected_records is required")
+            continue
+        actual = counts[source.source_id]
+        if actual != source.expected_records:
+            count_errors.append(
+                f"{source.source_id}: expected {source.expected_records}, got {actual}"
+            )
+    if count_errors:
+        raise FormalImportValidationError(
+            "Formal import record-count gate failed: " + "; ".join(count_errors)
+        )
+
+    missing_domains = sorted(
+        {
+            f"{record.source_id}:{record.source_record_id}"
+            for record in records
+            if not record.asset.domain_slugs
+        }
+    )
+    if missing_domains:
+        raise FormalImportValidationError(
+            "Normalized records must declare at least one taxonomy domain: "
+            f"{missing_domains}"
+        )
+
+    unregistered_domains = sorted(
+        {
+            domain
+            for record in records
+            for domain in record.asset.domain_slugs
+            if domain not in known_domain_slugs
+        }
+    )
+    if unregistered_domains:
+        raise FormalImportValidationError(
+            "Adapter output contains domains not registered in "
+            f"config/taxonomy.yaml: {unregistered_domains}"
+        )
 
 
 def _persisted_source_path(path: Path) -> str:
@@ -327,11 +428,47 @@ def _persisted_source_path(path: Path) -> str:
 
 
 def _upsert_sources(session: Session, sources: Sequence[LoadedSource]) -> dict[str, Source]:
+    existing_models = {
+        loaded.source_id: session.scalar(
+            select(Source).where(Source.alias == loaded.source_id)
+        )
+        for loaded in sources
+    }
+    freeze_contracts: dict[str, tuple[str, str, str]] = {}
+    frozen_at = utc_now().isoformat()
+    for loaded in sources:
+        manifest_sha256, config_sha256 = _source_freeze_contract(loaded)
+        model = existing_models[loaded.source_id]
+        existing_config = dict(model.config or {}) if model is not None else {}
+        frozen_manifest = existing_config.get(_FROZEN_MANIFEST_SHA256)
+        frozen_config = existing_config.get(_FROZEN_SOURCE_CONFIG_SHA256)
+        if frozen_manifest is not None and frozen_manifest != manifest_sha256:
+            raise FrozenSourceChangedError(
+                f"Frozen manifest changed for source {loaded.source_id}: "
+                f"expected {frozen_manifest}, got {manifest_sha256}"
+            )
+        if frozen_config is not None and frozen_config != config_sha256:
+            raise FrozenSourceChangedError(
+                f"Frozen source configuration changed for source {loaded.source_id}: "
+                f"expected {frozen_config}, got {config_sha256}"
+            )
+        freeze_contracts[loaded.source_id] = (
+            manifest_sha256,
+            config_sha256,
+            str(existing_config.get(_FROZEN_AT) or frozen_at),
+        )
+
     result: dict[str, Source] = {}
     for loaded in sources:
-        model = session.scalar(select(Source).where(Source.alias == loaded.source_id))
+        model = existing_models[loaded.source_id]
         config = dict(loaded.raw)
         config["asset_roots"] = dict(config.get("asset_roots") or {})
+        manifest_sha256, config_sha256, source_frozen_at = freeze_contracts[
+            loaded.source_id
+        ]
+        config[_FROZEN_MANIFEST_SHA256] = manifest_sha256
+        config[_FROZEN_SOURCE_CONFIG_SHA256] = config_sha256
+        config[_FROZEN_AT] = source_frozen_at
         if model is None:
             model = Source(
                 alias=loaded.source_id,
@@ -409,18 +546,30 @@ def _apply_asset_values(
 def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord]) -> Asset:
     values = _merged_asset_values(records)
     asset = _existing_asset_for_group(ctx.session, ctx.source_models, records)
-    created = asset is None
     if asset is None:
         asset = Asset(**values)
         ctx.session.add(asset)
         ctx.session.flush()
         ctx.counters.paper_assets_created += 1
+        ctx.created_asset_ids.add(asset.id)
+        ctx.dirty_asset_ids.add(asset.id)
     else:
+        before = {
+            name: _json_digest(getattr(asset, name))
+            for name in (*values.keys(), "deleted_at")
+        }
         _apply_asset_values(ctx.session, asset, values)
+        after = {
+            name: _json_digest(getattr(asset, name))
+            for name in (*values.keys(), "deleted_at")
+        }
+        if before != after:
+            ctx.dirty_asset_ids.add(asset.id)
 
     profile = ctx.session.get(PaperProfile, asset.id)
     if profile is None:
         ctx.session.add(PaperProfile(asset_id=asset.id))
+        ctx.dirty_asset_ids.add(asset.id)
 
     for record in records:
         key = f"{record.source_id}:{record.source_record_id}"
@@ -448,31 +597,7 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
                         is_identity=bool(identifier.is_identity),
                     )
                 )
-
-    ctx.session.add(
-        AuditEvent(
-            entity_type="asset",
-            entity_id=asset.id,
-            action=AuditAction.IMPORT.value,
-            actor="importer",
-            after={
-                "asset_type": asset.asset_type,
-                "title": asset.title,
-                "created": created,
-            },
-            details={"import_run_id": str(ctx.run.id)},
-        )
-    )
-    ctx.session.add(
-        OutboxEvent(
-            aggregate_type="asset",
-            aggregate_id=asset.id,
-            event_type="asset.imported",
-            payload={"asset_id": str(asset.id), "created": created},
-            status=OutboxStatus.PENDING.value,
-            dedupe_key=f"import:{ctx.run.id}:asset:{asset.id}",
-        )
-    )
+                ctx.dirty_asset_ids.add(asset.id)
     return asset
 
 
@@ -799,6 +924,8 @@ def _upsert_repository(
         )
     )
     ctx.repository_assets[canonical_url] = asset
+    ctx.created_asset_ids.add(asset.id)
+    ctx.dirty_asset_ids.add(asset.id)
     ctx.counters.repository_assets_created += 1
     return asset
 
@@ -896,7 +1023,24 @@ def _upsert_representation(
         ctx.session.add(model)
         ctx.session.flush()
         ctx.counters.representations_created += 1
+        ctx.dirty_asset_ids.add(target.id)
     else:
+        before = (
+            model.asset_id,
+            model.source_record_id,
+            model.representation_type,
+            model.materialization_kind,
+            model.availability,
+            model.external_url,
+            model.entrypoint,
+            model.revision,
+            model.tree_digest,
+            model.sha256,
+            model.mime_type,
+            model.size_bytes,
+            model.network_required,
+            model.deleted_at,
+        )
         existing_attributes = dict(model.attributes or {})
         for derived_key in (
             "sandbox_policy",
@@ -909,7 +1053,11 @@ def _upsert_representation(
             representation_attributes.get("sandbox_policy") or ""
         )
         model.asset_id = target.id
-        model.source_record_id = source_record.id
+        # A logical repository can be referenced by several papers in the same
+        # source. Keep the representation's original provenance owner stable;
+        # SourceRecordAsset links preserve every additional paper association.
+        if model.source_record_id is None:
+            model.source_record_id = source_record.id
         model.representation_type = str(candidate.representation_type)
         model.materialization_kind = materialization
         model.availability = availability
@@ -928,6 +1076,24 @@ def _upsert_representation(
         model.attributes = representation_attributes
         model.verified_at = utc_now()
         model.deleted_at = None
+        after = (
+            model.asset_id,
+            model.source_record_id,
+            model.representation_type,
+            model.materialization_kind,
+            model.availability,
+            model.external_url,
+            model.entrypoint,
+            model.revision,
+            model.tree_digest,
+            model.sha256,
+            model.mime_type,
+            model.size_bytes,
+            model.network_required,
+            model.deleted_at,
+        )
+        if before != after:
+            ctx.dirty_asset_ids.add(target.id)
     if fingerprint_reused:
         ctx.counters.representations_reused += 1
 
@@ -1056,6 +1222,7 @@ def _upsert_relation(
         ctx.session.add(relation)
         ctx.session.flush()
         ctx.counters.relations_created += 1
+        ctx.dirty_asset_ids.update((subject.id, target.id))
 
     evidence = candidate.evidence.model_dump(mode="json")
     evidence_hash = _json_digest(
@@ -1088,9 +1255,43 @@ def _upsert_relation(
     ctx.counters.relation_candidates_resolved += 1
 
 
+def _emit_dirty_asset_events(ctx: ImportContext) -> None:
+    for asset_id in sorted(ctx.dirty_asset_ids, key=str):
+        asset = ctx.session.get(Asset, asset_id)
+        if asset is None:
+            continue
+        created = asset_id in ctx.created_asset_ids
+        ctx.session.add(
+            AuditEvent(
+                entity_type="asset",
+                entity_id=asset.id,
+                action=AuditAction.IMPORT.value,
+                actor="importer",
+                after={
+                    "asset_type": asset.asset_type,
+                    "title": asset.title,
+                    "created": created,
+                },
+                details={"import_run_id": str(ctx.run.id)},
+            )
+        )
+        ctx.session.add(
+            OutboxEvent(
+                aggregate_type="asset",
+                aggregate_id=asset.id,
+                event_type="asset.imported",
+                payload={"asset_id": str(asset.id), "created": created},
+                status=OutboxStatus.PENDING.value,
+                dedupe_key=f"import:{ctx.run.id}:asset:{asset.id}",
+            )
+        )
+
+
 def run_formal_import(
     session: Session,
     sources: Sequence[LoadedSource],
+    *,
+    known_domain_slugs: set[str] | None = None,
 ) -> dict[str, Any]:
     """Import all selected sources in one database transaction.
 
@@ -1098,8 +1299,26 @@ def run_formal_import(
     leaves the session ready for rollback, so no partial import becomes visible.
     """
 
+    unregistered_domains = unregistered_source_domains(
+        list(sources),
+        known_domain_slugs=known_domain_slugs,
+    )
+    if unregistered_domains:
+        raise ValueError(
+            "Every source domain must be registered in config/taxonomy.yaml "
+            f"before formal import: {unregistered_domains}"
+        )
+
+    known_domains = (
+        load_domain_slugs() if known_domain_slugs is None else known_domain_slugs
+    )
     started = datetime.now(UTC)
     records = _load_all_records(sources)
+    _validate_loaded_records(
+        sources,
+        records,
+        known_domain_slugs=known_domains,
+    )
     groups, reconciliation = identity_groups(records)
     source_models = _upsert_sources(session, sources)
     run = ImportRun(
@@ -1137,6 +1356,7 @@ def run_formal_import(
         for index, relation_candidate in enumerate(record.relations):
             _upsert_relation(ctx, record, relation_candidate, index)
 
+    _emit_dirty_asset_events(ctx)
     finished = datetime.now(UTC)
     counters = ctx.counters.as_dict()
     counters.update(
@@ -1147,7 +1367,10 @@ def run_formal_import(
             "representation_candidates": sum(len(item.representations) for item in records),
             "relation_candidates": sum(len(item.relations) for item in records),
             "strong_merge_groups": len(reconciliation["auto_merge_groups"]),
-            "reviewed_merge_groups": len(reconciliation["needs_review_groups"]),
+            "reviewed_merge_groups": len(reconciliation["approved_review_groups"]),
+            "unapproved_merge_groups": len(
+                reconciliation["unapproved_review_groups"]
+            ),
         }
     )
     run.status = ImportStatus.SUCCEEDED.value
@@ -1175,7 +1398,7 @@ def run_formal_import(
     )
     session.flush()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "passed",
         "import_run_id": str(run.id),
         "started_at": started.isoformat(),

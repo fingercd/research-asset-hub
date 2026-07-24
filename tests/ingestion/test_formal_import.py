@@ -1,25 +1,43 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from packages.cli.config import LoadedSource
-from packages.domain.models import Asset, Base, FieldResolution, Representation
+from packages.domain.models import (
+    Asset,
+    Base,
+    FieldResolution,
+    OutboxEvent,
+    Representation,
+    Source,
+)
 from packages.domain.schemas import NormalizedRecord
 from packages.ingestion import formal
+from packages.ingestion.reconciliation import (
+    UnapprovedWeakMergeError,
+    apply_weak_merge_approvals,
+    load_approved_weak_merges,
+    reconcile_records,
+)
 
 
 def _loaded_source(root: Path, source_id: str) -> LoadedSource:
+    manifest = root / "manifest.json"
+    if not manifest.exists():
+        manifest.write_text('{"items": []}\n', encoding="utf-8")
     return LoadedSource(
         source_id=source_id,
         label=source_id,
         domain="test-domain",
         adapter="generic_manifest",
         root=root,
-        manifest=root / "manifest.json",
+        manifest=manifest,
         expected_records=1,
         read_only=True,
         raw={
@@ -78,6 +96,259 @@ def _record(source_id: str, pdf_name: str) -> NormalizedRecord:
     )
 
 
+def _weak_record(source_id: str, source_record_id: str) -> NormalizedRecord:
+    return NormalizedRecord.model_validate(
+        {
+            "source_id": source_id,
+            "source_record_id": source_record_id,
+            "adapter_name": "test",
+            "asset": {
+                "title": "A Title-Only Identity",
+                "authors": ["A. Researcher"],
+                "year": 2026,
+                "domain_slugs": ["test-domain"],
+            },
+            "raw": {"id": source_record_id},
+        }
+    )
+
+
+def test_unapproved_title_year_merge_stops_before_grouping() -> None:
+    records = [_weak_record("left", "paper-1"), _weak_record("right", "paper-2")]
+
+    with pytest.raises(UnapprovedWeakMergeError) as captured:
+        formal.identity_groups(records)
+
+    assert captured.value.groups[0]["approval_status"] == "not_allowlisted"
+
+
+def test_exact_title_year_allowlist_approves_group() -> None:
+    records = [_weak_record("left", "paper-1"), _weak_record("right", "paper-2")]
+    identity_key = (
+        "title-year:a title only identity:2026"
+    )
+
+    groups, reconciliation = formal.identity_groups(
+        records,
+        approved_weak_merges={
+            identity_key: frozenset({"left:paper-1", "right:paper-2"})
+        },
+    )
+
+    assert len(groups) == 1
+    assert len(reconciliation["approved_review_groups"]) == 1
+    assert reconciliation["unapproved_review_groups"] == []
+
+
+def test_weak_merge_approval_fails_closed_when_record_set_expands() -> None:
+    records = [
+        _weak_record("left", "paper-1"),
+        _weak_record("right", "paper-2"),
+        _weak_record("third", "paper-3"),
+    ]
+    identity_key = "title-year:a title only identity:2026"
+
+    reconciliation = apply_weak_merge_approvals(
+        reconcile_records(records),
+        approvals={
+            identity_key: frozenset({"left:paper-1", "right:paper-2"})
+        },
+    )
+
+    assert reconciliation["approved_review_groups"] == []
+    assert (
+        reconciliation["unapproved_review_groups"][0]["approval_status"]
+        == "record_set_changed"
+    )
+
+
+def test_malformed_weak_merge_approval_file_fails_closed(tmp_path: Path) -> None:
+    approval_path = tmp_path / "approvals.yaml"
+    approval_path.write_text(
+        "schema_version: 1\napproved_weak_merge_groups:\n"
+        "  - identity_key: title-year:paper:2026\n"
+        "    records:\n"
+        "      - source_id: only-one\n"
+        "        source_record_id: paper\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="at least two records"):
+        load_approved_weak_merges(approval_path)
+
+
+def test_formal_import_rejects_unapproved_merge_before_database_write(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    roots = [tmp_path / "left", tmp_path / "right"]
+    for root in roots:
+        root.mkdir()
+    sources = [
+        _loaded_source(roots[0], "left"),
+        _loaded_source(roots[1], "right"),
+    ]
+    records = [_weak_record("left", "paper-1"), _weak_record("right", "paper-2")]
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: records)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        with pytest.raises(UnapprovedWeakMergeError):
+            formal.run_formal_import(
+                session,
+                sources,
+                known_domain_slugs={"test-domain"},
+            )
+        assert session.scalars(select(Source)).all() == []
+
+
+def test_formal_import_rejects_unregistered_domain_before_database_write(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "unknown"
+    root.mkdir()
+    source = _loaded_source(root, "unknown")
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        with pytest.raises(ValueError, match="taxonomy.yaml"):
+            formal.run_formal_import(
+                session,
+                [source],
+                known_domain_slugs={"another-domain"},
+            )
+        assert session.scalars(select(Source)).all() == []
+
+
+def test_formal_import_rejects_normalized_unregistered_domain_before_database_write(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "custom-adapter"
+    root.mkdir()
+    source = _loaded_source(root, "custom-adapter")
+    record = _record("custom-adapter", "paper.pdf")
+    record.asset.domain_slugs = ["adapter-injected-domain"]
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        with pytest.raises(
+            formal.FormalImportValidationError,
+            match="Adapter output contains domains",
+        ):
+            formal.run_formal_import(
+                session,
+                [source],
+                known_domain_slugs={"test-domain"},
+            )
+        assert session.scalars(select(Source)).all() == []
+
+
+def test_formal_import_rejects_expected_record_count_mismatch(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "count-mismatch"
+    root.mkdir()
+    source = _loaded_source(root, "count-mismatch")
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        with pytest.raises(
+            formal.FormalImportValidationError,
+            match="expected 1, got 0",
+        ):
+            formal.run_formal_import(
+                session,
+                [source],
+                known_domain_slugs={"test-domain"},
+            )
+        assert session.scalars(select(Source)).all() == []
+
+
+def test_formal_import_freezes_manifest_after_first_commit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "frozen"
+    root.mkdir()
+    (root / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    source = _loaded_source(root, "frozen")
+    record = _record("frozen", "paper.pdf")
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        first = formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+        assert first["schema_version"] == 2
+        source_model = session.scalar(select(Source).where(Source.alias == "frozen"))
+        assert source_model is not None
+        assert source_model.config["_frozen_manifest_sha256"]
+        assert source_model.config["_frozen_source_config_sha256"]
+
+        source.manifest.write_text('{"items": [{"id": "changed"}]}\n', encoding="utf-8")
+        with pytest.raises(
+            formal.FrozenSourceChangedError,
+            match="Frozen manifest changed",
+        ):
+            formal.run_formal_import(
+                session,
+                [source],
+                known_domain_slugs={"test-domain"},
+            )
+        session.rollback()
+
+
+def test_formal_import_freezes_source_configuration_after_first_commit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "frozen-config"
+    root.mkdir()
+    (root / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    source = _loaded_source(root, "frozen-config")
+    record = _record("frozen-config", "paper.pdf")
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+
+        changed = replace(
+            source,
+            label="changed label",
+            raw={**source.raw, "label": "changed label"},
+        )
+        with pytest.raises(
+            formal.FrozenSourceChangedError,
+            match="Frozen source configuration changed",
+        ):
+            formal.run_formal_import(
+                session,
+                [changed],
+                known_domain_slugs={"test-domain"},
+            )
+        session.rollback()
+
+
 def test_formal_import_is_idempotent_and_materializes_repository(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -96,7 +367,11 @@ def test_formal_import_is_idempotent_and_materializes_repository(
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
-        first = formal.run_formal_import(session, sources)
+        first = formal.run_formal_import(
+            session,
+            sources,
+            known_domain_slugs={"test-domain"},
+        )
         session.commit()
         assert first["counters"]["paper_assets_total"] == 1
         assert first["counters"]["repository_assets_total"] == 1
@@ -113,6 +388,10 @@ def test_formal_import_is_idempotent_and_materializes_repository(
             "implemented_by": 1,
             "field_claims": 8,
         }
+        outbox_count_after_first_import = len(
+            session.scalars(select(OutboxEvent)).all()
+        )
+        assert outbox_count_after_first_import == 2
         derived_representation = session.scalar(
             select(Representation).where(
                 Representation.representation_type == "pdf"
@@ -127,19 +406,72 @@ def test_formal_import_is_idempotent_and_materializes_repository(
         }
         session.commit()
 
-        second = formal.run_formal_import(session, sources)
+        second = formal.run_formal_import(
+            session,
+            sources,
+            known_domain_slugs={"test-domain"},
+        )
         session.commit()
         assert second["counters"]["paper_assets_created"] == 0
         assert second["counters"]["repository_assets_created"] == 0
         assert second["counters"]["representations_created"] == 0
         assert second["counters"]["relations_created"] == 0
         assert second["counters"]["relation_evidence_created"] == 0
+        assert (
+            len(session.scalars(select(OutboxEvent)).all())
+            == outbox_count_after_first_import
+        )
         session.refresh(derived_representation)
         assert derived_representation.attributes["sandbox_policy"] == "trusted_local"
         assert (
             derived_representation.attributes["sandbox_policy_content_sha256"]
             == "a" * 64
         )
+
+
+def test_shared_repository_provenance_does_not_emit_repeat_outbox(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "shared-source"
+    root.mkdir()
+    (root / "paper-1.pdf").write_bytes(b"%PDF-1.4\none")
+    (root / "paper-2.pdf").write_bytes(b"%PDF-1.4\ntwo")
+    source = _loaded_source(root, "shared-source")
+    source = replace(
+        source,
+        expected_records=2,
+        raw={**source.raw, "expected_records": 2},
+    )
+    first_record = _record("shared-source", "paper-1.pdf")
+    first_record.asset.external_identifiers = []
+    second_record = _record("shared-source", "paper-2.pdf").model_copy(deep=True)
+    second_record.source_record_id = "paper-2"
+    second_record.raw = {"id": "paper-2"}
+    second_record.asset.title = "A Different Paper Sharing The Repository"
+    second_record.asset.external_identifiers = []
+    records = [first_record, second_record]
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: records)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+        first_outbox_count = len(session.scalars(select(OutboxEvent)).all())
+        assert first_outbox_count == 3
+
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+        assert len(session.scalars(select(OutboxEvent)).all()) == first_outbox_count
 
 
 def test_repository_url_normalization_keeps_meaningful_subpath() -> None:
@@ -165,7 +497,11 @@ def test_formal_import_reapplies_active_field_override(
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as session:
-        formal.run_formal_import(session, [source])
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
         session.commit()
         asset = session.scalar(select(Asset).where(Asset.asset_type == "paper"))
         assert asset is not None
@@ -182,7 +518,11 @@ def test_formal_import_reapplies_active_field_override(
         asset.title = "My durable title"
         session.commit()
 
-        formal.run_formal_import(session, [source])
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
         session.commit()
         session.refresh(asset)
         assert asset.title == "My durable title"
