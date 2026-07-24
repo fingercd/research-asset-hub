@@ -1,0 +1,14 @@
+[
+  {
+    "id": "world-paper-001",
+    "title": "A Small World Model",
+    "year": 2022,
+    "venue": "ExampleML",
+    "module": "World Models",
+    "kind": "paper",
+    "page_url": "https://example.org/world-paper",
+    "pdf_urls": ["https://example.org/world-paper.pdf"],
+    "summary": "A compact world-model fixture.",
+    "relations": "Builds on a prior latent dynamics model."
+  }
+]

@@ -1,0 +1,12 @@
+{
+  "name": "research-asset-hub",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @research-asset-hub/web dev",
+    "build": "pnpm --filter @research-asset-hub/web build",
+    "lint": "pnpm --filter @research-asset-hub/web lint",
+    "typecheck": "pnpm --filter @research-asset-hub/web typecheck"
+  }
+}

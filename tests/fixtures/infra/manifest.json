@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "infra-paper-001",
+      "kind": "paper",
+      "module": "Training Systems",
+      "title": "A Small Distributed Training System",
+      "year": 2023,
+      "venue": "ExampleSys",
+      "source_url": "https://example.org/infra-paper",
+      "analysis": {
+        "one_sentence": "A compact infrastructure fixture."
+      },
+      "pdf": {
+        "status": "remote",
+        "resolved_url": "https://example.org/infra-paper.pdf"
+      },
+      "code": {
+        "status": "no_confirmed_public_code"
+      }
+    }
+  ]
+}

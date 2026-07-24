@@ -1,0 +1,15 @@
+[
+  {
+    "id": "FT1",
+    "title": "A Small Fine-Tuning Method",
+    "authors": "Ada Researcher; Lin Scientist",
+    "year": 2020,
+    "venue": "ExampleNLP",
+    "category": "Adapter",
+    "paper_page_url": "https://example.org/fine-tuning",
+    "pdf_url": "https://example.org/fine-tuning.pdf",
+    "abstract_zh": "一个用于契约测试的微调条目。",
+    "reading_notes": "Check which parameters remain trainable.",
+    "code_status": "no_public_code"
+  }
+]

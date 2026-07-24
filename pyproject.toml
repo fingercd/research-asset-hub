@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-asset-hub"
+version = "0.1.0"
+description = "Local-first research asset management hub"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14,<2",
+  "editables>=0.5,<1",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.7,<3",
+  "PyYAML>=6,<7",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+  "types-PyYAML>=6.0.12,<7",
+]
+
+[project.scripts]
+rah = "packages.cli.main:main"
+rah-api = "apps.api.main:run"
+rah-worker = "apps.worker.main:run"
+rah-asset-gateway = "apps.asset_gateway.main:run"
+
+[tool.hatch.build]
+dev-mode-exact = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps", "packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+cache-dir = "work/cache/ruff"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+exclude = ["apps/web"]
+cache_dir = "work/cache/mypy"
+
+[tool.pytest.ini_options]
+addopts = "--basetemp=work/pytest"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+cache_dir = "work/cache/pytest"

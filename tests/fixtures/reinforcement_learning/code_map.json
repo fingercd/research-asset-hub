@@ -1,0 +1,11 @@
+{
+  "papers": [
+    {
+      "id": 1,
+      "paper_source_url": "https://example.org/rl-paper",
+      "code_status": "no_public_code_found",
+      "repositories": [],
+      "no_code_reason": "No public implementation was declared."
+    }
+  ]
+}

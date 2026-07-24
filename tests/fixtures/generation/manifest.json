@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "papers": [
+    {
+      "paper_id": "generation-paper-001",
+      "slug": "a-small-generative-model",
+      "title": "A Small Generative Model",
+      "category": "image-core",
+      "year": 2019,
+      "venue_status": "ExampleVision",
+      "summary": "A compact generation fixture.",
+      "paper_page_url": "https://example.org/generation-paper",
+      "pdf_url": "https://example.org/generation-paper.pdf",
+      "download": {
+        "status": "remote"
+      }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+.coverage
+
+# JavaScript
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Runtime and generated data
+work/
+state/backups/
+state/catalog-export/
+outputs/reports/
+outputs/releases/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

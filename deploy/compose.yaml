@@ -1,0 +1,47 @@
+name: research-asset-hub
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: research_asset_hub
+      POSTGRES_USER: research_hub
+      POSTGRES_PASSWORD: ${HUB_POSTGRES_PASSWORD:-research_hub_local}
+    ports:
+      - "127.0.0.1:${HUB_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research_hub -d research_asset_hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    environment:
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: "true"
+      MEILI_MASTER_KEY: ${HUB_MEILISEARCH_API_KEY:-research-hub-local-meili-key}
+    ports:
+      - "127.0.0.1:${HUB_MEILISEARCH_PORT:-7700}:7700"
+    volumes:
+      - meilisearch-data:/meili_data
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    ports:
+      - "127.0.0.1:${HUB_QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${HUB_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  meilisearch-data:
+  qdrant-data:
+
