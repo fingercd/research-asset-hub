@@ -164,9 +164,8 @@ function Invoke-HubCompose {
                 '-u',
                 'root',
                 '--',
-                'sh',
-                '-lc',
-                'while true; do sleep 3600; done'
+                'sleep',
+                'infinity'
             )
     }
     $previousErrorActionPreference = $ErrorActionPreference
@@ -184,11 +183,33 @@ function Invoke-HubCompose {
 
 if ($Command -in @('start', 'dev')) {
     New-Item -ItemType Directory -Force -Path $stateDirectory, $logDirectory | Out-Null
-    $alreadyRunning = @(Get-RecordedProcesses | Where-Object { Test-RecordedProcess $_ })
-    if ($alreadyRunning.Count -gt 0) {
+    $recordedProcesses = @(Get-RecordedProcesses)
+    $alreadyRunning = @($recordedProcesses | Where-Object { Test-RecordedProcess $_ })
+    $requiredProcesses = @(
+        'api',
+        'worker',
+        'asset-gateway',
+        $(if ($Command -eq 'start') { 'web' } else { 'web-dev' })
+    )
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        $requiredProcesses += 'wsl-keepalive'
+    }
+    $runningNames = @($alreadyRunning | ForEach-Object { [string]$_.name })
+    $missingProcesses = @($requiredProcesses | Where-Object { $_ -notin $runningNames })
+    if ($missingProcesses.Count -eq 0) {
         Write-Host 'Research Asset Hub already has recorded running processes:'
         $alreadyRunning | Select-Object name, pid, started_at | Format-Table -AutoSize
         exit 0
+    }
+    if ($recordedProcesses.Count -gt 0) {
+        Write-Warning (
+            'Research Asset Hub has a partial or stale process set; restarting it. ' +
+            "Missing: $($missingProcesses -join ', ')"
+        )
+        foreach ($record in $recordedProcesses) {
+            Stop-HubProcessTree $record | Out-Null
+        }
+        Remove-Item -LiteralPath $processStatePath -Force -ErrorAction SilentlyContinue
     }
 
     if ($Command -eq 'start') {
