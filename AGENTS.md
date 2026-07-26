@@ -20,6 +20,7 @@
 - 缺失、跳过、候选、拒绝和失败都必须在报告或网站中可见，不得静默丢弃。
 - 任何写操作都要保留用户已有改动；开始前运行 `git status --short`，不得重置或覆盖无关修改。
 - `.env`、API key、Windows 凭据、token、认证缓存和私人正文不得写入提交、日志或交付报告。
+- 领域默认页面由 `config/domain-portals/v2/` 的结构化内容和 `/api/v1/domains/{slug}/portal` 生成。不得把领域正文写死在 React 中，不得把原始领域 HTML 重新塞回默认 iframe；新增领域必须保持九章节顺序，原始 HTML 只作为隔离网关的只读次级入口。
 
 ## 收到“把这组 PDF、代码、HTML 加入知识库”时
 

@@ -7,6 +7,7 @@ import type { Annotation } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { annotationBody, formatDate } from "../lib/format";
+import { invalidateResearchData } from "../lib/invalidateResearchData";
 
 function EditableAnnotation({ annotation }: { annotation: Annotation }) {
   const queryClient = useQueryClient();
@@ -21,12 +22,19 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
       }, annotation.row_version),
     onSuccess: () => {
       setEditing(false);
-      void queryClient.invalidateQueries({ queryKey: ["annotations"] });
+      invalidateResearchData(queryClient, {
+        annotations: true,
+        assetId: annotation.asset_id,
+      });
     },
   });
   const remove = useMutation({
     mutationFn: () => api.deleteAnnotation(annotation.id, annotation.row_version),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["annotations"] }),
+    onSuccess: () =>
+      invalidateResearchData(queryClient, {
+        annotations: true,
+        assetId: annotation.asset_id,
+      }),
   });
 
   if (editing) {
@@ -109,7 +117,10 @@ export function AnnotationsPage() {
       setAssetId("");
       setTitle("");
       setBody("");
-      void queryClient.invalidateQueries({ queryKey: ["annotations"] });
+      invalidateResearchData(queryClient, {
+        annotations: true,
+        assetId: assetId.trim(),
+      });
     },
   });
 

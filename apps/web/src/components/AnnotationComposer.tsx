@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Send } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { api, getApiErrorMessage } from "../api/client";
+import { invalidateResearchData } from "../lib/invalidateResearchData";
 
 export function AnnotationComposer({
   assetId,
@@ -25,8 +26,10 @@ export function AnnotationComposer({
     onSuccess: () => {
       setTitle("");
       setBody("");
-      void queryClient.invalidateQueries({ queryKey: ["annotations"] });
-      void queryClient.invalidateQueries({ queryKey: ["asset", assetId] });
+      invalidateResearchData(queryClient, {
+        annotations: true,
+        assetId,
+      });
       onCreated?.();
     },
   });

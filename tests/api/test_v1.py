@@ -226,6 +226,22 @@ def test_reading_annotations_revision_search_and_dashboard(
     domain = client.get("/api/v1/domains/agent")
     assert domain.status_code == 200
     assert domain.json()["asset_count"] == 1
+    portal = client.get("/api/v1/domains/agent/portal")
+    assert portal.status_code == 200, portal.text
+    assert portal.headers["Cache-Control"] == "no-store"
+    assert portal.json()["renderer"] == "v2"
+    assert portal.json()["domain"]["asset_count"] == 1
+    assert [item["id"] for item in portal.json()["portal"]["sections"]] == [
+        "scope",
+        "timeline",
+        "capability-method-map",
+        "landmarks",
+        "benchmarks",
+        "reading-routes",
+        "catalog",
+        "frontiers",
+        "evidence",
+    ]
 
 
 def test_problem_details_and_invalid_cursor(api_runtime: tuple[Any, ...]) -> None:

@@ -27,6 +27,9 @@ from packages.domain.models import (
     SourceRecordAsset,
     SourceRecordVersion,
 )
+from packages.domain_portals import DomainPortalLoadError, load_domain_portal
+
+from .domain_portal import export_domain_portal
 
 EXPORT_SCHEMA = "research-asset-hub.open-catalog/v1"
 DOMAIN_EXPORT_SCHEMA = "research-asset-hub.domain-catalog/v1"
@@ -518,6 +521,10 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
     )
     written.append(crate_path)
     domain_summaries: list[dict[str, Any]] = []
+    portal_count = 0
+    project_root = Path(__file__).resolve().parents[2]
+    portal_config_root = project_root / "config" / "domain-portals" / "v2"
+    source_root = project_root.parent
     for slug, domain_documents in sorted(documents_by_domain.items()):
         summary, overview = _domain_payload(slug, domain_documents)
         domain_summaries.append(summary)
@@ -535,6 +542,13 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
                 "\n".join(content_lines) + ("\n" if content_lines else ""),
             )
         )
+        try:
+            portal = load_domain_portal(portal_config_root, source_root, slug)
+        except DomainPortalLoadError:
+            portal = None
+        if portal is not None:
+            written.extend(export_domain_portal(portal, domain_root))
+            portal_count += 1
     written.append(
         atomic_write_json(
             destination / "domains.json",
@@ -550,6 +564,8 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
         "asset_count": len(documents),
         "by_domain": dict(sorted(by_domain.items())),
         "domain_count": len(domain_summaries),
+        "domain_portal_count": portal_count,
+        "domain_portal_schema": "research-asset-hub.domain-portal/v2",
         "domains": "domains.json",
         "file_count": len(written) + 1,
         "source_binaries_copied": 0,

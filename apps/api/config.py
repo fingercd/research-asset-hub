@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,6 +60,10 @@ class ApiSettings(BaseSettings):
     gateway_session_seconds: int = Field(default=900, ge=30, le=86400)
     sources_config_path: Path = PROJECT_ROOT / "config" / "sources.yaml"
     taxonomy_config_path: Path = PROJECT_ROOT / "config" / "taxonomy.yaml"
+    domain_portal_config_path: Path = (
+        PROJECT_ROOT / "config" / "domain-portals" / "v2"
+    )
+    domain_portal_renderer: Literal["v1", "v2"] = "v2"
     web_dist_path: Path = PROJECT_ROOT / "apps" / "web" / "dist"
     obsidian_vault_path: Path = Path.home() / "Documents" / "Obsidian Vault"
     obsidian_hub_directory: str = "00_Home/Research Asset Hub"

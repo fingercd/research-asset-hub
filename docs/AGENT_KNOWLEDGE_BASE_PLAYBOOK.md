@@ -16,7 +16,7 @@
 - 正式导入可重复执行，第二次不产生重复资产、表示、关系或证据；
 - 新内容已完成抽取和正式索引，失败项显式可见；
 - 可以从网站搜索到，并能安全打开登记的表示；
-- 涉及领域整体 HTML 时，领域详情能嵌入打开，统一样式和原始样式都经过验证，失败时有原生研究单元目录退路；
+- 涉及领域时，默认详情为原生全页 v2 门户，固定九章节齐全、无 iframe/双滚动；原始 HTML 只作为可用性受控的次级核对入口；
 - 来源完整性检查通过；
 - 有导入前恢复点，并留下本次验证报告；
 - 最终说明仍需用户手工完成的步骤，例如 Zotero 导入确认。
@@ -34,7 +34,8 @@
 | manifest 结构规则且是 JSON | 优先 `generic_manifest` |
 | 用户只增加一篇论文及 PDF、HTML、代码 | 新建一个 `generic_manifest` 旁车 source；不要使用批量 canonical 构建器 |
 | 受支持的 VLN、游戏 RL、WSVAD 固定目录需要首次生成规范快照 | 使用 `scripts/build_canonical_snapshot.py`，输出到新的 `config/intake/<source-id>/manifest.json` |
-| 项目定义的 10 个领域整体 HTML 需要构建门户快照 | 使用 `scripts/build_domain_portal_snapshot.py`；不得改写原 HTML |
+| 现有 10 个领域的只读整体 HTML 需要登记为原始表示 | 使用 `scripts/build_domain_portal_snapshot.py`；不得改写原 HTML |
+| 新增或更新统一领域门户内容 | 在 `config/domain-portals/v2/<slug>/` 维护固定八个内容文件并运行 v2 契约测试；不得从前端写死正文 |
 | 多个相互依赖的 manifest 或存在特殊解析语义 | 新增专用 adapter，并补契约 fixture 与测试 |
 
 开始前运行：
@@ -370,7 +371,12 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。
 5. 读取并核对阅读状态与批注摘要。只有用户本来就要求写入阅读状态或批注时才做写入验证，不得为了 smoke test 污染用户数据。
 6. 检查相似论文、图谱邻域和 RAG 引用能定位到有效锚点。
-7. 涉及领域或门户时，从首页确认领域动态出现，进入领域详情后验证默认“领域总览”、`统一样式`、`原始样式`、`新窗口打开`和研究单元 fallback；HTML 必须经 `127.0.0.1:8766` 网关打开。
+7. 涉及领域或门户时，从首页确认领域动态出现，并验证：
+   - `/api/v1/domains/<slug>/portal` 返回 v2、九章节、`stale: false`；
+   - 默认页面存在 `article[data-domain-portal]`，没有 iframe、第二层滚动或横向溢出；
+   - 桌面和 390px 窄屏均可阅读，目标页面 axe 无关键违规；
+   - “研究单元”能分页到末尾，“最近更新”和“统计”取正式库数据；
+   - “原始 HTML”只在表示可用时启用，并经 `127.0.0.1:8766` 网关新窗口打开。
 
 刷新开放目录：
 
@@ -432,7 +438,7 @@ pnpm --filter @research-asset-hub/web build
 - 抽取任务与索引状态；
 - 来源完整性结果；
 - 网站中已验证的搜索与打开方式；
-- 涉及领域门户时，10/10 或目标领域的统一/原始展示结果及 fallback 状态；
+- 涉及领域门户时，10/10 或目标领域的九章节、stale、响应式、无 iframe、原始 HTML 门禁和研究单元结果；
 - 备份 snapshot ID 和恢复演练状态；
 - 用户仍需手工执行的 Zotero、密钥轮换或外部备份步骤；
 - 相关报告和文档的绝对可点击路径。

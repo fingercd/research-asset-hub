@@ -207,6 +207,55 @@ export interface DomainOverview {
   warning: string | null;
 }
 
+export type DomainPortalReviewStatus =
+  | "generated"
+  | "reviewed"
+  | "not_applicable"
+  | "needs_review";
+
+export interface DomainPortalSection {
+  id:
+    | "scope"
+    | "timeline"
+    | "capability-method-map"
+    | "landmarks"
+    | "benchmarks"
+    | "reading-routes"
+    | "catalog"
+    | "frontiers"
+    | "evidence";
+  kind: string;
+  title: string;
+  status: DomainPortalReviewStatus;
+  content: Record<string, unknown>;
+}
+
+export interface DomainPortal {
+  schema: "research-asset-hub.domain-portal/v2";
+  slug: string;
+  label: string;
+  description: string;
+  content_version: string;
+  content_digest: string;
+  review_status: DomainPortalReviewStatus;
+  stale: boolean;
+  stale_reasons: Array<Record<string, unknown>>;
+  original_selector: {
+    source_id: string;
+    source_record_id: string;
+  };
+  sections: DomainPortalSection[];
+}
+
+export interface DomainPortalResponse {
+  schema:
+    | "research-asset-hub.domain-portal-response/v2"
+    | "research-asset-hub.domain-portal/v1";
+  renderer: "v1" | "v2";
+  domain: Domain;
+  portal: DomainPortal | null;
+}
+
 export interface GraphNode {
   id: string;
   label?: string;

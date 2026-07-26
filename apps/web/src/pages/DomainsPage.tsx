@@ -9,11 +9,11 @@ import {
   LayoutDashboard,
   LibraryBig,
 } from "lucide-react";
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { getAssetDomains } from "../api/types";
 import { DomainOverviewPanel } from "../components/DomainOverviewPanel";
+import { DomainPortalArticle } from "../components/domain-portal/DomainPortalArticle";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { ResearchUnitCard } from "../components/ResearchUnitCard";
@@ -104,12 +104,23 @@ export function DomainsPage() {
 
 export function DomainDetailPage() {
   const { slug = "" } = useParams();
-  const [activeTab, setActiveTab] = useState<
-    "overview" | "units" | "recent" | "stats"
-  >("overview");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedView = searchParams.get("view");
+  const activeTab: "overview" | "units" | "recent" | "stats" =
+    requestedView === "units" ||
+    requestedView === "recent" ||
+    requestedView === "stats"
+      ? requestedView
+      : "overview";
+  const setActiveTab = (view: "overview" | "units" | "recent" | "stats") => {
+    const next = new URLSearchParams(searchParams);
+    if (view === "overview") next.delete("view");
+    else next.set("view", view);
+    setSearchParams(next, { replace: true });
+  };
   const domain = useQuery({
-    queryKey: ["domain", slug],
-    queryFn: ({ signal }) => api.domain(slug, signal),
+    queryKey: ["domain-portal", slug],
+    queryFn: ({ signal }) => api.domainPortal(slug, signal),
     enabled: Boolean(slug),
   });
   const unitsQuery = useInfiniteQuery({
@@ -139,7 +150,8 @@ export function DomainDetailPage() {
     );
   }
 
-  const data = domain.data;
+  const data = domain.data.domain;
+  const portal = domain.data.portal;
   const units = unitsQuery.data?.pages.flatMap((page) => page.items) ?? [];
   const coveredAssetIds = new Set(
     units.flatMap((unit) =>
@@ -274,6 +286,25 @@ export function DomainDetailPage() {
       </dl>
     </section>
   );
+
+  if (portal && domain.data.renderer === "v2") {
+    return (
+      <div className="page domain-portal-page">
+        <Link className="back-link" to="/domains">
+          <ArrowLeft size={15} aria-hidden="true" /> 返回领域
+        </Link>
+        <DomainPortalArticle
+          portal={portal}
+          domain={data}
+          activeView={activeTab}
+          onViewChange={setActiveTab}
+          units={unitsSection}
+          recent={recentSection}
+          stats={statsSection}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="page">

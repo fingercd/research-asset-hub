@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Asset, ReadingStatus } from "../api/types";
+import { invalidateResearchData } from "../lib/invalidateResearchData";
 
 const labels: Record<ReadingStatus, string> = {
   unread: "未读",
@@ -26,9 +27,7 @@ export function ReadingStatusControl({
           ? { ...current, reading_status: status, reading_state: { status } }
           : current,
       );
-      void queryClient.invalidateQueries({ queryKey: ["search"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      void queryClient.invalidateQueries({ queryKey: ["assets"] });
+      invalidateResearchData(queryClient, { assetId });
     },
   });
 

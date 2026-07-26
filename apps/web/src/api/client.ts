@@ -6,6 +6,7 @@ import type {
   Comparison,
   Dashboard,
   Domain,
+  DomainPortalResponse,
   GraphResponse,
   HealthResponse,
   Job,
@@ -345,6 +346,12 @@ export const api = {
     request<Domain>(`${API_BASE}/domains/${encodeURIComponent(slug)}`, {
       signal,
     }),
+
+  domainPortal: (slug: string, signal?: AbortSignal) =>
+    request<DomainPortalResponse>(
+      `${API_BASE}/domains/${encodeURIComponent(slug)}/portal`,
+      { signal },
+    ),
 
   graphNeighbors: (assetId: string, depth = 1, signal?: AbortSignal) =>
     request<GraphResponse>(

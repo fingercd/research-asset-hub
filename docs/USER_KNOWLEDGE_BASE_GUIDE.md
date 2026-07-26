@@ -219,6 +219,31 @@ Invoke-RestMethod `
 
 如果只是为已有领域增加一个新来源，复用已有 `domain`，不需要再建 taxonomy 项。
 
+### 如果增加的是一个全新领域
+
+除 taxonomy 和 source 外，还要建立 `config/domain-portals/v2/<slug>/`。统一门户不是让你手写另一个巨型 HTML，而是把领域内容拆成以下八个可审查文件：
+
+- `portal.yaml`：领域说明、内容版本、原始 HTML 选择器、来源 hash/mtime 和章节证据；
+- `overview.md`：领域定位与边界；
+- `timeline.yaml`：发展阶段；
+- `capability-method-map.yaml`：能力、方法和交叉单元；
+- `landmarks.yaml`：代表工作；
+- `benchmarks.yaml`：任务、数据集、指标和比较注意事项；
+- `reading-routes.yaml`：3–5 条推荐阅读路线；
+- `open-questions.md`：前沿趋势和开放问题。
+
+同时在 `config/domain-portals/v2/portal-index.yaml` 登记 slug、目录、原始 HTML selector 和允许的虚拟 mount。每个门户必须按同一顺序产生九个页面章节：领域定位、时间线、能力与方法、代表工作、评测、阅读路线、目录、前沿、证据。论文数量、阅读状态和完整研究单元目录不写进 YAML，而由 PostgreSQL 动态生成。
+
+如果只是给已有领域增加论文，不需要改门户文件；导入和索引完成后，统计与目录会自动更新。只有新资料改变了该领域的发展脉络、阅读路线或开放问题时，才更新对应内容文件并提高 `content_version`。更新后运行：
+
+```powershell
+./.venv/Scripts/python.exe -m pytest tests/contract/test_domain_portal_v2.py -q
+npm --prefix apps/web run typecheck
+npm --prefix apps/web run test
+```
+
+浏览器验收时确认默认页面没有 iframe；“原始 HTML”只是只读次级入口。
+
 ## 6. 检查后再正式导入
 
 在项目目录打开 PowerShell：
@@ -321,7 +346,7 @@ HTML 会按静态、可信本地交互或需要联网三种策略隔离打开。
 5. 确认代码仓库关系正确。
 6. 切换阅读状态并添加一条真实批注。
 
-如果本次新增或调整了领域整体 HTML，还要进入对应领域详情，确认“领域总览”默认嵌入成功，并分别测试“统一样式”“原始样式”和“新窗口打开”。样式切换只作用于网关响应，不应造成来源文件 hash 变化。
+如果本次新增或调整了领域，还要进入对应领域详情，确认原生 v2 总览九章节齐全、无 iframe、桌面和窄屏无横向溢出；再测试“原始 HTML”是否只在来源表示可用时启用并在新窗口打开。任何门户更新都不应造成来源文件 hash 或 mtime 变化。
 
 刷新开放目录：
 
