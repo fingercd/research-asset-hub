@@ -2,6 +2,8 @@
 
 本手册面向以后替用户操作 Research Asset Hub 的 Agent。目标不是“把文件扫进数据库”，而是让每次新增都有稳定身份、明确来源、可打开表示、可重建索引、可追溯关系和恢复路径。
 
+任何后续 Agent 在新增、更新、合并、重新索引或登记 PDF、代码、导读、HTML 之前，都必须先阅读项目根目录 `AGENTS.md`、本手册、`docs/USER_KNOWLEDGE_BASE_GUIDE.md` 和 `docs/architecture/source-boundaries.md`。这些要求不是建议：来源只读、全量 dry-run、导入前备份和第二次幂等导入属于交付门禁，不能因时间不足或“只是少量文件”而跳过。
+
 ## 1. 完成定义
 
 一次知识库新增只有同时满足以下条件才算完成：
@@ -14,6 +16,7 @@
 - 正式导入可重复执行，第二次不产生重复资产、表示、关系或证据；
 - 新内容已完成抽取和正式索引，失败项显式可见；
 - 可以从网站搜索到，并能安全打开登记的表示；
+- 涉及领域整体 HTML 时，领域详情能嵌入打开，统一样式和原始样式都经过验证，失败时有原生研究单元目录退路；
 - 来源完整性检查通过；
 - 有导入前恢复点，并留下本次验证报告；
 - 最终说明仍需用户手工完成的步骤，例如 Zotero 导入确认。
@@ -29,6 +32,9 @@
 | 用户给出 Downloads、Codex attachment、缓存或临时解压路径 | 不正式登记；先请用户指定永久位置 |
 | 只有 URL、没有本地文件 | 可以登记 URL 表示，并明确其联网依赖 |
 | manifest 结构规则且是 JSON | 优先 `generic_manifest` |
+| 用户只增加一篇论文及 PDF、HTML、代码 | 新建一个 `generic_manifest` 旁车 source；不要使用批量 canonical 构建器 |
+| 受支持的 VLN、游戏 RL、WSVAD 固定目录需要首次生成规范快照 | 使用 `scripts/build_canonical_snapshot.py`，输出到新的 `config/intake/<source-id>/manifest.json` |
+| 项目定义的 10 个领域整体 HTML 需要构建门户快照 | 使用 `scripts/build_domain_portal_snapshot.py`；不得改写原 HTML |
 | 多个相互依赖的 manifest 或存在特殊解析语义 | 新增专用 adapter，并补契约 fixture 与测试 |
 
 开始前运行：
@@ -40,7 +46,31 @@ git status --short
 
 保留并绕开用户已有修改。不得清理来源目录、工作树或 Docker 卷。
 
-所有已登记来源都保持只读，包括 manifest。用户明确要求 Agent 新增资料时，默认创建新的旁车 intake source；不得向七个现有来源 manifest 追加记录。若用户另行运行某个来源自己的采集/生成工程，那是独立任务，必须由该工程负责来源备份和版本化，再把冻结结果交给 Hub。
+所有已登记来源都保持只读，包括 manifest。用户明确要求 Agent 新增资料时，默认创建新的旁车 intake source；不得向任何现有来源 manifest 追加记录。若用户另行运行某个来源自己的采集/生成工程，那是独立任务，必须由该工程负责来源备份和版本化，再把冻结结果交给 Hub。
+
+### 当前批量规范快照
+
+当前登记基线包含 10 个领域、11 个只读 source 和 717 条规范化来源记录。以下四个 `canonical_snapshot` 旁车已完成正式导入并冻结：
+
+| Source | Domain / 用途 | 记录数 | 旁车 |
+| --- | --- | ---: | --- |
+| `vln-atlas-20260726` | `vision-language-navigation` | 72 | `config/intake/vln-atlas-20260726/manifest.json` |
+| `game-rl-atlas-20260724` | `game-rl` | 72 | `config/intake/game-rl-atlas-20260724/manifest.json` |
+| `wsvad-atlas-20260724` | `wsvad` | 45 | `config/intake/wsvad-atlas-20260724/manifest.json` |
+| `domain-portals-20260726` | 10 个领域整体 HTML | 10 | `config/intake/domain-portals-20260726/manifest.json` |
+
+现有四份旁车不得原地重建、追加或格式化。`canonical_snapshot` 是来源明确、字段可溯源的冻结派生层，不是“扫描整个目录”的通用导入器。普通用户新增资料仍使用 `generic_manifest`。
+
+两个构建入口及其边界：
+
+```powershell
+./.venv/Scripts/python.exe scripts/build_canonical_snapshot.py --help
+./.venv/Scripts/python.exe scripts/build_domain_portal_snapshot.py --help
+```
+
+- `build_canonical_snapshot.py` 要求 `--profile`、`--root`、`--source-id`、`--domain`、`--output`；profile 仅可为 `vln`、`game_rl`、`wsvad`。它只连接 profile 声明的固定 catalog，输出必须在只读来源根之外。
+- `build_domain_portal_snapshot.py` 构建项目固定的 10 个门户，默认输出 `config/intake/domain-portals-20260726/manifest.json`，并拒绝输出到该 intake 目录之外。
+- 两个脚本都只生成旁车，不修改来源 PDF、代码或 HTML。对已冻结输出只允许读和校验；若确需重新采集，必须新建来源/审计更正流程，不能覆盖现有 manifest。
 
 ## 3. 标准知识单元
 
@@ -147,7 +177,7 @@ API 会按 asset UUID 校验两个端点并记录审计事件；关系详情和 
 
 1. 确认用户给出的 PDF、代码和 HTML 已位于永久目录。
 2. 选择新的稳定 source ID，例如 `intake-flashattention-notes-2026`。
-3. 创建 `config/intake/<source-id>/manifest.json`；一个知识单元通常只有一个 `items` 记录。
+3. 创建 `config/intake/<source-id>/manifest.json`；一篇论文 + PDF + HTML + 代码通常只使用一个 `items` 记录和 `generic_manifest` adapter。
 4. 在 `config/sources.yaml` 新增 source 条目，`root` 指向该 intake 目录。
 5. `asset_roots` 显式指向用户永久资料目录；manifest 内只写相对于该目录的路径。
 6. 首次正式导入会自动把 manifest SHA-256 和 source 配置摘要冻结到 PostgreSQL。以后新增另一组资料时创建新 source，不改写旧旁车 manifest 或 source 条目。
@@ -309,7 +339,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/build_indexes.py `
-  --version bge_m3_v1 `
+  --version 20260726-domain-expansion `
   --report work/validation/index-build-bge-m3.json
 ```
 
@@ -340,6 +370,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。
 5. 读取并核对阅读状态与批注摘要。只有用户本来就要求写入阅读状态或批注时才做写入验证，不得为了 smoke test 污染用户数据。
 6. 检查相似论文、图谱邻域和 RAG 引用能定位到有效锚点。
+7. 涉及领域或门户时，从首页确认领域动态出现，进入领域详情后验证默认“领域总览”、`统一样式`、`原始样式`、`新窗口打开`和研究单元 fallback；HTML 必须经 `127.0.0.1:8766` 网关打开。
 
 刷新开放目录：
 
@@ -401,6 +432,7 @@ pnpm --filter @research-asset-hub/web build
 - 抽取任务与索引状态；
 - 来源完整性结果；
 - 网站中已验证的搜索与打开方式；
+- 涉及领域门户时，10/10 或目标领域的统一/原始展示结果及 fallback 状态；
 - 备份 snapshot ID 和恢复演练状态；
 - 用户仍需手工执行的 Zotero、密钥轮换或外部备份步骤；
 - 相关报告和文档的绝对可点击路径。

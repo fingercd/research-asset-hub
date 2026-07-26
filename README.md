@@ -1,19 +1,22 @@
 # Research Asset Hub
 
-Research Asset Hub 是一个只在本机运行的个人科研数字资产平台。它把七个来源目录中的论文、代码仓库、导读和历史 HTML 注册到统一数据库、搜索与关系图谱中，同时保持来源目录只读：不移动、不重命名、不覆盖原文件，也不复制原始大文件。
+Research Asset Hub 是一个只在本机运行的个人科研数字资产平台。它把当前 10 个研究领域、11 个已登记来源中的论文、代码仓库、导读和历史 HTML 注册到统一数据库、搜索与关系图谱中，同时保持来源目录只读：不移动、不重命名、不覆盖原文件，也不复制原始大文件。
 
-当前 v1 数据基线：
+当前已验证登记基线（2026-07-26 正式导入报告）：
 
-- 7 个领域来源、518 条来源记录
-- 483 篇论文、316 个代码仓库，共 799 个规范资产
-- 2,408 个表示，其中 2,399 个可用、9 个明确标记为缺失
-- 1,753 个关系候选，逻辑边去重，多来源依据单独保存在 `relation_evidence`
-- 228,704 个可追溯文本/代码 chunk
-- 799 个资产和 62,704 个 chunk 使用本地 BGE-M3 向量索引
+- 10 个领域、11 个只读来源、717 条规范化来源记录
+- 651 篇论文资产、387 个代码仓库资产，另有 10 个系统隐藏的领域总览集合资产
+- 3,136 个表示候选，其中 3,127 个可用、9 个明确标记为缺失
+- 本轮新增来源记录：视觉语言导航（VLN）72、游戏强化学习 72、弱监督视频异常检测（WSVAD）45，以及 10 条领域整体 HTML 门户记录
+- 10/10 个领域整体 HTML 已验证可在 Hub 统一样式与来源原始样式之间切换
+- 未改变输入的第二次正式导入新增计数全部为 0；导入后来源完整性检查为 0 mismatch
+
+抽取、关键词索引和向量索引会随增量资料重建；当前运行状态以 `/api/health` 和 `work/validation/` 中最近一次对应报告为准，不沿用旧基线数字推断。
 
 ## 功能
 
 - 跨领域精确、混合与语义搜索；支持题名、DOI、arXiv、作者、代码符号、批注及组合筛选。
+- 首页和领域目录从 API 动态显示全部已登记领域；领域详情默认内嵌该领域的整体 HTML，并可切换“统一样式/原始样式”。
 - 搜索卡片直接打开 PDF、代码、导读或原始 HTML，并显示阅读状态与约 60 字批语摘要；没有批注时显示“无”。
 - 统一资产详情页：元数据、阅读状态、批注、PDF、代码、导读、关系、相似论文和隔离 HTML。
 - PostgreSQL 关系图谱，支持邻居、1–3 跳、最短路径、共同邻居和状态过滤。
@@ -71,18 +74,31 @@ pnpm --filter @research-asset-hub/web build
 
 ## 日常更新资料
 
-先做只读检查，再正式增量导入：
+完整增量导入必须按“只读检查 → 全量 dry-run → 备份 → 正式导入两次”的顺序执行：
 
 ```powershell
 .\scripts\hub.ps1 preflight
+.\scripts\hub.ps1 validate -All -Json
 .\scripts\hub.ps1 inventory -All
 .\scripts\hub.ps1 ingest -All -DryRun
+.\.venv\Scripts\python.exe scripts\create_backup.py `
+  --report work\validation\backup-before-ingest.json
+.\scripts\hub.ps1 ingest -All
 .\scripts\hub.ps1 ingest -All
 ```
 
-正式导入是幂等的；连续执行两次时，第二次的论文、仓库、关系和表示新增数应全部为 0。报告写入 `work/validation/`。
+两次正式导入之间不得修改 manifest、来源配置或来源文件；第二次的来源记录、版本、论文、仓库、表示、关系、关系证据和字段声明新增数都应为 0。报告写入 `work/validation/`。
 
-以后由 Agent 增加资料时，不修改七个既有来源；在 `config/intake/<source-id>/manifest.json` 创建冻结的旁车清单，并在 `config/sources.yaml` 注册新的只读来源。增加新领域时，还要在 `config/taxonomy.yaml` 登记稳定领域 slug；常见 JSON manifest 使用通用适配器即可，不需要修改前端领域枚举。
+以后由用户或 Agent 增加一篇论文及其 PDF、HTML、代码时，不修改任何已登记来源；在 `config/intake/<source-id>/manifest.json` 创建新的旁车清单，并在 `config/sources.yaml` 注册新的只读来源。普通单知识单元使用 `generic_manifest`；增加新领域时，再在 `config/taxonomy.yaml` 登记稳定领域 slug。完整示例见 [用户自行增加知识库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)。
+
+VLN、游戏强化学习、WSVAD 的确定性规范快照以及 10 个领域门户快照也位于 `config/intake/`。对应构建入口是：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_canonical_snapshot.py --help
+.\.venv\Scripts\python.exe scripts\build_domain_portal_snapshot.py --help
+```
+
+前者只支持固定的 `vln`、`game_rl`、`wsvad` profile，后者只构建项目登记的 10 个领域门户；两者都不改写来源文件。当前旁车已经过正式导入并冻结，不得为“刷新”而原地重建或改写。新增普通论文也不要使用这两个批量构建器。
 
 重新抽取和构建正式索引：
 
@@ -90,7 +106,7 @@ pnpm --filter @research-asset-hub/web build
 .\.venv\Scripts\python.exe scripts\seed_jobs.py
 .\.venv\Scripts\python.exe -m apps.worker.main
 .\.venv\Scripts\python.exe scripts\build_indexes.py `
-  --version bge_m3_v1 `
+  --version 20260726-domain-expansion `
   --report work\validation\index-build-bge-m3.json
 ```
 
@@ -98,7 +114,7 @@ pnpm --filter @research-asset-hub/web build
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_indexes.py `
-  --version bge_m3_v1 `
+  --version 20260726-domain-expansion `
   --keyword-only `
   --report work\validation\index-build-keywords.json
 ```

@@ -3,10 +3,15 @@ import { Database, Search, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { ReadingStatus, SearchMode } from "../api/types";
-import { AssetCard } from "../components/AssetCard";
+import {
+  isResearchUnitSummary,
+  type ReadingStatus,
+  type SearchMode,
+} from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
+import { ResearchUnitCard } from "../components/ResearchUnitCard";
+import { researchUnitFromAsset } from "../lib/researchUnits";
 
 const modeLabels: Record<SearchMode, string> = {
   hybrid: "混合检索",
@@ -30,6 +35,7 @@ export function SearchPage() {
   const hasCode = searchParams.get("has_code") === "true";
   const hasGuide = searchParams.get("has_guide") === "true";
   const hasAnnotation = searchParams.get("has_annotation") === "true";
+  const groupBy = assetType === "repository" ? "none" : "paper";
   const [input, setInput] = useState(q);
   const [advanced, setAdvanced] = useState({
     author,
@@ -65,12 +71,14 @@ export function SearchPage() {
       hasCode,
       hasGuide,
       hasAnnotation,
+      groupBy,
     ],
     queryFn: ({ pageParam, signal }) =>
       api.search(
         {
           q,
           mode,
+          group_by: groupBy,
           domain,
           status,
           type: assetType,
@@ -89,7 +97,6 @@ export function SearchPage() {
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
-    enabled: Boolean(q.trim()),
   });
 
   const updateFilter = (key: string, value: string) => {
@@ -167,7 +174,12 @@ export function SearchPage() {
       hasAnnotation,
   );
 
-  const assets = results.data?.pages.flatMap((page) => page.items) ?? [];
+  const units =
+    results.data?.pages
+      .flatMap((page) => page.items)
+      .map((item) =>
+        isResearchUnitSummary(item) ? item : researchUnitFromAsset(item),
+      ) ?? [];
   const total = results.data?.pages[0]?.total;
 
   return (
@@ -354,25 +366,23 @@ export function SearchPage() {
         </details>
       </form>
 
-      {!q ? (
-        <EmptyState
-          title="输入关键词开始检索"
-          detail="支持标题、作者、摘要、正文、代码说明和个人批注。按 Ctrl+K 可在任意页面快速搜索。"
-          kind="search"
+      {results.isPending ? (
+        <LoadingState
+          label={q ? `正在搜索“${q}”…` : "正在加载研究资产…"}
         />
-      ) : results.isPending ? (
-        <LoadingState label={`正在搜索“${q}”…`} />
       ) : results.isError ? (
         <ErrorState error={results.error} retry={() => void results.refetch()} />
-      ) : assets.length ? (
+      ) : units.length ? (
         <section aria-label="搜索结果">
           <h2 className="sr-only">搜索结果</h2>
           <div className="result-summary">
             <div>
-              <strong>{typeof total === "number" ? total : assets.length}</strong>
-              <span> 条结果</span>
+              <strong>{typeof total === "number" ? total : units.length}</strong>
+              <span>
+                {groupBy === "paper" ? " 个研究单元" : " 条代码仓库"}
+              </span>
               <small>
-                “{q}” · {modeLabels[mode]}
+                {q ? `“${q}”` : "全部资产"} · {modeLabels[mode]}
               </small>
             </div>
             {mode === "semantic" && (
@@ -383,8 +393,8 @@ export function SearchPage() {
             )}
           </div>
           <div className="asset-list">
-            {assets.map((asset) => (
-              <AssetCard asset={asset} key={asset.id} />
+            {units.map((unit) => (
+              <ResearchUnitCard unit={unit} key={unit.unit_id} />
             ))}
           </div>
           {results.hasNextPage && (

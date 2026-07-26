@@ -51,6 +51,8 @@ function JobRow({ job }: { job: Job }) {
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["jobs"] }),
   });
   const error = retry.error ?? cancel.error;
+  const storedMessage = jobError(job);
+  const storedMessageClass = job.status === "cancelled" ? "job-note" : "job-error";
   const progress =
     typeof job.progress === "number"
       ? Math.min(100, Math.max(0, job.progress <= 1 ? job.progress * 100 : job.progress))
@@ -75,7 +77,7 @@ function JobRow({ job }: { job: Job }) {
           <span>{Math.round(progress)}%</span>
         </div>
       )}
-      {jobError(job) && <div className="job-error">{jobError(job)}</div>}
+      {storedMessage && <div className={storedMessageClass}>{storedMessage}</div>}
       <footer>
         <span>
           {job.started_at ? `开始于 ${formatDate(job.started_at, true)}` : "尚未开始"}

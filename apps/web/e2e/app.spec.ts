@@ -58,6 +58,52 @@ const domain = {
   reading_counts: { unread: 1, reading: 0, read: 0 },
 };
 
+const researchUnit = {
+  unit_id: asset.id,
+  unit_kind: "paper",
+  primary_asset: asset,
+  related_repositories: [],
+  quick_actions: [
+    {
+      kind: "pdf",
+      status: "available",
+      representation_id: "pdf-1",
+      owner_asset_id: asset.id,
+      relation_type: null,
+      alternatives: [],
+    },
+    {
+      kind: "html",
+      status: "available",
+      representation_id: "html-1",
+      owner_asset_id: asset.id,
+      relation_type: null,
+      alternatives: [],
+    },
+    {
+      kind: "guide",
+      status: "available",
+      representation_id: "guide-1",
+      owner_asset_id: asset.id,
+      relation_type: null,
+      alternatives: [],
+    },
+    {
+      kind: "code",
+      status: "available",
+      representation_id: "repository-1",
+      owner_asset_id: asset.id,
+      relation_type: "implemented_by",
+      alternatives: [],
+    },
+  ],
+  matched_assets: [asset],
+  covered_asset_count: 1,
+  score: 0.95,
+  snippet: "论文主卡搜索片段。",
+  match_source: "paper",
+};
+
 function list<T>(items: T[]) {
   return { items, next_cursor: null, total: items.length };
 }
@@ -114,6 +160,13 @@ async function installApiMock(page: Page) {
         status: "healthy",
         checked_at: "2026-07-24T12:00:00Z",
         components: { api: { status: "healthy" } },
+        search_models: {
+          state: "cold",
+          device: null,
+          idle_seconds: 900,
+          embedder: { state: "cold", device: null },
+          reranker: { state: "cold", device: null },
+        },
       });
     }
     if (path === "/api/v1/dashboard") {
@@ -142,7 +195,14 @@ async function installApiMock(page: Page) {
     if (path === "/api/v1/assets") return json(route, list([asset]));
     if (path === "/api/v1/annotations") return json(route, list([]));
     if (path === "/api/v1/similar/paper-1") return json(route, list([secondAsset]));
-    if (path === "/api/v1/search") return json(route, list([asset]));
+    if (path === "/api/v1/search") {
+      return json(
+        route,
+        url.searchParams.get("group_by") === "paper"
+          ? { ...list([researchUnit]), group_by: "paper" }
+          : list([asset]),
+      );
+    }
     if (path === "/api/v1/graph/neighbors") {
       return json(route, {
         nodes: [
@@ -222,27 +282,23 @@ test("搜索卡片提供四种快捷打开并显示空批注", async ({ page }) 
   const card = page.locator(".asset-card").filter({ hasText: "示例论文" });
   await expect(card).toBeVisible();
   await expect(card.locator(".annotation-snippet")).toContainText("批注：无");
-  await expect(card.getByRole("link", { name: "PDF", exact: true })).toHaveAttribute(
-    "href",
-    "/mock/paper.pdf",
+  for (const label of ["PDF", "HTML", "导读", "代码"]) {
+    await expect(card.getByRole("button", { name: label, exact: true })).toBeEnabled();
+  }
+  const openRequest = page.waitForRequest(
+    (request) =>
+      request.url().endsWith("/api/v1/representations/pdf-1/open-actions") &&
+      request.method() === "POST",
   );
-  await expect(card.getByRole("link", { name: "代码", exact: true })).toHaveAttribute(
-    "href",
-    "https://example.test/repository",
-  );
-  await expect(card.getByRole("link", { name: "导读", exact: true })).toHaveAttribute(
-    "href",
-    "/mock/guide",
-  );
-  await expect(
-    card.getByRole("link", { name: "原始 HTML", exact: true }),
-  ).toHaveAttribute("href", "/mock/original-html");
+  await card.getByRole("button", { name: "PDF", exact: true }).click();
+  await openRequest;
 
   await page.getByText("更多筛选", { exact: true }).click();
   await page.getByLabel("资产类型").selectOption("paper");
   await page.getByLabel("作者").fill("研究者甲");
   await page.getByLabel("起始年份").fill("2020");
-  await page.getByLabel("PDF", { exact: true }).check();
+  await page.getByRole("checkbox", { name: "PDF", exact: true }).click();
+  await expect(page).toHaveURL(/has_pdf=true/);
   await page.getByRole("button", { name: "应用更多筛选" }).click();
   await expect(page).toHaveURL(/type=paper/);
   await expect(page).toHaveURL(/author=%E7%A0%94%E7%A9%B6%E8%80%85%E7%94%B2/);

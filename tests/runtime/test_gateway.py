@@ -13,6 +13,7 @@ from apps.api.database import DatabaseManager, create_database_engine
 from apps.asset_gateway.main import create_app
 from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from apps.asset_gateway.security import create_gateway_token, verify_gateway_token
+from apps.asset_gateway.theme import THEME_VERSION, ThemeInjectionError
 from packages.domain.models import (
     Asset,
     Base,
@@ -125,6 +126,128 @@ def test_signed_gateway_session_range_head_and_host_security(
 
     rejected_host = client.get("/health", headers={"Host": "evil.example"})
     assert rejected_host.status_code == 400
+
+
+def test_gateway_hub_presentation_injects_versioned_theme_and_preserves_source(
+    gateway_runtime: tuple[Any, ...],
+) -> None:
+    client, _, representation, page, settings = gateway_runtime
+    nested = page.parent / "details.html"
+    nested.write_text(
+        "<!doctype html><html><head><title>Details</title></head>"
+        "<body><h1>Nested</h1></body></html>",
+        encoding="utf-8",
+    )
+    source_content = page.read_bytes()
+    source_stat = page.stat()
+    token = create_gateway_token(
+        settings.gateway_secret,
+        representation.id,
+        ttl_seconds=60,
+        nonce="hub-theme",
+    )
+    themed_session = client.get(
+        f"/session/{representation.id}",
+        params={"token": token, "presentation": "hub"},
+        follow_redirects=False,
+    )
+    assert themed_session.status_code == 303
+    assert "rah_gateway_presentation=hub" in themed_session.headers["set-cookie"]
+
+    themed = client.get(themed_session.headers["location"])
+    assert themed.status_code == 200
+    assert f"/theme/{THEME_VERSION}.css" in themed.text
+    assert f'data-research-hub-theme="{THEME_VERSION}"' in themed.text
+    assert themed.headers["x-research-hub-presentation"] == "hub"
+    assert themed.headers["x-research-hub-theme-version"] == THEME_VERSION
+    themed_etag = themed.headers["etag"]
+    unchanged = client.get(
+        themed_session.headers["location"],
+        headers={"If-None-Match": themed_etag},
+    )
+    assert unchanged.status_code == 304
+
+    nested_response = client.get(f"/assets/{representation.id}/details.html")
+    assert nested_response.status_code == 200
+    assert f"/theme/{THEME_VERSION}.css" in nested_response.text
+    stylesheet = client.get(f"/theme/{THEME_VERSION}.css")
+    assert stylesheet.status_code == 200
+    assert "--rah-accent" in stylesheet.text
+
+    original_session = client.get(
+        f"/session/{representation.id}",
+        params={"token": token, "presentation": "original"},
+        follow_redirects=False,
+    )
+    original = client.get(original_session.headers["location"])
+    assert original.status_code == 200
+    assert original.content == source_content
+    assert original.headers["x-research-hub-presentation"] == "original"
+    assert original.headers["etag"] != themed_etag
+    assert page.read_bytes() == source_content
+    assert page.stat().st_mtime_ns == source_stat.st_mtime_ns
+
+
+def test_gateway_hub_presentation_falls_back_to_original_on_injection_failure(
+    gateway_runtime: tuple[Any, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, representation, page, settings = gateway_runtime
+
+    def reject_theme(_: bytes) -> bytes:
+        raise ThemeInjectionError("Synthetic parser failure.")
+
+    monkeypatch.setattr("apps.asset_gateway.main.inject_theme_html", reject_theme)
+    token = create_gateway_token(
+        settings.gateway_secret,
+        representation.id,
+        ttl_seconds=60,
+        nonce="hub-theme-fallback",
+    )
+    session_response = client.get(
+        f"/session/{representation.id}",
+        params={"token": token, "presentation": "hub"},
+        follow_redirects=False,
+    )
+    served = client.get(session_response.headers["location"])
+    assert served.status_code == 200
+    assert served.content == page.read_bytes()
+    assert served.headers["x-research-hub-presentation"] == "original"
+    assert served.headers["x-research-hub-theme-fallback"] == (
+        "Synthetic parser failure."
+    )
+
+
+def test_gateway_hub_presentation_falls_back_when_document_csp_blocks_theme(
+    gateway_runtime: tuple[Any, ...],
+) -> None:
+    client, _, representation, page, settings = gateway_runtime
+    source_content = (
+        b"<!doctype html><html><head>"
+        b'<meta http-equiv="Content-Security-Policy" '
+        b'content="default-src \'none\'; style-src \'none\'">'
+        b"<title>Strict CSP</title></head><body>Original</body></html>"
+    )
+    page.write_bytes(source_content)
+    token = create_gateway_token(
+        settings.gateway_secret,
+        representation.id,
+        ttl_seconds=60,
+        nonce="hub-theme-csp-fallback",
+    )
+    session_response = client.get(
+        f"/session/{representation.id}",
+        params={"token": token, "presentation": "hub"},
+        follow_redirects=False,
+    )
+
+    served = client.get(session_response.headers["location"])
+
+    assert served.status_code == 200
+    assert served.content == source_content
+    assert served.headers["x-research-hub-presentation"] == "original"
+    assert "CSP" in served.headers["x-research-hub-theme-fallback"]
+    assert f'data-research-hub-theme="{THEME_VERSION}"' not in served.text
 
 
 def test_gateway_rejects_invalid_or_expired_token(
@@ -265,6 +388,75 @@ def test_file_mount_resolves_html_children_from_parent_directory(
     child = client.get(f"/assets/{representation.id}/site.css")
     assert child.status_code == 200
     assert child.text == stylesheet.read_text(encoding="utf-8")
+
+
+def test_strict_file_mount_blocks_unregistered_siblings_and_allows_explicit_mount(
+    gateway_runtime: tuple[Any, ...],
+) -> None:
+    client, database, representation, page, settings = gateway_runtime
+    sibling = page.parent / "unregistered.css"
+    sibling.write_text("body { background: red; }", encoding="utf-8")
+    static_directory = page.parent / "portal-static"
+    static_directory.mkdir()
+    allowed = static_directory / "allowed.css"
+    allowed.write_text("body { background: green; }", encoding="utf-8")
+    with database.session() as session:
+        stored = session.get(Representation, representation.id)
+        assert stored is not None and stored.source_id is not None
+        stored.attributes = {"strict_mounts": True}
+        session.add_all(
+            [
+                RepresentationMount(
+                    representation_id=stored.id,
+                    mount_path="/",
+                    source_id=stored.source_id,
+                    root_key="html",
+                    path_ref="index.html",
+                    priority=100,
+                ),
+                RepresentationMount(
+                    representation_id=stored.id,
+                    mount_path="/static",
+                    source_id=stored.source_id,
+                    root_key="html",
+                    path_ref="portal-static",
+                    priority=110,
+                ),
+            ]
+        )
+
+    token = create_gateway_token(
+        settings.gateway_secret,
+        representation.id,
+        ttl_seconds=60,
+        nonce="strict-mounts",
+    )
+    session_response = client.get(
+        f"/session/{representation.id}",
+        params={"token": token},
+        follow_redirects=False,
+    )
+    entrypoint = client.get(session_response.headers["location"])
+    assert entrypoint.status_code == 200
+    assert entrypoint.content == page.read_bytes()
+
+    registered_child = client.get(
+        f"/assets/{representation.id}/static/allowed.css"
+    )
+    assert registered_child.status_code == 200
+    assert registered_child.text == allowed.read_text(encoding="utf-8")
+
+    blocked_sibling = client.get(
+        f"/assets/{representation.id}/unregistered.css"
+    )
+    assert blocked_sibling.status_code == 404
+    assert blocked_sibling.content != sibling.read_bytes()
+    traversal = client.get(
+        f"/assets/{representation.id}/static/%2e%2e/unregistered.css",
+        follow_redirects=False,
+    )
+    assert traversal.status_code in {403, 404}
+    assert traversal.content != sibling.read_bytes()
 
 
 def test_directory_representation_lists_code_but_blocks_secrets(

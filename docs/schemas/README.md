@@ -42,6 +42,22 @@ schema = normalized_record_json_schema()
 
 The generated document targets JSON Schema 2020-12.
 
+`canonical-source-snapshot.schema.json` is the immutable intake-sidecar
+contract for rich sources. It records every explicit catalog input and its
+SHA-256, exact upstream field pointers, all representation entrypoints,
+revisions, tree digests, materialization metadata and mounts, plus confirmed
+repository relations with evidence. The sidecar may live only below
+`config/intake/<source-id>/`; its `path_ref` values remain relative to the
+separate, read-only source root.
+
+Regenerate that checked-in schema from the Pydantic contract with:
+
+```python
+from packages.adapters import canonical_snapshot_json_schema
+
+schema = canonical_snapshot_json_schema()
+```
+
 ## Open exports
 
 - JSONL is the lossless interchange format and includes a type envelope per
@@ -50,3 +66,8 @@ The generated document targets JSON Schema 2020-12.
 - RO-Crate writes `ro-crate-metadata.json` and describes source files through
   `source://<source>/<declared-root>/<relative-path>` identifiers; it does not
   copy or mutate the files.
+- `domain-catalog.schema.json` validates each `domains/<slug>/domain.json`
+  summary. Hidden domain-overview collection assets are excluded from content
+  counts.
+- `domain-overview.schema.json` validates the stable representation pointer
+  used by domain portals without exposing an absolute source path.

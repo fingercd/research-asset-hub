@@ -7,6 +7,7 @@ from .job_recovery import (
     retry_failed_extractions,
     supersede_extraction_generation,
 )
+from .repository_relations import reconcile_repository_relations
 from .source_integrity import (
     SourceIntegrityMismatch,
     SourceIntegrityReport,
@@ -18,6 +19,7 @@ __all__ = [
     "database_counts",
     "identity_groups",
     "retry_failed_extractions",
+    "reconcile_repository_relations",
     "supersede_extraction_generation",
     "run_dry_run",
     "run_formal_import",

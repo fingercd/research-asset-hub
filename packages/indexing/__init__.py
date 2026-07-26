@@ -37,6 +37,7 @@ from .meili import (
     ResilientKeywordIndex,
     tokenize,
 )
+from .model_lifecycle import ManagedModel, ModelRuntimeStatus
 from .models import (
     BackendHealth,
     BackendState,
@@ -83,6 +84,8 @@ __all__ = [
     "LexicalReranker",
     "MeilisearchAdmin",
     "MeilisearchIndex",
+    "ManagedModel",
+    "ModelRuntimeStatus",
     "PostgresIndexCatalog",
     "QdrantAdmin",
     "QdrantIndex",

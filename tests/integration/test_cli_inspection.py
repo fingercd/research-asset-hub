@@ -6,7 +6,11 @@ from typing import Any
 import pytest
 
 from packages.cli.config import load_domain_slugs, load_sources
-from packages.cli.inspection import build_inventory_report, build_preflight_report
+from packages.cli.inspection import (
+    build_inventory_report,
+    build_preflight_report,
+    docker_status,
+)
 from packages.cli.main import main
 
 BASELINE_SOURCE_IDS = frozenset(
@@ -52,6 +56,13 @@ def test_preflight_accounts_for_all_source_records() -> None:
     assert sum(item["record_count"] or 0 for item in observed.values()) >= BASELINE_MIN_RECORDS
 
 
+def test_preflight_detects_the_supported_wsl_docker_backend() -> None:
+    status = docker_status()
+
+    assert status["available"] is True
+    assert status["backend"] in {"native", "wsl"}
+
+
 def test_inventory_accounts_for_configured_source_records() -> None:
     report = build_inventory_report(load_sources())
 
@@ -60,6 +71,21 @@ def test_inventory_accounts_for_configured_source_records() -> None:
     assert report["totals"]["source_record_count"] >= BASELINE_MIN_RECORDS
     assert report["totals"]["declared_pdf_files"] >= 427
     assert report["totals"]["declared_html_files"] >= 500
+
+
+def test_system_portal_source_does_not_count_all_workspace_files_as_its_assets() -> None:
+    report = build_inventory_report(load_sources())
+    portal = next(
+        source
+        for source in report["sources"]
+        if source["id"] == "domain-portals-20260726"
+    )
+
+    assert portal["formal_html"]["matched_files"] == 10
+    assert portal["visible_assets"] == {
+        "pdf_files": 0,
+        "html_files_in_declared_html_root": 0,
+    }
 
 
 def test_formal_ingest_uses_the_configured_database_after_checkpoint(

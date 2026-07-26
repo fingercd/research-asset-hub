@@ -19,11 +19,12 @@ const actions: QuickAction[] = [
     match: (item) => getRepresentationType(item) === "pdf",
   },
   {
-    key: "code",
-    label: "代码",
-    icon: Code2,
+    key: "html",
+    label: "HTML",
+    icon: ExternalLink,
     match: (item) =>
-      ["repository", "source_code", "notebook"].includes(getRepresentationType(item)),
+      ["html", "html_document"].includes(getRepresentationType(item)) &&
+      item.role !== "guide",
   },
   {
     key: "guide",
@@ -34,12 +35,11 @@ const actions: QuickAction[] = [
       item.role === "guide",
   },
   {
-    key: "html",
-    label: "原始 HTML",
-    icon: ExternalLink,
+    key: "code",
+    label: "代码",
+    icon: Code2,
     match: (item) =>
-      ["html", "html_document"].includes(getRepresentationType(item)) &&
-      item.role !== "guide",
+      ["repository", "source_code", "notebook"].includes(getRepresentationType(item)),
   },
 ];
 
@@ -71,7 +71,11 @@ export function RepresentationActions({
   return (
     <div className="quick-actions" aria-label="快速打开">
       {actions.map((action) => {
-        const representation = representations.find(action.match);
+        const representation = representations.find(
+          (item) =>
+            action.match(item) &&
+            (item.availability === undefined || item.availability === "available"),
+        );
         if (!representation && !showUnavailable) return null;
         const url = directUrl(representation);
         const Icon = action.icon;

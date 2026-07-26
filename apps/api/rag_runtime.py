@@ -312,22 +312,23 @@ def retrieve_candidates(
     remote_vector: list[SearchHit] = []
     if search_runtime is not None and question.strip():
         try:
-            for index_name in ("documents", "code", "annotations"):
-                remote_keyword.extend(
-                    search_runtime.suite.keyword_indexes[index_name].search(
-                        question,
-                        limit=100,
+            with search_runtime.activity():
+                for index_name in ("documents", "code", "annotations"):
+                    remote_keyword.extend(
+                        search_runtime.suite.keyword_indexes[index_name].search(
+                            question,
+                            limit=100,
+                        )
                     )
-                )
-            embedder = search_runtime.service.embedder
-            if embedder is not None:
-                query_vector = embedder.encode([question])[0]
-                remote_vector.extend(
-                    search_runtime.suite.chunk_vectors.search(
-                        query_vector,
-                        limit=100,
+                embedder = search_runtime.service.embedder
+                if embedder is not None:
+                    query_vector = embedder.encode([question])[0]
+                    remote_vector.extend(
+                        search_runtime.suite.chunk_vectors.search(
+                            query_vector,
+                            limit=100,
+                        )
                     )
-                )
         except Exception:
             remote_keyword = []
             remote_vector = []

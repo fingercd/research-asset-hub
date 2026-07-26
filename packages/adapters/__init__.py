@@ -10,6 +10,15 @@ from .base import (
     string_list,
     string_or_none,
 )
+from .canonical_snapshot import (
+    CANONICAL_SNAPSHOT_SCHEMA_VERSION,
+    CanonicalFieldPointer,
+    CanonicalSnapshotAdapter,
+    CanonicalSnapshotDocument,
+    CanonicalSnapshotInput,
+    CanonicalSnapshotItem,
+    canonical_snapshot_json_schema,
+)
 from .fine_tuning import FineTuningAdapter
 from .generation import GenerationAdapter
 from .generic import GenericManifestAdapter
@@ -26,6 +35,12 @@ __all__ = [
     "AdapterRegistry",
     "AgentAdapter",
     "BaseAdapter",
+    "CANONICAL_SNAPSHOT_SCHEMA_VERSION",
+    "CanonicalFieldPointer",
+    "CanonicalSnapshotAdapter",
+    "CanonicalSnapshotDocument",
+    "CanonicalSnapshotInput",
+    "CanonicalSnapshotItem",
     "DEFAULT_REGISTRY",
     "FineTuningAdapter",
     "GenerationAdapter",
@@ -35,6 +50,7 @@ __all__ = [
     "ScannedRecord",
     "WorldModelAdapter",
     "build_default_registry",
+    "canonical_snapshot_json_schema",
     "get_in",
     "http_urls",
     "stable_uuid7",

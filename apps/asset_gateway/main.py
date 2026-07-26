@@ -21,9 +21,17 @@ from apps.api.config import ApiSettings, get_settings
 from apps.api.database import DatabaseManager, DatabaseUnavailable
 from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from apps.asset_gateway.security import InvalidGatewayToken, verify_gateway_token
+from apps.asset_gateway.theme import (
+    THEME_STYLESHEET_PATH,
+    THEME_VERSION,
+    ThemeInjectionError,
+    inject_theme_html,
+    theme_etag,
+)
 from packages.domain.models import Representation, RepresentationMount, Source
 
 COOKIE_NAME = "rah_gateway_session"
+PRESENTATION_COOKIE_NAME = "rah_gateway_presentation"
 _SENSITIVE_NAMES = frozenset(
     {
         ".npmrc",
@@ -39,6 +47,11 @@ _SENSITIVE_NAMES = frozenset(
     }
 )
 _HTML_REPRESENTATION_TYPES = frozenset({"html", "guide", "analysis", "html_document"})
+
+
+def _attribute_enabled(representation: Representation, key: str) -> bool:
+    value = (representation.attributes or {}).get(key)
+    return value is True or (isinstance(value, str) and value.casefold() == "true")
 
 
 def _html_policy(representation: Representation | None) -> str:
@@ -135,6 +148,7 @@ def _resolve_registered_file(
         representation = session.get(Representation, representation_id)
         if representation is None or representation.deleted_at is not None:
             raise FileNotFoundError("Unknown representation.")
+        strict_mounts = _attribute_enabled(representation, "strict_mounts")
         mounts = list(
             session.scalars(
                 select(RepresentationMount).where(
@@ -155,7 +169,19 @@ def _resolve_registered_file(
             if source is None or not source.enabled:
                 continue
             mount_ref = PurePosixPath(mount.path_ref.replace("\\", "/"))
-            if representation.materialization_kind == "file" and (
+            mount_prefix = mount.mount_path.replace("\\", "/").strip("/")
+            if representation.materialization_kind == "file" and strict_mounts:
+                if not mount_prefix:
+                    if remainder not in {"", mount_ref.as_posix()}:
+                        continue
+                    registered_ref = mount_ref.as_posix()
+                else:
+                    registered_ref = (
+                        mount_ref.as_posix()
+                        if not remainder
+                        else _join_ref(mount_ref.as_posix(), remainder)
+                    )
+            elif representation.materialization_kind == "file" and (
                 not remainder or remainder == mount_ref.as_posix()
             ):
                 registered_ref = mount_ref.as_posix()
@@ -192,6 +218,10 @@ def _resolve_registered_file(
                 if index_candidate.is_file():
                     candidate = index_candidate
             return representation, candidate
+        if strict_mounts:
+            raise FileNotFoundError(
+                "Strict-mount representation does not expose this asset path."
+            )
         if representation.source_id is None or representation.path_ref is None:
             raise FileNotFoundError("Representation has no registered local source.")
         source = session.get(Source, representation.source_id)
@@ -281,6 +311,38 @@ def _directory_listing(
     return HTMLResponse(document)
 
 
+def _etag_matches(request: Request, etag: str) -> bool:
+    supplied = request.headers.get("if-none-match")
+    if supplied is None:
+        return False
+    return any(
+        candidate.strip() in {"*", etag, f"W/{etag}"}
+        for candidate in supplied.split(",")
+    )
+
+
+def _themed_html_response(file_path: Path, request: Request) -> Response:
+    try:
+        themed_content = inject_theme_html(file_path.read_bytes())
+    except OSError as error:
+        raise ThemeInjectionError(
+            f"The registered HTML could not be read: {type(error).__name__}."
+        ) from error
+    etag = theme_etag(themed_content)
+    headers = {
+        "ETag": etag,
+        "Content-Length": str(len(themed_content)),
+        "X-Research-Hub-Theme-Version": THEME_VERSION,
+    }
+    if _etag_matches(request, etag):
+        return Response(status_code=304, headers=headers)
+    return Response(
+        content=b"" if request.method == "HEAD" else themed_content,
+        media_type="text/html; charset=utf-8",
+        headers=headers,
+    )
+
+
 def create_app(
     settings: ApiSettings | None = None,
     *,
@@ -328,6 +390,9 @@ def create_app(
             "Content-Type",
             "ETag",
             "Last-Modified",
+            "X-Research-Hub-Presentation",
+            "X-Research-Hub-Theme-Fallback",
+            "X-Research-Hub-Theme-Version",
         ],
     )
 
@@ -353,6 +418,12 @@ def create_app(
             response.headers["X-Research-Hub-HTML-Policy"] = _html_policy(
                 representation
             )
+        presentation = getattr(request.state, "presentation", None)
+        if presentation in {"hub", "original"}:
+            response.headers["X-Research-Hub-Presentation"] = presentation
+        theme_fallback = getattr(request.state, "theme_fallback", None)
+        if isinstance(theme_fallback, str) and theme_fallback:
+            response.headers["X-Research-Hub-Theme-Fallback"] = theme_fallback
         return response
 
     @application.get("/health")
@@ -376,11 +447,24 @@ def create_app(
             "detail": "Only registered representation IDs with signed sessions are served.",
         }
 
+    @application.get(f"/theme/{THEME_VERSION}.css")
+    def theme_stylesheet() -> Response:
+        return FileResponse(
+            THEME_STYLESHEET_PATH,
+            media_type="text/css",
+            filename=None,
+            content_disposition_type="inline",
+        )
+
     @application.get("/session/{representation_id}")
     def start_session(
         representation_id: UUID,
         request: Request,
         token: str = Query(min_length=20, max_length=4096),
+        presentation: str = Query(
+            "original",
+            pattern="^(hub|original)$",
+        ),
     ) -> Response:
         try:
             verify_gateway_token(
@@ -400,6 +484,13 @@ def create_app(
                 404,
                 "表示层不存在",
                 "No registered representation exists for this ID.",
+                request.url.path,
+            )
+        if representation.availability != "available":
+            return _problem(
+                409,
+                "表示层不可打开",
+                "Only representations with availability=available can start a session.",
                 request.url.path,
             )
         target = f"/assets/{representation_id}/"
@@ -432,6 +523,15 @@ def create_app(
             samesite="strict",
             path=f"/assets/{representation_id}",
         )
+        response.set_cookie(
+            PRESENTATION_COOKIE_NAME,
+            presentation,
+            max_age=app_settings.gateway_session_seconds,
+            httponly=True,
+            secure=False,
+            samesite="strict",
+            path=f"/assets/{representation_id}",
+        )
         return response
 
     async def serve_asset(
@@ -439,6 +539,7 @@ def create_app(
         request: Request,
         asset_path: str,
         gateway_session: str | None,
+        gateway_presentation: str | None,
     ) -> Response:
         if request.method not in {"GET", "HEAD"}:
             return _problem(
@@ -462,6 +563,22 @@ def create_app(
                 asset_path,
             )
             request.state.representation = representation
+            requested_presentation = (
+                gateway_presentation
+                if gateway_presentation in {"hub", "original"}
+                else "original"
+            )
+            if (
+                requested_presentation == "hub"
+                and representation.representation_type
+                not in _HTML_REPRESENTATION_TYPES
+            ):
+                request.state.presentation = "original"
+                request.state.theme_fallback = (
+                    "Hub presentation applies only to registered HTML representations."
+                )
+            else:
+                request.state.presentation = requested_presentation
         except InvalidGatewayToken as error:
             return _problem(403, "资产访问会话无效", str(error), request.url.path)
         except UnsafeAssetPath as error:
@@ -518,6 +635,17 @@ def create_app(
         media_type = (
             representation.mime_type if not asset_path else mimetypes.guess_type(file_path.name)[0]
         )
+        normalized_media_type = (media_type or "").split(";", 1)[0].casefold()
+        if (
+            request.state.presentation == "hub"
+            and representation.representation_type in _HTML_REPRESENTATION_TYPES
+            and normalized_media_type == "text/html"
+        ):
+            try:
+                return _themed_html_response(file_path, request)
+            except ThemeInjectionError as error:
+                request.state.presentation = "original"
+                request.state.theme_fallback = str(error)
         return FileResponse(
             file_path,
             media_type=media_type,
@@ -533,12 +661,17 @@ def create_app(
         representation_id: UUID,
         request: Request,
         gateway_session: str | None = Cookie(None, alias=COOKIE_NAME),
+        gateway_presentation: str | None = Cookie(
+            None,
+            alias=PRESENTATION_COOKIE_NAME,
+        ),
     ) -> Response:
         return await serve_asset(
             representation_id,
             request,
             "",
             gateway_session,
+            gateway_presentation,
         )
 
     @application.api_route(
@@ -550,12 +683,17 @@ def create_app(
         asset_path: str,
         request: Request,
         gateway_session: str | None = Cookie(None, alias=COOKIE_NAME),
+        gateway_presentation: str | None = Cookie(
+            None,
+            alias=PRESENTATION_COOKIE_NAME,
+        ),
     ) -> Response:
         return await serve_asset(
             representation_id,
             request,
             asset_path,
             gateway_session,
+            gateway_presentation,
         )
 
     return application

@@ -11,6 +11,10 @@ import type {
   Job,
   ReadingStatus,
   Representation,
+  RepresentationOpenAction,
+  RepresentationPresentation,
+  ResearchUnitSummary,
+  SearchGroupBy,
   SearchMode,
   Settings,
   SyncConflict,
@@ -18,6 +22,7 @@ import type {
 
 const API_BASE = "/api/v1";
 const DEFAULT_TIMEOUT = 12_000;
+const SEARCH_TIMEOUT = 120_000;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -180,6 +185,7 @@ function normalizeList<T>(value: unknown): ApiList<T> {
 export interface SearchParams {
   q: string;
   mode?: SearchMode;
+  group_by?: SearchGroupBy;
   domain?: string;
   status?: ReadingStatus | "";
   author?: string;
@@ -195,6 +201,49 @@ export interface SearchParams {
   cursor?: string;
 }
 
+type SearchParamsWithoutGrouping = Omit<SearchParams, "group_by">;
+
+async function search(
+  searchParams: SearchParamsWithoutGrouping & { group_by: "paper" },
+  signal?: AbortSignal,
+): Promise<ApiList<ResearchUnitSummary>>;
+async function search(
+  searchParams: SearchParamsWithoutGrouping & { group_by?: "none" },
+  signal?: AbortSignal,
+): Promise<ApiList<Asset>>;
+async function search(
+  searchParams: SearchParams,
+  signal?: AbortSignal,
+): Promise<ApiList<Asset | ResearchUnitSummary>>;
+async function search(
+  searchParams: SearchParams,
+  signal?: AbortSignal,
+): Promise<ApiList<Asset | ResearchUnitSummary>> {
+  return normalizeList<Asset | ResearchUnitSummary>(
+    await request<unknown>(
+      `${API_BASE}/search${params({
+        q: searchParams.q,
+        mode: searchParams.mode ?? "hybrid",
+        group_by: searchParams.group_by,
+        domain: searchParams.domain,
+        status: searchParams.status,
+        author: searchParams.author,
+        type: searchParams.type,
+        year_from: searchParams.year_from,
+        year_to: searchParams.year_to,
+        tag: searchParams.tag,
+        has_pdf: searchParams.has_pdf,
+        has_html: searchParams.has_html,
+        has_code: searchParams.has_code,
+        has_guide: searchParams.has_guide,
+        has_annotation: searchParams.has_annotation,
+        cursor: searchParams.cursor,
+      })}`,
+      { signal, timeout: SEARCH_TIMEOUT },
+    ),
+  );
+}
+
 export const api = {
   health: (signal?: AbortSignal) =>
     request<HealthResponse>("/api/health", { signal, timeout: 5_000 }),
@@ -202,29 +251,7 @@ export const api = {
   dashboard: (signal?: AbortSignal) =>
     request<Dashboard>(`${API_BASE}/dashboard`, { signal }),
 
-  search: async (search: SearchParams, signal?: AbortSignal) =>
-    normalizeList<Asset>(
-      await request<unknown>(
-        `${API_BASE}/search${params({
-          q: search.q,
-          mode: search.mode ?? "hybrid",
-          domain: search.domain,
-          status: search.status,
-          author: search.author,
-          type: search.type,
-          year_from: search.year_from,
-          year_to: search.year_to,
-          tag: search.tag,
-          has_pdf: search.has_pdf,
-          has_html: search.has_html,
-          has_code: search.has_code,
-          has_guide: search.has_guide,
-          has_annotation: search.has_annotation,
-          cursor: search.cursor,
-        })}`,
-        { signal },
-      ),
-    ),
+  search,
 
   assets: async (
     query: { cursor?: string; domain?: string; status?: ReadingStatus } = {},
@@ -272,10 +299,13 @@ export const api = {
       ),
     ).items,
 
-  openRepresentation: (id: string) =>
-    request<Record<string, unknown>>(
+  openRepresentation: (
+    id: string,
+    options?: { presentation?: RepresentationPresentation; embed?: boolean },
+  ) =>
+    request<RepresentationOpenAction>(
       `${API_BASE}/representations/${encodeURIComponent(id)}/open-actions`,
-      { method: "POST" },
+      { method: "POST", body: options },
     ),
 
   annotations: async (assetId?: string, signal?: AbortSignal) =>

@@ -352,6 +352,35 @@ class NormalizedAsset(DomainSchema):
         return self
 
 
+class RepresentationMountCandidate(DomainSchema):
+    """One read-only source subtree mounted into a representation bundle."""
+
+    mount_path: str = "/"
+    source_id: str
+    root_key: str = "source"
+    path_ref: str
+    read_only: bool = True
+    priority: int = 0
+
+    @field_validator("source_id", "root_key")
+    @classmethod
+    def _mount_slugs_are_valid(cls, value: str, info: Any) -> str:
+        return _validate_slug(value, label=info.field_name)
+
+    @field_validator("mount_path")
+    @classmethod
+    def _mount_path_is_bounded(cls, value: str) -> str:
+        normalized = value.strip().replace("\\", "/")
+        if normalized == "/":
+            return normalized
+        return "/" + _validate_relative_asset_path(normalized.lstrip("/"))
+
+    @field_validator("path_ref")
+    @classmethod
+    def _mount_source_path_is_bounded(cls, value: str) -> str:
+        return _validate_relative_asset_path(value)
+
+
 class RepresentationCandidate(DomainSchema):
     """A file, directory or URL representation discovered by an adapter."""
 
@@ -371,6 +400,7 @@ class RepresentationCandidate(DomainSchema):
     size_bytes: int | None = Field(default=None, ge=0)
     network_required: bool = False
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    mounts: list[RepresentationMountCandidate] = Field(default_factory=list)
     verified_at: datetime | None = None
 
     @field_validator("source_id")
@@ -402,6 +432,9 @@ class RepresentationCandidate(DomainSchema):
     def _has_location(self) -> RepresentationCandidate:
         if self.path_ref is None and self.url is None:
             raise ValueError("representation requires path_ref or url")
+        mount_paths = [mount.mount_path for mount in self.mounts]
+        if len(mount_paths) != len(set(mount_paths)):
+            raise ValueError("representation mounts must use unique mount_path values")
         return self
 
 
@@ -625,33 +658,6 @@ class IdentityCandidatePayload(DomainSchema):
         if self.left_asset_id == self.right_asset_id:
             raise ValueError("identity candidate assets must be distinct")
         return self
-
-
-class RepresentationMountCandidate(DomainSchema):
-    mount_path: str = "/"
-    source_id: str
-    root_key: str = "source"
-    path_ref: str
-    read_only: bool = True
-    priority: int = 0
-
-    @field_validator("source_id", "root_key")
-    @classmethod
-    def _mount_slugs_are_valid(cls, value: str, info: Any) -> str:
-        return _validate_slug(value, label=info.field_name)
-
-    @field_validator("mount_path")
-    @classmethod
-    def _mount_path_is_bounded(cls, value: str) -> str:
-        normalized = value.strip().replace("\\", "/")
-        if normalized == "/":
-            return normalized
-        return "/" + _validate_relative_asset_path(normalized.lstrip("/"))
-
-    @field_validator("path_ref")
-    @classmethod
-    def _mount_source_path_is_bounded(cls, value: str) -> str:
-        return _validate_relative_asset_path(value)
 
 
 class AnchorBase(DomainSchema):

@@ -11,7 +11,7 @@ from typing import Literal
 
 import httpx
 import psycopg as psycopg
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from apps.api.config import ApiSettings
 
@@ -26,11 +26,26 @@ class ComponentHealth(BaseModel):
     latency_ms: float | None = None
 
 
+class SearchModelHealth(BaseModel):
+    state: Literal["cold", "warm"]
+    device: str | None = None
+
+
+class SearchModelsHealth(BaseModel):
+    state: Literal["cold", "warm"]
+    device: str | None = None
+    idle_seconds: float = Field(ge=0)
+    idle_for_seconds: float = Field(ge=0)
+    embedder: SearchModelHealth
+    reranker: SearchModelHealth
+
+
 class HealthResponse(BaseModel):
     service: Literal["research-asset-hub-api"] = "research-asset-hub-api"
     status: Literal["healthy", "degraded"]
     checked_at: datetime
     components: dict[str, ComponentHealth]
+    search_models: SearchModelsHealth
 
 
 def _safe_error(error: Exception) -> str:
@@ -172,4 +187,11 @@ async def collect_health(settings: ApiSettings) -> HealthResponse:
         status=overall,
         checked_at=datetime.now(UTC),
         components=components,
+        search_models=SearchModelsHealth(
+            state="cold",
+            idle_seconds=settings.search_model_idle_seconds,
+            idle_for_seconds=0,
+            embedder=SearchModelHealth(state="cold"),
+            reranker=SearchModelHealth(state="cold"),
+        ),
     )

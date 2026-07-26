@@ -1,10 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, BookOpen, FolderKanban } from "lucide-react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BarChart3,
+  BookOpen,
+  Clock3,
+  FolderKanban,
+  LayoutDashboard,
+  LibraryBig,
+} from "lucide-react";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
-import { AssetCard } from "../components/AssetCard";
+import { getAssetDomains } from "../api/types";
+import { DomainOverviewPanel } from "../components/DomainOverviewPanel";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
+import { ResearchUnitCard } from "../components/ResearchUnitCard";
 
 export function DomainsPage() {
   const query = useQuery({
@@ -31,7 +43,20 @@ export function DomainsPage() {
                 <FolderKanban size={21} />
               </div>
               <div>
-                <p className="eyebrow">{domain.slug}</p>
+                <div className="domain-card-kicker">
+                  <p className="eyebrow">{domain.slug}</p>
+                  <span
+                    className={`overview-status is-${domain.overview_status ?? "unavailable"}`}
+                  >
+                    {domain.overview_status === "available"
+                      ? "总览可用"
+                      : domain.overview_status === "network_required"
+                        ? "总览需联网"
+                        : domain.overview_status === "missing"
+                          ? "总览缺失"
+                          : "暂无总览"}
+                  </span>
+                </div>
                 <h2>{domain.label ?? domain.name ?? domain.slug}</h2>
                 <p>{domain.description || "暂无领域说明。"}</p>
               </div>
@@ -44,12 +69,16 @@ export function DomainsPage() {
               )}
               <dl className="domain-counts">
                 <div>
-                  <dt>资产</dt>
-                  <dd>{domain.asset_count ?? 0}</dd>
-                </div>
-                <div>
                   <dt>论文</dt>
                   <dd>{domain.paper_count ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>仓库</dt>
+                  <dd>{domain.repository_count ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>研究单元</dt>
+                  <dd>{domain.research_unit_count ?? domain.paper_count ?? 0}</dd>
                 </div>
                 <div>
                   <dt>阅读中</dt>
@@ -75,14 +104,29 @@ export function DomainsPage() {
 
 export function DomainDetailPage() {
   const { slug = "" } = useParams();
+  const [activeTab, setActiveTab] = useState<
+    "overview" | "units" | "recent" | "stats"
+  >("overview");
   const domain = useQuery({
     queryKey: ["domain", slug],
     queryFn: ({ signal }) => api.domain(slug, signal),
     enabled: Boolean(slug),
   });
-  const assets = useQuery({
-    queryKey: ["assets", { domain: slug }],
-    queryFn: ({ signal }) => api.assets({ domain: slug }, signal),
+  const unitsQuery = useInfiniteQuery({
+    queryKey: ["search", "domain", slug, "paper"],
+    queryFn: ({ pageParam, signal }) =>
+      api.search(
+        {
+          q: "",
+          mode: "hybrid",
+          group_by: "paper",
+          domain: slug,
+          cursor: pageParam,
+        },
+        signal,
+      ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: Boolean(slug),
   });
 
@@ -96,7 +140,140 @@ export function DomainDetailPage() {
   }
 
   const data = domain.data;
-  const items = data.recent_assets?.length ? data.recent_assets : assets.data?.items ?? [];
+  const units = unitsQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const coveredAssetIds = new Set(
+    units.flatMap((unit) =>
+      [unit.primary_asset, ...unit.related_repositories]
+        .filter((asset) => getAssetDomains(asset).includes(slug))
+        .map((asset) => asset.id),
+    ),
+  );
+  const coveredAssets = coveredAssetIds.size;
+  const domainAssetCount = data.asset_count ?? coveredAssets;
+  const domainName = data.label ?? data.name ?? data.slug;
+  const unitsSection = (
+    <section className="section-block" aria-labelledby="domain-units-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">聚合目录</p>
+          <h2 id="domain-units-heading">领域研究单元</h2>
+        </div>
+        {!unitsQuery.isPending && (
+          <p className="loaded-unit-summary" aria-live="polite">
+            已加载 <strong>{units.length}</strong> 个研究单元 · 覆盖{" "}
+            <strong>{coveredAssets}</strong> / {domainAssetCount} 项资产
+          </p>
+        )}
+      </div>
+      {unitsQuery.isPending ? (
+        <LoadingState label="正在加载领域研究单元…" />
+      ) : unitsQuery.isError ? (
+        <ErrorState
+          error={unitsQuery.error}
+          retry={() => void unitsQuery.refetch()}
+        />
+      ) : units.length ? (
+        <>
+          <div className="asset-list">
+            {units.map((unit) => (
+              <ResearchUnitCard unit={unit} key={unit.unit_id} />
+            ))}
+          </div>
+          {unitsQuery.hasNextPage && (
+            <div className="load-more">
+              <button
+                className="button secondary"
+                type="button"
+                disabled={unitsQuery.isFetchingNextPage}
+                onClick={() => void unitsQuery.fetchNextPage()}
+              >
+                {unitsQuery.isFetchingNextPage ? "正在加载…" : "加载更多"}
+              </button>
+            </div>
+          )}
+        </>
+      ) : (
+        <EmptyState
+          title="这个领域还没有研究单元"
+          detail="完成对应来源的导入后，论文及其关联代码会显示在这里。"
+        />
+      )}
+    </section>
+  );
+  const recentSection = (
+    <section className="section-block" aria-labelledby="domain-recent-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">快速回到最新资料</p>
+          <h2 id="domain-recent-heading">最近更新</h2>
+        </div>
+        <p className="muted">展示最近 5 项；完整内容位于研究单元目录。</p>
+      </div>
+      {data.recent_assets?.length ? (
+        <div className="domain-mini-list">
+          {data.recent_assets.slice(0, 5).map((asset) => (
+            <Link to={`/assets/${encodeURIComponent(asset.id)}`} key={asset.id}>
+              <span>{asset.title_zh || asset.title}</span>
+              <span>
+                {[asset.year, asset.asset_type ?? asset.type]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </Link>
+          ))}
+        </div>
+      ) : (
+        <EmptyState
+          title="暂无最近更新"
+          detail="该领域完成资料导入后，最近更新会显示在这里。"
+        />
+      )}
+    </section>
+  );
+  const statsSection = (
+    <section className="section-block" aria-labelledby="domain-stats-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">动态聚合</p>
+          <h2 id="domain-stats-heading">领域统计</h2>
+        </div>
+      </div>
+      <dl className="domain-stat-grid">
+        <div>
+          <dt>全部资产</dt>
+          <dd>{domainAssetCount}</dd>
+        </div>
+        <div>
+          <dt>论文</dt>
+          <dd>{data.paper_count ?? 0}</dd>
+        </div>
+        <div>
+          <dt>仓库</dt>
+          <dd>{data.repository_count ?? 0}</dd>
+        </div>
+        <div>
+          <dt>研究单元</dt>
+          <dd>{data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}</dd>
+        </div>
+        <div>
+          <dt>未读</dt>
+          <dd>{data.reading_counts?.unread ?? 0}</dd>
+        </div>
+        <div>
+          <dt>阅读中</dt>
+          <dd>{data.reading_counts?.reading ?? 0}</dd>
+        </div>
+        <div>
+          <dt>已读</dt>
+          <dd>{data.reading_counts?.read ?? 0}</dd>
+        </div>
+        <div>
+          <dt>批注</dt>
+          <dd>{data.annotation_count ?? 0}</dd>
+        </div>
+      </dl>
+    </section>
+  );
 
   return (
     <div className="page">
@@ -112,50 +289,77 @@ export function DomainDetailPage() {
             className="button secondary"
             to={`/search?domain=${encodeURIComponent(data.slug)}`}
           >
-            搜索此领域
+            浏览或搜索此领域
           </Link>
         }
       />
       <section className="domain-hero-stats" aria-label="领域概况">
         <div>
-          <FolderKanban size={18} aria-hidden="true" />
-          <span>资产</span>
-          <strong>{data.asset_count ?? items.length}</strong>
+          <BookOpen size={18} aria-hidden="true" />
+          <span>论文</span>
+          <strong>{data.paper_count ?? 0}</strong>
         </div>
         <div>
-          <BookOpen size={18} aria-hidden="true" />
+          <LibraryBig size={18} aria-hidden="true" />
+          <span>仓库</span>
+          <strong>{data.repository_count ?? 0}</strong>
+        </div>
+        <div>
+          <FolderKanban size={18} aria-hidden="true" />
+          <span>研究单元</span>
+          <strong>{data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}</strong>
+        </div>
+        <div>
           <span>阅读中</span>
           <strong>{data.reading_counts?.reading ?? 0}</strong>
         </div>
-        <div>
-          <span>已读</span>
-          <strong>{data.reading_counts?.read ?? 0}</strong>
-        </div>
       </section>
-      <section className="section-block">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">资产目录</p>
-            <h2>领域内容</h2>
-          </div>
-        </div>
-        {assets.isPending && !data.recent_assets?.length ? (
-          <LoadingState />
-        ) : assets.isError && !data.recent_assets?.length ? (
-          <ErrorState error={assets.error} retry={() => void assets.refetch()} />
-        ) : items.length ? (
-          <div className="asset-list">
-            {items.map((asset) => (
-              <AssetCard asset={asset} key={asset.id} />
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="这个领域还没有资产"
-            detail="完成对应来源的导入后，论文和研究材料会显示在这里。"
+      <div className="domain-tabs" role="tablist" aria-label="领域内容">
+        {[
+          {
+            id: "overview" as const,
+            label: "领域总览",
+            icon: LayoutDashboard,
+          },
+          { id: "units" as const, label: "研究单元", icon: FolderKanban },
+          { id: "recent" as const, label: "最近更新", icon: Clock3 },
+          { id: "stats" as const, label: "统计", icon: BarChart3 },
+        ].map((tab) => {
+          const Icon = tab.icon;
+          return (
+            <button
+              id={`domain-tab-${tab.id}`}
+              className={activeTab === tab.id ? "is-active" : undefined}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              aria-controls={`domain-panel-${tab.id}`}
+              onClick={() => setActiveTab(tab.id)}
+              key={tab.id}
+            >
+              <Icon size={15} aria-hidden="true" />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        id={`domain-panel-${activeTab}`}
+        className="domain-tab-panel"
+        role="tabpanel"
+        aria-labelledby={`domain-tab-${activeTab}`}
+      >
+        {activeTab === "overview" && (
+          <DomainOverviewPanel
+            overview={data.overview}
+            domainName={domainName}
+            fallback={unitsSection}
           />
         )}
-      </section>
+        {activeTab === "units" && unitsSection}
+        {activeTab === "recent" && recentSection}
+        {activeTab === "stats" && statsSection}
+      </div>
     </div>
   );
 }

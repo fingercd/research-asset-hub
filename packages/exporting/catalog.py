@@ -29,6 +29,7 @@ from packages.domain.models import (
 )
 
 EXPORT_SCHEMA = "research-asset-hub.open-catalog/v1"
+DOMAIN_EXPORT_SCHEMA = "research-asset-hub.domain-catalog/v1"
 
 
 def _asset_payload(asset: Asset) -> dict[str, Any]:
@@ -388,6 +389,76 @@ def _write_asset_directory(path: Path, document: dict[str, Any]) -> list[Path]:
     ]
 
 
+def _is_domain_overview(document: dict[str, Any]) -> bool:
+    asset = document["asset"]
+    attributes = asset.get("attributes") or {}
+    return bool(
+        asset.get("asset_type") == "collection"
+        and attributes.get("kind") == "domain-overview"
+    )
+
+
+def _domain_payload(
+    slug: str,
+    documents: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    content_documents = [item for item in documents if not _is_domain_overview(item)]
+    overview_documents = [item for item in documents if _is_domain_overview(item)]
+    overview_document = overview_documents[0] if overview_documents else None
+    overview_asset = overview_document["asset"] if overview_document else None
+    attributes = (overview_asset or {}).get("attributes") or {}
+    representations = (overview_document or {}).get("representations") or []
+    html_representations = [
+        item
+        for item in representations
+        if item.get("representation_type") == "html"
+    ]
+    html_representations.sort(
+        key=lambda item: (
+            item.get("availability") != "available",
+            item.get("role") != "primary",
+            item.get("representation_id") or "",
+        )
+    )
+    overview_representation = html_representations[0] if html_representations else None
+    asset_type_counts: dict[str, int] = defaultdict(int)
+    for document in content_documents:
+        asset_type_counts[str(document["asset"]["asset_type"])] += 1
+    summary = {
+        "schema": DOMAIN_EXPORT_SCHEMA,
+        "slug": slug,
+        "label": attributes.get("domain_label") or attributes.get("label") or slug,
+        "description": attributes.get("description"),
+        "asset_count": len(content_documents),
+        "paper_count": asset_type_counts.get("paper", 0),
+        "repository_count": asset_type_counts.get("repository", 0),
+        "asset_type_counts": dict(sorted(asset_type_counts.items())),
+        "overview_status": (
+            overview_representation.get("availability")
+            if overview_representation
+            else "not_provided"
+        ),
+        "overview_asset_id": (
+            overview_asset.get("asset_id") if overview_asset else None
+        ),
+        "overview_representation_id": (
+            overview_representation.get("representation_id")
+            if overview_representation
+            else None
+        ),
+    }
+    overview = {
+        "schema": "research-asset-hub.domain-overview/v1",
+        "slug": slug,
+        "asset_id": summary["overview_asset_id"],
+        "representation_id": summary["overview_representation_id"],
+        "status": summary["overview_status"],
+        "default_presentation": attributes.get("default_presentation") or "hub",
+        "warning": attributes.get("warning"),
+    }
+    return summary, overview
+
+
 def export_operational_catalog(session: Session, destination: Path) -> dict[str, Any]:
     """Write a stable open catalog and return its manifest."""
 
@@ -397,6 +468,7 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
     lines: list[str] = []
     crate_parts: list[dict[str, str]] = []
     by_domain: dict[str, int] = defaultdict(int)
+    documents_by_domain: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for document in documents:
         asset = document["asset"]
@@ -406,6 +478,7 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
         domains = asset["domains"] or ["unclassified"]
         for domain in domains:
             by_domain[str(domain)] += 1
+            documents_by_domain[str(domain)].append(document)
             domain_path = destination / "by-domain" / str(domain) / asset_id
             written.extend(_write_asset_directory(domain_path, document))
         lines.append(json.dumps(document, ensure_ascii=False, separators=(",", ":")))
@@ -444,11 +517,40 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
         },
     )
     written.append(crate_path)
+    domain_summaries: list[dict[str, Any]] = []
+    for slug, domain_documents in sorted(documents_by_domain.items()):
+        summary, overview = _domain_payload(slug, domain_documents)
+        domain_summaries.append(summary)
+        domain_root = destination / "domains" / slug
+        written.append(atomic_write_json(domain_root / "domain.json", summary))
+        written.append(atomic_write_json(domain_root / "overview.json", overview))
+        content_lines = [
+            json.dumps(document, ensure_ascii=False, separators=(",", ":"))
+            for document in domain_documents
+            if not _is_domain_overview(document)
+        ]
+        written.append(
+            atomic_write_text(
+                domain_root / "assets.jsonl",
+                "\n".join(content_lines) + ("\n" if content_lines else ""),
+            )
+        )
+    written.append(
+        atomic_write_json(
+            destination / "domains.json",
+            {
+                "schema": DOMAIN_EXPORT_SCHEMA,
+                "domains": domain_summaries,
+            },
+        )
+    )
     manifest = {
         "schema": EXPORT_SCHEMA,
         "generated_at": generated_at.isoformat(),
         "asset_count": len(documents),
         "by_domain": dict(sorted(by_domain.items())),
+        "domain_count": len(domain_summaries),
+        "domains": "domains.json",
         "file_count": len(written) + 1,
         "source_binaries_copied": 0,
         "catalog": "catalog.jsonl",

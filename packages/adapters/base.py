@@ -19,6 +19,7 @@ from pydantic import AnyUrl, ValidationError
 
 from packages.domain.enums import (
     ImportOutcome,
+    MaterializationKind,
     RelationType,
     RepresentationRole,
     RepresentationType,
@@ -33,6 +34,7 @@ from packages.domain.schemas import (
     RelationCandidate,
     RelationEvidence,
     RepresentationCandidate,
+    RepresentationMountCandidate,
     SourceConfig,
 )
 
@@ -456,10 +458,15 @@ class BaseAdapter(ABC):
         root_key: str = "source",
         url: str | None = None,
         sha256: str | None = None,
+        entrypoint: str | None = None,
+        revision: str | None = None,
+        tree_digest: str | None = None,
+        materialization_kind: MaterializationKind = MaterializationKind.FILE,
         mime_type: str | None = None,
         size_bytes: int | None = None,
         network_required: bool = False,
         metadata_value: Mapping[str, Any] | None = None,
+        mounts: Sequence[RepresentationMountCandidate | Mapping[str, Any]] = (),
         field: str | None = None,
     ) -> RepresentationCandidate | None:
         path_reference: str | None = None
@@ -497,11 +504,21 @@ class BaseAdapter(ABC):
             root_key=root_key,
             path_ref=path_reference,
             url=valid_urls[0] if valid_urls else None,
+            entrypoint=string_or_none(entrypoint),
+            revision=string_or_none(revision),
+            tree_digest=string_or_none(tree_digest),
+            materialization_kind=materialization_kind,
             sha256=string_or_none(sha256),
             mime_type=mime_type,
             size_bytes=size_bytes,
             network_required=network_required,
             metadata=dict(metadata_value or {}),
+            mounts=[
+                mount
+                if isinstance(mount, RepresentationMountCandidate)
+                else RepresentationMountCandidate.model_validate(mount)
+                for mount in mounts
+            ],
         )
 
     def identifiers(

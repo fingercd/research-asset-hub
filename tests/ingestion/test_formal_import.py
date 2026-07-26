@@ -12,9 +12,13 @@ from packages.cli.config import LoadedSource
 from packages.domain.models import (
     Asset,
     Base,
+    FieldClaim,
     FieldResolution,
     OutboxEvent,
+    PaperProfile,
+    RepositoryProfile,
     Representation,
+    RepresentationMount,
     Source,
 )
 from packages.domain.schemas import NormalizedRecord
@@ -540,3 +544,166 @@ def test_container_source_path_is_persisted_as_windows_path(
         formal._persisted_source_path(Path("/workspace/domain/paper.pdf"))
         == "D:\\Research\\domain\\paper.pdf"
     )
+
+
+def test_non_paper_asset_does_not_receive_paper_profile(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "html-document"
+    root.mkdir()
+    (root / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    source = _loaded_source(root, "html-document")
+    record = _record("html-document", "paper.pdf")
+    record.asset.asset_type = "html_document"
+    record.representations = record.representations[:1]
+    record.relations = []
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        report = formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+
+        asset = session.scalar(select(Asset))
+        assert asset is not None
+        assert asset.asset_type == "html_document"
+        assert session.get(PaperProfile, asset.id) is None
+        assert report["counters"]["paper_assets_created"] == 0
+        assert report["counters"]["paper_assets_total"] == 0
+
+
+def test_formal_import_uses_adapter_declared_field_pointer(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "field-pointer"
+    root.mkdir()
+    (root / "paper.pdf").write_bytes(b"%PDF-1.4\n")
+    source = _loaded_source(root, "field-pointer")
+    record = _record("field-pointer", "paper.pdf")
+    record.source_path = "config/intake/field-pointer/snapshot.json"
+    record.source_fields = {
+        "field_pointers": {
+            "title": {
+                "input_path": "library/catalog/papers.json",
+                "input_sha256": "a" * 64,
+                "json_pointer": "/papers/0/title",
+            }
+        }
+    }
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+        )
+        session.commit()
+
+        claim = session.scalar(
+            select(FieldClaim).where(FieldClaim.field_path == "/title")
+        )
+        assert claim is not None
+        assert (
+            claim.source_pointer
+            == "library/catalog/papers.json#/papers/0/title"
+        )
+
+
+def test_reused_repository_unions_domains_and_preserves_bundle_contract(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    sources: list[LoadedSource] = []
+    records: list[NormalizedRecord] = []
+    for index, (source_id, domain) in enumerate(
+        (("source-a", "domain-a"), ("source-b", "domain-b"))
+    ):
+        root = tmp_path / source_id
+        (root / "code/repo/docs").mkdir(parents=True)
+        (root / f"paper-{index}.pdf").write_bytes(b"%PDF-1.4\n")
+        (root / "code/repo/README.md").write_text("# Repo\n", encoding="utf-8")
+        (root / "code/repo/docs/index.md").write_text("# Docs\n", encoding="utf-8")
+        loaded = _loaded_source(root, source_id)
+        sources.append(
+            replace(
+                loaded,
+                domain=domain,
+                raw={**loaded.raw, "domain": domain},
+            )
+        )
+        record = _record(source_id, f"paper-{index}.pdf")
+        record.asset.domain_slugs = [domain]
+        repository = record.representations[1]
+        repository.path_ref = "code/repo"
+        repository.materialization_kind = "bundle"
+        repository.entrypoint = "README.md"
+        repository.revision = "a" * 40
+        repository.tree_digest = "b" * 64
+        repository.metadata = {
+            "license": "MIT",
+            "status": "downloaded",
+            "source_label": source_id,
+        }
+        repository.mounts = [
+            {
+                "mount_path": "/docs",
+                "source_id": source_id,
+                "root_key": "source",
+                "path_ref": "code/repo/docs",
+                "read_only": True,
+                "priority": 10,
+            }
+        ]
+        records.append(record)
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: records)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        formal.run_formal_import(
+            session,
+            sources,
+            known_domain_slugs={"domain-a", "domain-b"},
+        )
+        session.commit()
+
+        repository_asset = session.scalar(
+            select(Asset).where(Asset.asset_type == "repository")
+        )
+        assert repository_asset is not None
+        assert repository_asset.domain_slugs == ["domain-a", "domain-b"]
+        profile = session.get(RepositoryProfile, repository_asset.id)
+        assert profile is not None
+        assert set(profile.attributes["source_metadata"]) == {
+            "source-a:paper-1",
+            "source-b:paper-1",
+        }
+        representations = session.scalars(
+            select(Representation).where(
+                Representation.asset_id == repository_asset.id
+            )
+        ).all()
+        assert len(representations) == 2
+        assert {item.materialization_kind for item in representations} == {"bundle"}
+        assert {item.entrypoint for item in representations} == {"README.md"}
+        assert {item.revision for item in representations} == {"a" * 40}
+        assert {item.tree_digest for item in representations} == {"b" * 64}
+        mounts = session.scalars(
+            select(RepresentationMount).where(
+                RepresentationMount.representation_id.in_(
+                    [item.id for item in representations]
+                )
+            )
+        ).all()
+        assert len(mounts) == 4
+        assert {mount.mount_path for mount in mounts} == {"/", "/docs"}

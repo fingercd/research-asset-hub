@@ -92,6 +92,20 @@ def test_native_risk_languages_use_bounded_plain_text_fallback(
     assert result.chunks[0].anchor["kind"] == "line"
 
 
+def test_cuda_headers_and_lua_use_bounded_plain_text_fallback(
+    tmp_path: Path,
+) -> None:
+    for suffix in (".cu", ".cuh", ".lua"):
+        path = tmp_path / f"kernel{suffix}"
+        path.write_text("int main() { return 0; }\n", encoding="utf-8")
+
+        result = CodeExtractor().extract(path, representation_id=f"code-{suffix}")
+
+        assert result.status == ExtractionStatus.SUCCEEDED
+        assert result.metadata["parser"] == "plain_text"
+        assert result.chunks[0].anchor["kind"] == "line"
+
+
 def test_tree_sitter_can_be_disabled_for_crash_isolation(tmp_path: Path) -> None:
     path = tmp_path / "worker.ts"
     path.write_text(

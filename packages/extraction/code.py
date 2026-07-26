@@ -30,6 +30,8 @@ _CODE_SUFFIXES = {
     ".c",
     ".cc",
     ".cpp",
+    ".cu",
+    ".cuh",
     ".h",
     ".hpp",
     ".cs",
@@ -38,6 +40,7 @@ _CODE_SUFFIXES = {
     ".sql",
     ".r",
     ".jl",
+    ".lua",
 }
 _TREE_SITTER_LANGUAGES = {
     ".py": "python",
@@ -86,7 +89,7 @@ _SYMBOL_NODE_TYPES = frozenset(
 
 class CodeExtractor:
     name = "code"
-    version = "4"
+    version = "5"
 
     def __init__(
         self,

@@ -69,6 +69,7 @@ from packages.domain.schemas import (
     NormalizedRecord,
     RelationCandidate,
     RepresentationCandidate,
+    RepresentationMountCandidate,
     SourceConfig,
 )
 
@@ -550,7 +551,8 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
         asset = Asset(**values)
         ctx.session.add(asset)
         ctx.session.flush()
-        ctx.counters.paper_assets_created += 1
+        if asset.asset_type == "paper":
+            ctx.counters.paper_assets_created += 1
         ctx.created_asset_ids.add(asset.id)
         ctx.dirty_asset_ids.add(asset.id)
     else:
@@ -566,10 +568,11 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
         if before != after:
             ctx.dirty_asset_ids.add(asset.id)
 
-    profile = ctx.session.get(PaperProfile, asset.id)
-    if profile is None:
-        ctx.session.add(PaperProfile(asset_id=asset.id))
-        ctx.dirty_asset_ids.add(asset.id)
+    if asset.asset_type == "paper":
+        profile = ctx.session.get(PaperProfile, asset.id)
+        if profile is None:
+            ctx.session.add(PaperProfile(asset_id=asset.id))
+            ctx.dirty_asset_ids.add(asset.id)
 
     for record in records:
         key = f"{record.source_id}:{record.source_record_id}"
@@ -686,6 +689,47 @@ def _upsert_source_record(
     return model, version
 
 
+def _dotted_path_to_pointer(value: str) -> str:
+    components = value.split(".")
+    encoded = [
+        component.replace("~", "~0").replace("/", "~1")
+        for component in components
+        if component
+    ]
+    return "/" + "/".join(encoded)
+
+
+def _field_source_pointer(record: NormalizedRecord, field_name: str) -> str | None:
+    """Resolve a claim to the real upstream field declared by the adapter."""
+
+    declared = record.source_fields.get("field_pointers")
+    if isinstance(declared, Mapping):
+        locator = declared.get(field_name)
+        if isinstance(locator, str) and locator.strip():
+            pointer = locator.strip()
+            if not pointer.startswith("/"):
+                pointer = _dotted_path_to_pointer(pointer)
+            return f"{record.source_path}#{pointer}" if record.source_path else pointer
+        if isinstance(locator, Mapping):
+            raw_pointer = locator.get("json_pointer") or locator.get("pointer")
+            raw_path = locator.get("input_path") or record.source_path
+            if isinstance(raw_pointer, str) and raw_pointer.strip():
+                pointer = raw_pointer.strip()
+                if not pointer.startswith("/"):
+                    pointer = _dotted_path_to_pointer(pointer)
+                if isinstance(raw_path, str) and raw_path.strip():
+                    return f"{raw_path.strip()}#{pointer}"
+                return pointer
+
+    mapping = record.source_fields.get("field_mapping")
+    if isinstance(mapping, Mapping):
+        raw_path = mapping.get(field_name)
+        if isinstance(raw_path, str) and raw_path.strip():
+            pointer = _dotted_path_to_pointer(raw_path.strip())
+            return f"{record.source_path}#{pointer}" if record.source_path else pointer
+    return record.source_path
+
+
 def _write_claims(
     ctx: ImportContext,
     record: NormalizedRecord,
@@ -700,6 +744,7 @@ def _write_claims(
         field_path = f"/{field_name}"
         value_digest = _json_digest(value)
         source_key = f"{record.source_id}:{record.source_record_id}"
+        source_pointer = _field_source_pointer(record, field_name)
         claim = ctx.session.scalar(
             select(FieldClaim).where(
                 FieldClaim.entity_type == "asset",
@@ -718,7 +763,7 @@ def _write_claims(
                 value_digest=value_digest,
                 source_record_version_id=version.id,
                 provider=record.adapter_name,
-                source_pointer=f"/asset/{field_name}",
+                source_pointer=source_pointer,
                 source_key=source_key,
                 authority=100,
                 confidence=1.0,
@@ -727,6 +772,22 @@ def _write_claims(
             ctx.session.add(claim)
             ctx.session.flush()
             ctx.counters.field_claims_created += 1
+        else:
+            before_provenance = (
+                claim.source_record_version_id,
+                claim.provider,
+                claim.source_pointer,
+            )
+            claim.source_record_version_id = version.id
+            claim.provider = record.adapter_name
+            claim.source_pointer = source_pointer
+            after_provenance = (
+                claim.source_record_version_id,
+                claim.provider,
+                claim.source_pointer,
+            )
+            if before_provenance != after_provenance:
+                ctx.dirty_asset_ids.add(asset.id)
 
         resolved_value = getattr(asset, field_name)
         if _json_digest(resolved_value) != value_digest:
@@ -833,9 +894,14 @@ def _representation_state(
         attributes["_fingerprint_strategy"] = (
             "revision-or-stat-cache" if cached else "directory-tree-stat"
         )
+        materialization = (
+            MaterializationKind.BUNDLE.value
+            if candidate.materialization_kind == MaterializationKind.BUNDLE
+            else MaterializationKind.DIRECTORY.value
+        )
         return (
             RepresentationAvailability.AVAILABLE.value,
-            MaterializationKind.DIRECTORY.value,
+            materialization,
             digest,
             None,
             candidate.mime_type,
@@ -875,6 +941,9 @@ def _upsert_repository(
     canonical_url = canonical_repository_url(str(candidate.url))
     cached = ctx.repository_assets.get(canonical_url)
     if cached is not None:
+        profile = ctx.session.get(RepositoryProfile, cached.id)
+        assert profile is not None
+        _merge_repository_provenance(ctx, cached, profile, record, candidate)
         return cached
     profile = ctx.session.scalar(
         select(RepositoryProfile).where(RepositoryProfile.canonical_url == canonical_url)
@@ -882,6 +951,7 @@ def _upsert_repository(
     if profile is not None:
         asset = ctx.session.get(Asset, profile.asset_id)
         assert asset is not None
+        _merge_repository_provenance(ctx, asset, profile, record, candidate)
         ctx.repository_assets[canonical_url] = asset
         return asset
 
@@ -899,6 +969,10 @@ def _upsert_repository(
     )
     ctx.session.add(asset)
     ctx.session.flush()
+    repository_attributes = dict(candidate.metadata)
+    repository_attributes["source_metadata"] = {
+        f"{record.source_id}:{record.source_record_id}": dict(candidate.metadata)
+    }
     ctx.session.add(
         RepositoryProfile(
             asset_id=asset.id,
@@ -909,7 +983,7 @@ def _upsert_repository(
             pinned_revision=candidate.revision,
             license_spdx=str(candidate.metadata.get("license") or "") or None,
             code_status=str(candidate.metadata.get("status") or "unknown"),
-            attributes=dict(candidate.metadata),
+            attributes=repository_attributes,
         )
     )
     scheme = "github" if details["host"] == "github.com" else "url"
@@ -928,6 +1002,59 @@ def _upsert_repository(
     ctx.dirty_asset_ids.add(asset.id)
     ctx.counters.repository_assets_created += 1
     return asset
+
+
+def _merge_repository_provenance(
+    ctx: ImportContext,
+    asset: Asset,
+    profile: RepositoryProfile,
+    record: NormalizedRecord,
+    candidate: RepresentationCandidate,
+) -> None:
+    """Preserve all source domains and per-record repository metadata on reuse."""
+
+    before = _json_digest(
+        {
+            "domains": asset.domain_slugs,
+            "source_urls": asset.source_urls,
+            "pinned_revision": profile.pinned_revision,
+            "license_spdx": profile.license_spdx,
+            "code_status": profile.code_status,
+            "attributes": profile.attributes,
+        }
+    )
+    canonical_url = canonical_repository_url(str(candidate.url))
+    asset.domain_slugs = _stable_union(
+        (asset.domain_slugs or [], record.asset.domain_slugs)
+    )
+    asset.source_urls = _stable_union((asset.source_urls or [], [canonical_url]))
+
+    if profile.pinned_revision is None and candidate.revision:
+        profile.pinned_revision = candidate.revision
+    candidate_license = str(candidate.metadata.get("license") or "").strip()
+    if candidate_license and not profile.license_spdx:
+        profile.license_spdx = candidate_license
+    candidate_status = str(candidate.metadata.get("status") or "").strip()
+    if candidate_status and profile.code_status in {"", "unknown"}:
+        profile.code_status = candidate_status
+
+    attributes = dict(profile.attributes or {})
+    source_metadata = dict(attributes.get("source_metadata") or {})
+    source_metadata[f"{record.source_id}:{record.source_record_id}"] = dict(candidate.metadata)
+    attributes["source_metadata"] = source_metadata
+    profile.attributes = attributes
+    after = _json_digest(
+        {
+            "domains": asset.domain_slugs,
+            "source_urls": asset.source_urls,
+            "pinned_revision": profile.pinned_revision,
+            "license_spdx": profile.license_spdx,
+            "code_status": profile.code_status,
+            "attributes": profile.attributes,
+        }
+    )
+    if before != after:
+        ctx.dirty_asset_ids.add(asset.id)
 
 
 def _representation_query(
@@ -996,6 +1123,10 @@ def _upsert_representation(
         representation_attributes,
         fingerprint_reused,
     ) = _representation_state(path, candidate, model)
+    directory_materializations = {
+        MaterializationKind.DIRECTORY.value,
+        MaterializationKind.BUNDLE.value,
+    }
     if model is None:
         model = Representation(
             asset_id=target.id,
@@ -1011,9 +1142,9 @@ def _upsert_representation(
             entrypoint=candidate.entrypoint,
             revision=candidate.revision,
             tree_digest=(
-                digest if materialization == MaterializationKind.DIRECTORY.value else None
+                digest if materialization in directory_materializations else None
             ),
-            sha256=digest if materialization != MaterializationKind.DIRECTORY.value else None,
+            sha256=digest if materialization not in directory_materializations else None,
             mime_type=mime_type,
             size_bytes=size,
             network_required=candidate.network_required,
@@ -1065,9 +1196,9 @@ def _upsert_representation(
         model.entrypoint = candidate.entrypoint
         model.revision = candidate.revision
         model.tree_digest = (
-            digest if materialization == MaterializationKind.DIRECTORY.value else None
+            digest if materialization in directory_materializations else None
         )
-        model.sha256 = digest if materialization != MaterializationKind.DIRECTORY.value else None
+        model.sha256 = digest if materialization not in directory_materializations else None
         model.mime_type = mime_type
         model.size_bytes = size
         model.network_required = (
@@ -1102,24 +1233,69 @@ def _upsert_representation(
     elif availability == RepresentationAvailability.MISSING.value:
         ctx.counters.representations_missing += 1
 
-    if candidate.path_ref is not None:
+    mount_candidates = list(candidate.mounts)
+    if candidate.path_ref is not None and not any(
+        mount.mount_path == "/" for mount in mount_candidates
+    ):
+        mount_candidates.insert(
+            0,
+            RepresentationMountCandidate(
+                source_id=record.source_id,
+                root_key=candidate.root_key,
+                path_ref=candidate.path_ref,
+            ),
+        )
+    for mount_candidate in mount_candidates:
+        mount_source = ctx.source_models.get(mount_candidate.source_id)
+        if mount_source is None:
+            raise FormalImportValidationError(
+                "Representation mount references an unloaded source: "
+                f"{mount_candidate.source_id}"
+            )
         mount = ctx.session.scalar(
             select(RepresentationMount).where(
                 RepresentationMount.representation_id == model.id,
-                RepresentationMount.mount_path == "/",
+                RepresentationMount.mount_path == mount_candidate.mount_path,
             )
         )
         if mount is None:
             ctx.session.add(
                 RepresentationMount(
                     representation_id=model.id,
-                    mount_path="/",
-                    source_id=source_model.id,
-                    root_key=candidate.root_key,
-                    path_ref=candidate.path_ref,
-                    read_only=True,
+                    mount_path=mount_candidate.mount_path,
+                    source_id=mount_source.id,
+                    root_key=mount_candidate.root_key,
+                    path_ref=mount_candidate.path_ref,
+                    read_only=mount_candidate.read_only,
+                    priority=mount_candidate.priority,
                 )
             )
+            ctx.dirty_asset_ids.add(target.id)
+        else:
+            before_mount = (
+                mount.source_id,
+                mount.root_key,
+                mount.path_ref,
+                mount.read_only,
+                mount.priority,
+                mount.deleted_at,
+            )
+            mount.source_id = mount_source.id
+            mount.root_key = mount_candidate.root_key
+            mount.path_ref = mount_candidate.path_ref
+            mount.read_only = mount_candidate.read_only
+            mount.priority = mount_candidate.priority
+            mount.deleted_at = None
+            after_mount = (
+                mount.source_id,
+                mount.root_key,
+                mount.path_ref,
+                mount.read_only,
+                mount.priority,
+                mount.deleted_at,
+            )
+            if before_mount != after_mount:
+                ctx.dirty_asset_ids.add(target.id)
     return model, target
 
 
@@ -1222,6 +1398,12 @@ def _upsert_relation(
         ctx.session.add(relation)
         ctx.session.flush()
         ctx.counters.relations_created += 1
+        ctx.dirty_asset_ids.update((subject.id, target.id))
+    elif (
+        candidate.confirmed
+        and relation.confirmation_status == ConfirmationStatus.CANDIDATE.value
+    ):
+        relation.confirmation_status = ConfirmationStatus.CONFIRMED.value
         ctx.dirty_asset_ids.update((subject.id, target.id))
 
     evidence = candidate.evidence.model_dump(mode="json")
@@ -1361,7 +1543,13 @@ def run_formal_import(
     counters = ctx.counters.as_dict()
     counters.update(
         {
-            "paper_assets_total": len(groups),
+            "paper_assets_total": len(
+                {
+                    asset.id
+                    for asset in ctx.record_assets.values()
+                    if asset.asset_type == "paper"
+                }
+            ),
             "repository_assets_total": len(ctx.repository_assets),
             "source_record_candidates": len(records),
             "representation_candidates": sum(len(item.representations) for item in records),

@@ -22,6 +22,12 @@ describe("AssetCard", () => {
                 annotation_summary: "重要方法笔记",
                 representations: [
                   { id: "pdf-1", representation_type: "pdf", open_url: "/pdf" },
+                  {
+                    id: "html-missing",
+                    representation_type: "html",
+                    availability: "missing",
+                    open_url: "/missing-html",
+                  },
                 ],
               }}
             />
@@ -34,9 +40,9 @@ describe("AssetCard", () => {
     expect(screen.getByLabelText("阅读状态")).toHaveValue("reading");
     expect(screen.getByText("重要方法笔记")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "PDF" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "代码" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "HTML" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "导读" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "原始 HTML" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "代码" })).toBeDisabled();
   });
 
   it("shows 无 when the asset has no annotation", () => {

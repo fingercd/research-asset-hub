@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-asset-hub.local/schemas/domain-catalog.schema.json",
+  "title": "Research Asset Hub domain catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "slug",
+    "label",
+    "asset_count",
+    "paper_count",
+    "repository_count",
+    "asset_type_counts",
+    "overview_status",
+    "overview_asset_id",
+    "overview_representation_id"
+  ],
+  "properties": {
+    "schema": {
+      "const": "research-asset-hub.domain-catalog/v1"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "asset_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "paper_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "repository_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "asset_type_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "overview_status": {
+      "type": "string",
+      "enum": [
+        "available",
+        "missing",
+        "network_required",
+        "not_provided",
+        "unavailable"
+      ]
+    },
+    "overview_asset_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "overview_representation_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    }
+  }
+}

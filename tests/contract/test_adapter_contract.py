@@ -15,6 +15,11 @@ from packages.adapters import (
     BaseAdapter,
     GenericManifestAdapter,
 )
+from packages.domain.enums import (
+    MaterializationKind,
+    RepresentationRole,
+    RepresentationType,
+)
 from packages.domain.schemas import NormalizedRecord, SourceConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -189,6 +194,48 @@ def test_generic_adapter_supports_common_root_shapes(
     assert len(records) == 1
     assert records[0].source_record_id == "p1"
     assert records[0].asset.domain_slugs == ["new-domain"]
+
+
+def test_representation_helper_preserves_bundle_runtime_contract(tmp_path: Path) -> None:
+    (tmp_path / "repo/docs").mkdir(parents=True)
+    (tmp_path / "repo/README.md").write_text("# Repo\n", encoding="utf-8")
+    config = SourceConfig(
+        id="generic",
+        label="Generic",
+        adapter="generic_manifest",
+        root=str(tmp_path),
+        manifest="manifest.json",
+    )
+    adapter = GenericManifestAdapter(config)
+
+    candidate = adapter.representation(
+        RepresentationType.REPOSITORY,
+        warnings=[],
+        role=RepresentationRole.OFFICIAL,
+        raw_path="repo",
+        entrypoint="README.md",
+        revision="a" * 40,
+        tree_digest="b" * 64,
+        materialization_kind=MaterializationKind.BUNDLE,
+        metadata_value={"license": "MIT"},
+        mounts=[
+            {
+                "mount_path": "/docs",
+                "source_id": "generic",
+                "root_key": "source",
+                "path_ref": "repo/docs",
+                "priority": 10,
+            }
+        ],
+    )
+
+    assert candidate is not None
+    assert candidate.entrypoint == "README.md"
+    assert candidate.revision == "a" * 40
+    assert candidate.tree_digest == "b" * 64
+    assert candidate.materialization_kind == MaterializationKind.BUNDLE
+    assert candidate.metadata == {"license": "MIT"}
+    assert candidate.mounts[0].mount_path == "/docs"
 
 
 def test_generic_representation_without_sha_field_does_not_hash_raw_record(
@@ -443,16 +490,19 @@ def test_rl_stale_absolute_repository_path_is_safely_relocated(
     assert "path_outside_root" not in warning_codes
 
 
-def test_real_seven_source_record_counts_when_collections_are_present() -> None:
+def test_all_configured_source_record_counts_when_collections_are_present() -> None:
     sources_file = PROJECT_ROOT / "config" / "sources.yaml"
     document = yaml.safe_load(sources_file.read_text(encoding="utf-8"))
     configured = [SourceConfig.model_validate(item) for item in document["sources"]]
     if not all((PROJECT_ROOT / config.root_path).resolve().is_dir() for config in configured):
-        pytest.skip("The seven local collections are not present beside the project")
+        pytest.skip("The configured local collections are not present beside the project")
 
     actual: dict[str, int] = {}
+    expected: dict[str, int] = {}
     reinforcement_learning_records: list[NormalizedRecord] = []
     for config in configured:
+        assert config.expected_records is not None
+        expected[config.source_id] = config.expected_records
         adapter = DEFAULT_REGISTRY.create(
             config.adapter,
             config,
@@ -466,15 +516,7 @@ def test_real_seven_source_record_counts_when_collections_are_present() -> None:
         assert all(record.source_path for record in records)
         assert all(isinstance(record.warnings, list) for record in records)
 
-    assert actual == {
-        "agent": 72,
-        "infra": 71,
-        "world_model": 46,
-        "reinforcement_learning": 108,
-        "fine_tuning": 67,
-        "generation": 64,
-        "llm_tech_reports": 90,
-    }
+    assert actual == expected
     rl_warning_codes = [
         warning.code for record in reinforcement_learning_records for warning in record.warnings
     ]

@@ -1,5 +1,19 @@
 export type ReadingStatus = "unread" | "reading" | "read";
 export type SearchMode = "exact" | "hybrid" | "semantic";
+export type SearchGroupBy = "paper" | "none";
+export type RepresentationPresentation = "hub" | "original";
+export type QuickActionKind = "pdf" | "html" | "guide" | "code";
+export type QuickActionStatus =
+  | "available"
+  | "missing"
+  | "not_provided"
+  | "network_required";
+export type ResearchUnitMatchSource =
+  | "paper"
+  | "related_repository"
+  | "paper_and_related_repository"
+  | "repository"
+  | "browse";
 
 export interface ApiList<T> {
   items: T[];
@@ -27,6 +41,17 @@ export interface Representation {
   network_required?: boolean;
   attributes?: Record<string, unknown>;
   row_version?: number;
+}
+
+export interface RepresentationOpenAction {
+  kind?: "gateway_session" | "external_url" | string;
+  url: string;
+  representation_id?: string;
+  expires_in?: number;
+  network_required?: boolean;
+  presentation?: RepresentationPresentation;
+  embed?: boolean;
+  warning?: string | null;
 }
 
 export interface Annotation {
@@ -77,6 +102,44 @@ export interface Asset {
   [key: string]: unknown;
 }
 
+export interface QuickActionAlternative {
+  representation_id?: string | null;
+  owner_asset_id: string;
+  label?: string | null;
+  role?: string | null;
+  status: QuickActionStatus;
+  relation_type?: string | null;
+}
+
+export interface QuickAction {
+  kind: QuickActionKind;
+  status: QuickActionStatus;
+  representation_id?: string | null;
+  owner_asset_id: string | null;
+  relation_type?: string | null;
+  reason?: string | null;
+  alternatives?: QuickActionAlternative[];
+}
+
+export interface ResearchUnitSummary {
+  unit_id: string;
+  unit_kind: string;
+  primary_asset: Asset;
+  related_repositories: Asset[];
+  quick_actions: QuickAction[];
+  matched_assets: Asset[];
+  covered_asset_count: number;
+  score?: number | null;
+  snippet?: string | null;
+  match_source?: ResearchUnitMatchSource | string | null;
+}
+
+export function isResearchUnitSummary(
+  value: Asset | ResearchUnitSummary,
+): value is ResearchUnitSummary {
+  return "primary_asset" in value && "quick_actions" in value;
+}
+
 export interface Dashboard {
   stats?: {
     assets?: number;
@@ -118,12 +181,30 @@ export interface Domain {
   description?: string | null;
   asset_count?: number;
   paper_count?: number;
+  repository_count?: number;
+  research_unit_count?: number;
   annotation_count?: number;
   reading_counts?: Partial<Record<ReadingStatus, number>>;
+  overview_status?:
+    | "available"
+    | "missing"
+    | "network_required"
+    | "unavailable"
+    | string;
+  overview?: DomainOverview | null;
   tags?: string[];
   recent_assets?: Asset[];
   updated_at?: string;
   [key: string]: unknown;
+}
+
+export interface DomainOverview {
+  asset_id: string | null;
+  representation_id: string | null;
+  status: "available" | "missing" | "network_required" | "unavailable";
+  default_presentation: RepresentationPresentation;
+  last_verified_at: string | null;
+  warning: string | null;
 }
 
 export interface GraphNode {
@@ -227,11 +308,25 @@ export interface ComponentHealth {
   latency_ms?: number | null;
 }
 
+export interface SearchModelHealth {
+  state: "cold" | "warm";
+  device: string | null;
+}
+
+export interface SearchModelsHealth {
+  state: "cold" | "warm";
+  device: string | null;
+  idle_seconds: number;
+  embedder: SearchModelHealth;
+  reranker: SearchModelHealth;
+}
+
 export interface HealthResponse {
   service: string;
   status: "healthy" | "degraded";
   checked_at: string;
   components: Record<string, ComponentHealth>;
+  search_models: SearchModelsHealth;
 }
 
 export function getReadingStatus(asset: Asset): ReadingStatus {

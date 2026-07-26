@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import mimetypes
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
@@ -33,7 +33,10 @@ _RESPONSE_HEADERS = {
 def create_app(settings: ApiSettings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
     api_origin = f"http://127.0.0.1:{app_settings.api_port}"
-    client = httpx.AsyncClient(base_url=api_origin, timeout=60)
+    client = httpx.AsyncClient(
+        base_url=api_origin,
+        timeout=app_settings.web_api_proxy_timeout_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -50,6 +53,34 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
+
+    @application.get("/health")
+    async def health() -> dict[str, Any]:
+        index_ready = (app_settings.web_dist_path.resolve() / "index.html").is_file()
+        api_status = "unavailable"
+        api_detail = "The local API did not answer its health endpoint."
+        try:
+            upstream = await client.get("/api/health")
+            payload = upstream.json()
+            if isinstance(payload, dict):
+                api_status = str(payload.get("status") or "unknown")
+            else:
+                api_status = "unknown"
+            api_detail = f"Local API health returned HTTP {upstream.status_code}."
+        except (httpx.HTTPError, ValueError, TypeError) as error:
+            api_detail = f"{type(error).__name__}: local API health is unavailable."
+        status = (
+            "healthy"
+            if index_ready and api_status == "healthy"
+            else "degraded"
+        )
+        return {
+            "service": "research-asset-hub-web",
+            "status": status,
+            "static_frontend": "ready" if index_ready else "missing",
+            "api": api_status,
+            "detail": api_detail,
+        }
 
     @application.api_route(
         "/api/{api_path:path}",
@@ -126,9 +157,12 @@ app = create_app()
 def run() -> None:
     import uvicorn
 
-    host = os.getenv("HUB_WEB_HOST", "127.0.0.1")
-    port = int(os.getenv("HUB_WEB_PORT", "8765"))
-    uvicorn.run("apps.api.web_host:app", host=host, port=port)
+    settings = get_settings()
+    uvicorn.run(
+        "apps.api.web_host:app",
+        host=settings.web_host,
+        port=settings.web_port,
+    )
 
 
 if __name__ == "__main__":

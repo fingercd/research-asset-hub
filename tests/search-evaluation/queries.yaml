@@ -59,6 +59,8 @@ queries:
     mode: hybrid
     category: concept
     relevant_assets:
+      019f9d56-9380-7c99-8a2c-520e9dba9102: 3
+      019f93e5-31b0-7148-b410-f2e4ef649758: 2
       019f93e5-2d90-762b-9614-e6a39902f171: 3
 
   - id: hybrid-locally-linear-latent-control
@@ -73,6 +75,7 @@ queries:
     mode: hybrid
     category: concept
     relevant_assets:
+      019f9d56-9afa-773b-b99a-9ab19abd55cc: 3
       019f93e5-1442-7626-bd3e-1e49a38f48d7: 3
 
   - id: hybrid-megatron-model-parallelism
@@ -80,6 +83,8 @@ queries:
     mode: hybrid
     category: concept
     relevant_assets:
+      019f93e4-f42e-7bc4-b641-492e0c0d2cf4: 3
+      019f93e4-f4c9-7cb2-846c-0dcdbce98928: 3
       019f93e6-05c5-7fab-a52d-9127aba6f669: 3
 
   - id: semantic-world-model-control
@@ -89,3 +94,5 @@ queries:
     relevant_assets:
       019f93e5-2d90-762b-9614-e6a39902f171: 3
       019f93e5-4b67-78e2-9c54-93cf2a281dc3: 2
+      019f93e5-30f5-7b39-b23a-7d6474afba64: 3
+      019f93e5-5612-7fb8-af2c-65b484123654: 2

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .agent import AgentAdapter
 from .base import AdapterRegistry
+from .canonical_snapshot import CanonicalSnapshotAdapter
 from .fine_tuning import FineTuningAdapter
 from .generation import GenerationAdapter
 from .generic import GenericManifestAdapter
@@ -19,6 +20,7 @@ from .world_model import WorldModelAdapter
 def build_default_registry() -> AdapterRegistry:
     registry = AdapterRegistry()
     registry.register("generic_manifest", GenericManifestAdapter)
+    registry.register("canonical_snapshot", CanonicalSnapshotAdapter)
     registry.register("agent", AgentAdapter)
     registry.register("infra", InfraAdapter)
     registry.register("world_model", WorldModelAdapter)

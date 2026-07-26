@@ -64,10 +64,15 @@ class HybridSearchService:
         mode: SearchMode | str = SearchMode.HYBRID,
         filters: Mapping[str, Any] | None = None,
         limit: int = 20,
+        candidate_limit: int | None = None,
         rerank: bool = True,
     ) -> HybridSearchResult:
         selected_mode = SearchMode(mode)
-        requested_limit = max(1, limit)
+        search_window = max(
+            1,
+            self.candidate_limit if candidate_limit is None else candidate_limit,
+        )
+        requested_limit = min(max(1, limit), search_window)
         errors: list[str] = []
         keyword_sets: list[Sequence[SearchHit]] = []
         vector_sets: list[Sequence[SearchHit]] = []
@@ -83,7 +88,7 @@ class HybridSearchService:
                 try:
                     asset_hits = asset_item[1].search(
                         query,
-                        limit=self.candidate_limit,
+                        limit=search_window,
                         filters=filters,
                     )
                     keyword_sets.append(asset_hits)
@@ -104,7 +109,7 @@ class HybridSearchService:
                     keyword_sets.append(
                         index.search(
                             query,
-                            limit=self.candidate_limit,
+                            limit=search_window,
                             filters=filters,
                         )
                     )
@@ -114,7 +119,7 @@ class HybridSearchService:
             keyword_sets,
             k=60,
             exact_boost=0.25,
-            limit=self.candidate_limit,
+            limit=search_window,
             group_by_asset=True,
         )
 
@@ -129,7 +134,7 @@ class HybridSearchService:
                         vector_sets.append(
                             vector_index.search(
                                 vector,
-                                limit=self.candidate_limit,
+                                limit=search_window,
                                 filters=filters,
                             )
                         )
@@ -142,7 +147,7 @@ class HybridSearchService:
             vector_sets,
             k=60,
             exact_boost=0.0,
-            limit=self.candidate_limit,
+            limit=search_window,
             group_by_asset=True,
         )
 
@@ -157,7 +162,7 @@ class HybridSearchService:
                 [protected, vector_hits],
                 k=60,
                 exact_boost=0.25,
-                limit=self.candidate_limit,
+                limit=search_window,
                 group_by_asset=True,
             )
         else:
@@ -165,7 +170,7 @@ class HybridSearchService:
                 [keyword_hits, vector_hits],
                 k=60,
                 exact_boost=0.25,
-                limit=self.candidate_limit,
+                limit=search_window,
                 group_by_asset=True,
             )
 

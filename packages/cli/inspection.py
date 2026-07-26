@@ -73,6 +73,62 @@ def command_status(name: str, version_args: list[str] | None = None) -> dict[str
         }
 
 
+def docker_status() -> dict[str, Any]:
+    """Find either a native Docker CLI or the project's supported WSL backend."""
+
+    native = command_status("docker")
+    if native["available"]:
+        native["backend"] = "native"
+        return native
+    if os.name != "nt":
+        return native
+    wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+    if wsl is None:
+        return native
+    try:
+        result = subprocess.run(
+            [
+                wsl,
+                "-d",
+                "Ubuntu",
+                "-u",
+                "root",
+                "--",
+                "sh",
+                "-lc",
+                "docker version --format '{{.Server.Version}}' "
+                "&& docker compose version --short",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            **native,
+            "backend": "unavailable",
+            "wsl_error": str(exc),
+        }
+    versions = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(versions) < 2:
+        return {
+            **native,
+            "backend": "unavailable",
+            "wsl_error": (result.stderr or result.stdout).strip() or None,
+        }
+    return {
+        "available": True,
+        "path": "wsl://Ubuntu/usr/bin/docker",
+        "version": versions[0],
+        "compose_version": versions[1],
+        "exit_code": result.returncode,
+        "backend": "wsl",
+    }
+
+
 def port_available(host: str, port: int) -> bool:
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -148,7 +204,8 @@ def build_preflight_report(sources: list[LoadedSource]) -> dict[str, Any]:
         for error in report["errors"]
     ]
     warnings = ["external_backup_not_configured"]
-    if not shutil.which("docker"):
+    docker = docker_status()
+    if not docker["available"]:
         warnings.append("docker_missing_infrastructure_services_unavailable")
     if long_paths_enabled is False:
         warnings.append("windows_long_paths_not_enabled")
@@ -166,7 +223,7 @@ def build_preflight_report(sources: list[LoadedSource]) -> dict[str, Any]:
             "rg": command_status("rg"),
             "node": command_status("node"),
             "pnpm": command_status("pnpm"),
-            "docker": command_status("docker"),
+            "docker": docker,
         },
         "ports": {
             "web_8765_available": port_available("127.0.0.1", 8765),
@@ -209,6 +266,21 @@ def _extension_count(root: Path, extension: str) -> int:
     )
 
 
+def _declared_extension_count(
+    *,
+    source_root: Path,
+    asset_roots: dict[str, Path],
+    role: str,
+    extension: str,
+) -> int:
+    declared_root = asset_roots.get(role)
+    if declared_root is not None:
+        return _extension_count(declared_root, extension)
+    if asset_roots:
+        return 0
+    return _extension_count(source_root, extension)
+
+
 def source_inventory(source: LoadedSource) -> dict[str, Any]:
     document = load_json(source.manifest)
     records = record_list(document)
@@ -249,9 +321,17 @@ def source_inventory(source: LoadedSource) -> dict[str, Any]:
             ),
         },
         "visible_assets": {
-            "pdf_files": _extension_count(resolved_asset_roots.get("pdf", source.root), ".pdf"),
-            "html_files_in_declared_html_root": _extension_count(
-                resolved_asset_roots.get("html", source.root), ".html"
+            "pdf_files": _declared_extension_count(
+                source_root=source.root,
+                asset_roots=resolved_asset_roots,
+                role="pdf",
+                extension=".pdf",
+            ),
+            "html_files_in_declared_html_root": _declared_extension_count(
+                source_root=source.root,
+                asset_roots=resolved_asset_roots,
+                role="html",
+                extension=".html",
             ),
         },
         "read_only": source.read_only,

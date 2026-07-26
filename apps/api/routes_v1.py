@@ -4,18 +4,18 @@ import hashlib
 import json
 import re
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
 import yaml
-from fastapi import APIRouter, Header, Query, Request, Response
+from fastapi import APIRouter, Body, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -47,8 +47,11 @@ from apps.api.serialization import (
     serialize_annotation_revision,
     serialize_asset,
     serialize_comparison,
+    serialize_domain_overview,
     serialize_job,
+    serialize_quick_action,
     serialize_representation,
+    serialize_research_unit,
     serialize_sync_conflict,
 )
 from apps.asset_gateway.security import create_gateway_token
@@ -122,6 +125,13 @@ _OVERRIDABLE_ASSET_FIELDS = frozenset(
 )
 
 
+class RepresentationOpenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    presentation: Literal["hub", "original"] = "original"
+    embed: bool = False
+
+
 def _database(request: Request) -> DatabaseManager:
     database = getattr(request.app.state, "database", None)
     if not isinstance(database, DatabaseManager):
@@ -189,7 +199,11 @@ def _list_payload(items: list[dict[str, Any]], offset: int, total: int) -> dict[
 def _live_asset(session: Session, asset_id: UUID, *, include_deleted: bool = False) -> Asset:
     canonical_id, _ = _resolve_asset_redirect(session, asset_id)
     asset = session.get(Asset, canonical_id)
-    if asset is None or (asset.deleted_at is not None and not include_deleted):
+    if (
+        asset is None
+        or _is_system_hidden_asset(asset)
+        or (asset.deleted_at is not None and not include_deleted)
+    ):
         raise not_found("Asset", asset_id)
     return asset
 
@@ -297,6 +311,634 @@ def _apply_asset_patch(asset: Asset, patch: AssetPatch) -> None:
 
 def _tokens(text: str) -> set[str]:
     return {token.casefold() for token in _WORD.findall(text) if len(token) > 1}
+
+
+def _is_system_hidden_asset(asset: Asset) -> bool:
+    value = (asset.attributes or {}).get("system_hidden")
+    return value is True or (isinstance(value, str) and value.casefold() == "true")
+
+
+def _is_domain_overview_asset(asset: Asset) -> bool:
+    return bool(
+        asset.asset_type == "collection"
+        and _is_system_hidden_asset(asset)
+        and str((asset.attributes or {}).get("kind") or "") == "domain-overview"
+    )
+
+
+_ACTION_REPRESENTATION_TYPES: dict[str, frozenset[str]] = {
+    "pdf": frozenset({"pdf"}),
+    "html": frozenset({"html", "html_document"}),
+    "guide": frozenset({"guide", "analysis", "markdown"}),
+    "code": frozenset({"source_code", "repository", "notebook"}),
+}
+_HTML_REPRESENTATION_TYPES = frozenset(
+    {"html", "guide", "analysis", "html_document"}
+)
+_REPRESENTATION_ROLE_ORDER = {
+    role: index
+    for index, role in enumerate(
+        (
+            "primary",
+            "original",
+            "official",
+            "guide",
+            "analysis",
+            "annotated",
+            "supplemental",
+            "mirror",
+            "snapshot",
+            "derived",
+        )
+    )
+}
+
+
+def _representation_matches_action(
+    representation: Representation,
+    kind: str,
+) -> bool:
+    if kind == "guide":
+        return (
+            representation.role == "guide"
+            or representation.representation_type in _ACTION_REPRESENTATION_TYPES["guide"]
+        )
+    if kind == "html":
+        return (
+            representation.role != "guide"
+            and representation.representation_type in _ACTION_REPRESENTATION_TYPES["html"]
+        )
+    return representation.representation_type in _ACTION_REPRESENTATION_TYPES[kind]
+
+
+def _has_available_action(
+    representations: Sequence[Representation],
+    kind: str,
+) -> bool:
+    return any(
+        representation.availability == "available"
+        and _representation_matches_action(representation, kind)
+        for representation in representations
+    )
+
+
+def _representation_is_local(representation: Representation) -> bool:
+    return bool(representation.path_ref) and representation.materialization_kind != "url"
+
+
+def _representation_requires_network(representation: Representation) -> bool:
+    return bool(
+        representation.network_required
+        or (
+            not _representation_is_local(representation) and representation.external_url is not None
+        )
+    )
+
+
+def _representation_action_status(representation: Representation) -> str:
+    if representation.availability != "available":
+        return "missing"
+    if _representation_requires_network(representation):
+        return "network_required"
+    return "available"
+
+
+def _representation_timestamp(representation: Representation) -> float:
+    values = [
+        value.timestamp()
+        for value in (representation.verified_at, representation.updated_at)
+        if value is not None
+    ]
+    return max(values, default=0.0)
+
+
+def _representation_choice_key(
+    candidate: tuple[Representation, Asset, str | None],
+) -> tuple[int, int, int, int, float, str]:
+    representation, _, _ = candidate
+    return (
+        0 if representation.availability == "available" else 1,
+        0 if _representation_is_local(representation) else 1,
+        _REPRESENTATION_ROLE_ORDER.get(representation.role, 100),
+        0 if not _representation_requires_network(representation) else 1,
+        -_representation_timestamp(representation),
+        str(representation.id),
+    )
+
+
+def _representation_missing_reason(representation: Representation) -> str:
+    attributes = dict(representation.attributes or {})
+    for key in ("missing_reason", "availability_reason", "reason", "error", "detail"):
+        value = attributes.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    return f"Representation availability is {representation.availability}."
+
+
+def _quick_action(
+    *,
+    kind: str,
+    candidates: Sequence[tuple[Representation, Asset, str | None]],
+    missing_owner_asset_id: UUID | None,
+    missing_relation_type: str | None,
+) -> dict[str, Any]:
+    ordered = sorted(candidates, key=_representation_choice_key)
+    if not ordered:
+        missing_reasons = {
+            "pdf": "来源未提供 PDF。",
+            "html": "来源未提供 HTML。",
+            "guide": "来源未提供导读。",
+            "code": (
+                "没有已确认且可用的代码仓库。"
+                if missing_relation_type == "implemented_by"
+                else "来源未提供代码。"
+            ),
+        }
+        return serialize_quick_action(
+            kind=kind,
+            status="not_provided",
+            representation_id=None,
+            owner_asset_id=(
+                str(missing_owner_asset_id) if missing_owner_asset_id is not None else None
+            ),
+            relation_type=missing_relation_type,
+            reason=missing_reasons[kind],
+            alternatives=[],
+        )
+
+    representation, owner, relation_type = ordered[0]
+    status = _representation_action_status(representation)
+    if status == "missing":
+        stored_reason = _representation_missing_reason(representation)
+        reason: str | None = (
+            stored_reason
+            if stored_reason != f"Representation availability is {representation.availability}."
+            else (
+                "PDF 已登记，但本地文件不存在或来源访问受限。"
+                if kind == "pdf"
+                else f"{kind.upper()} 已登记，但本地文件不存在。"
+            )
+        )
+    elif status == "network_required":
+        reason = "该入口需要联网。"
+    else:
+        reason = None
+
+    alternatives: list[dict[str, Any]] = []
+    available_candidates = [
+        candidate
+        for candidate in ordered
+        if candidate[0].availability == "available" and candidate[0].id != representation.id
+    ]
+    if status in {"available", "network_required"} and available_candidates:
+        for alternative, alternative_owner, alternative_relation_type in available_candidates:
+            alternatives.append(
+                {
+                    "representation_id": str(alternative.id),
+                    "owner_asset_id": str(alternative_owner.id),
+                    "label": (alternative_owner.title if kind == "code" else alternative.role),
+                    "role": alternative.role,
+                    "status": _representation_action_status(alternative),
+                    "relation_type": alternative_relation_type,
+                }
+            )
+    return serialize_quick_action(
+        kind=kind,
+        status=status,
+        representation_id=str(representation.id),
+        owner_asset_id=str(owner.id),
+        relation_type=relation_type,
+        reason=reason,
+        alternatives=alternatives,
+    )
+
+
+def _research_unit_quick_actions(
+    primary_asset: Asset,
+    related_repositories: list[Asset],
+    representations: dict[UUID, list[Representation]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for kind in ("pdf", "html", "guide"):
+        candidates = [
+            (representation, primary_asset, None)
+            for representation in representations.get(primary_asset.id, [])
+            if _representation_matches_action(representation, kind)
+        ]
+        actions.append(
+            _quick_action(
+                kind=kind,
+                candidates=candidates,
+                missing_owner_asset_id=primary_asset.id,
+                missing_relation_type=None,
+            )
+        )
+
+    if primary_asset.asset_type == "repository":
+        code_owners = [primary_asset]
+        relation_type = None
+    else:
+        code_owners = related_repositories
+        relation_type = "implemented_by"
+    code_candidates = [
+        (representation, owner, relation_type)
+        for owner in code_owners
+        for representation in representations.get(owner.id, [])
+        if _representation_matches_action(representation, "code")
+    ]
+    actions.append(
+        _quick_action(
+            kind="code",
+            candidates=code_candidates,
+            missing_owner_asset_id=(
+                code_owners[0].id
+                if code_owners
+                else primary_asset.id
+                if primary_asset.asset_type == "paper"
+                else None
+            ),
+            missing_relation_type=(
+                "implemented_by" if primary_asset.asset_type == "paper" else relation_type
+            ),
+        )
+    )
+    return actions
+
+
+def _asset_search_score(asset_id: UUID, search_hits: dict[UUID, Any]) -> float:
+    hit = search_hits.get(asset_id)
+    return round(float(hit.score), 6) if hit is not None else 1.0
+
+
+def _asset_search_snippet(asset: Asset, search_hits: dict[UUID, Any], query: str) -> str | None:
+    hit = search_hits.get(asset.id)
+    if hit is not None:
+        return " ".join(hit.document.text.split())[:360]
+    if not query.strip():
+        return None
+    fallback = asset.summary or asset.abstract or asset.content or asset.title
+    return " ".join(fallback.split())[:360] if fallback else None
+
+
+def _serialize_matched_asset(
+    asset: Asset,
+    *,
+    search_hits: dict[UUID, Any],
+    query: str,
+    states: dict[UUID, ReadingState],
+    summaries: dict[UUID, str],
+) -> dict[str, Any]:
+    hit = search_hits.get(asset.id)
+    item = serialize_asset(
+        asset,
+        reading_state=states.get(asset.id),
+        annotation_summary=summaries.get(asset.id),
+        score=_asset_search_score(asset.id, search_hits),
+    )
+    snippet = _asset_search_snippet(asset, search_hits, query)
+    if snippet is not None:
+        item["snippet"] = snippet
+    if hit is not None:
+        item.update(
+            {
+                "document_kind": hit.document.kind,
+                "anchor": hit.document.metadata.get("anchor"),
+                "representation_id": hit.document.metadata.get("representation_id"),
+                "search_source": hit.source,
+                "exact_match": hit.exact_match,
+            }
+        )
+    return item
+
+
+def _asset_matches_unit_filters(
+    asset: Asset,
+    *,
+    related_repositories: list[Asset],
+    representations: dict[UUID, list[Representation]],
+    states: dict[UUID, ReadingState],
+    annotation_assets: set[UUID],
+    domain: str | None,
+    status: str | None,
+    author: str | None,
+    year_from: int | None,
+    year_to: int | None,
+    tags: list[str] | None,
+    has_pdf: bool | None,
+    has_html: bool | None,
+    has_code: bool | None,
+    has_guide: bool | None,
+    has_annotation: bool | None,
+) -> bool:
+    if domain and not any(
+        domain in (member.domain_slugs or []) for member in (asset, *related_repositories)
+    ):
+        return False
+    if author and not any(author.casefold() in item.casefold() for item in asset.authors or []):
+        return False
+    if year_from is not None and (asset.year is None or asset.year < year_from):
+        return False
+    if year_to is not None and (asset.year is None or asset.year > year_to):
+        return False
+    if tags and not set(tags).intersection(asset.tags or []):
+        return False
+    reading_state = states.get(asset.id)
+    reading_status = reading_state.status if reading_state is not None else "unread"
+    if status and reading_status != status:
+        return False
+    if has_annotation is not None and ((asset.id in annotation_assets) != has_annotation):
+        return False
+
+    asset_representations = representations.get(asset.id, [])
+    availability_flags = {
+        "pdf": _has_available_action(asset_representations, "pdf"),
+        "html": _has_available_action(asset_representations, "html"),
+        "guide": _has_available_action(asset_representations, "guide"),
+        "code": (
+            any(
+                _has_available_action(
+                    representations.get(repository.id, []),
+                    "code",
+                )
+                for repository in related_repositories
+            )
+            if asset.asset_type == "paper"
+            else _has_available_action(asset_representations, "code")
+        ),
+    }
+    requested_flags = {
+        "pdf": has_pdf,
+        "html": has_html,
+        "code": has_code,
+        "guide": has_guide,
+    }
+    return all(
+        requested is None or availability_flags[kind] == requested
+        for kind, requested in requested_flags.items()
+    )
+
+
+def _asset_facets(
+    assets: list[Asset],
+    states: dict[UUID, ReadingState],
+) -> dict[str, dict[str, int]]:
+    return {
+        "domains": dict(
+            Counter(
+                domain_slug for asset in assets for domain_slug in asset.domain_slugs or []
+            ).most_common()
+        ),
+        "years": dict(
+            sorted(
+                Counter(str(asset.year) for asset in assets if asset.year is not None).items(),
+                reverse=True,
+            )
+        ),
+        "types": dict(Counter(asset.asset_type for asset in assets).most_common()),
+        "reading_status": dict(
+            Counter(
+                states[asset.id].status if asset.id in states else "unread" for asset in assets
+            ).most_common()
+        ),
+        "tags": dict(
+            Counter(tag_value for asset in assets for tag_value in asset.tags or []).most_common(50)
+        ),
+    }
+
+
+def _build_research_units(
+    session: Session,
+    *,
+    catalog_assets: list[Asset],
+    matched_assets: list[Asset],
+    search_hits: dict[UUID, Any],
+    query: str,
+    states: dict[UUID, ReadingState],
+    summaries: dict[UUID, str],
+    annotation_assets: set[UUID],
+    representations: dict[UUID, list[Representation]],
+    include_independent_repositories: bool,
+    domain: str | None,
+    status: str | None,
+    author: str | None,
+    year_from: int | None,
+    year_to: int | None,
+    tags: list[str] | None,
+    has_pdf: bool | None,
+    has_html: bool | None,
+    has_code: bool | None,
+    has_guide: bool | None,
+    has_annotation: bool | None,
+) -> tuple[list[dict[str, Any]], list[Asset]]:
+    assets_by_id = {asset.id: asset for asset in catalog_assets}
+    paper_repository_ids: dict[UUID, set[UUID]] = defaultdict(set)
+    relations = session.scalars(
+        select(Relation)
+        .where(
+            Relation.relation_type == "implemented_by",
+            Relation.confirmation_status == "confirmed",
+            Relation.deleted_at.is_(None),
+        )
+        .order_by(Relation.subject_asset_id, Relation.object_asset_id, Relation.id)
+    ).all()
+    for relation in relations:
+        paper = assets_by_id.get(relation.subject_asset_id)
+        repository = assets_by_id.get(relation.object_asset_id)
+        if (
+            paper is None
+            or paper.asset_type != "paper"
+            or repository is None
+            or repository.asset_type != "repository"
+        ):
+            continue
+        paper_repository_ids[paper.id].add(repository.id)
+
+    matched_ids = {asset.id for asset in matched_assets}
+    matched_order = {asset.id: index for index, asset in enumerate(matched_assets)}
+    browse = not query.strip()
+    sortable_units: list[tuple[float, int, float, str, dict[str, Any], Asset]] = []
+    represented_repository_ids: set[UUID] = set()
+
+    for paper in catalog_assets:
+        if paper.asset_type != "paper":
+            continue
+        related_repositories = sorted(
+            (
+                assets_by_id[repository_id]
+                for repository_id in paper_repository_ids.get(paper.id, set())
+            ),
+            key=lambda item: (item.title.casefold(), str(item.id)),
+        )
+        member_ids = {paper.id, *(repository.id for repository in related_repositories)}
+        if not browse and not member_ids.intersection(matched_ids):
+            continue
+        if not _asset_matches_unit_filters(
+            paper,
+            related_repositories=related_repositories,
+            representations=representations,
+            states=states,
+            annotation_assets=annotation_assets,
+            domain=domain,
+            status=status,
+            author=author,
+            year_from=year_from,
+            year_to=year_to,
+            tags=tags,
+            has_pdf=has_pdf,
+            has_html=has_html,
+            has_code=has_code,
+            has_guide=has_guide,
+            has_annotation=has_annotation,
+        ):
+            continue
+        if browse:
+            unit_matches = [paper]
+            match_source = "browse"
+        else:
+            unit_matches = [
+                item for item in [paper, *related_repositories] if item.id in matched_ids
+            ]
+            paper_matched = paper.id in matched_ids
+            repository_matched = any(
+                repository.id in matched_ids for repository in related_repositories
+            )
+            if paper_matched and repository_matched:
+                match_source = "paper_and_related_repository"
+            elif repository_matched:
+                match_source = "related_repository"
+            else:
+                match_source = "paper"
+        best_match = max(
+            unit_matches,
+            key=lambda item: (
+                _asset_search_score(item.id, search_hits),
+                1 if item.id == paper.id else 0,
+                -matched_order.get(item.id, len(matched_order)),
+            ),
+        )
+        score = _asset_search_score(best_match.id, search_hits)
+        payload = serialize_research_unit(
+            unit_id=str(paper.id),
+            unit_kind="paper",
+            primary_asset=serialize_asset(
+                paper,
+                reading_state=states.get(paper.id),
+                annotation_summary=summaries.get(paper.id),
+            ),
+            related_repositories=[
+                serialize_asset(
+                    repository,
+                    reading_state=states.get(repository.id),
+                    annotation_summary=summaries.get(repository.id),
+                )
+                for repository in related_repositories
+            ],
+            quick_actions=_research_unit_quick_actions(
+                paper,
+                related_repositories,
+                representations,
+            ),
+            matched_assets=[
+                _serialize_matched_asset(
+                    item,
+                    search_hits=search_hits,
+                    query=query,
+                    states=states,
+                    summaries=summaries,
+                )
+                for item in unit_matches
+            ],
+            score=score,
+            snippet=_asset_search_snippet(best_match, search_hits, query),
+            match_source=match_source,
+        )
+        first_match = min(
+            (matched_order.get(item.id, len(matched_order)) for item in unit_matches),
+            default=len(matched_order),
+        )
+        sortable_units.append(
+            (
+                -score,
+                first_match,
+                -(paper.updated_at.timestamp() if paper.updated_at is not None else 0.0),
+                str(paper.id),
+                payload,
+                paper,
+            )
+        )
+        represented_repository_ids.update(repository.id for repository in related_repositories)
+
+    if include_independent_repositories:
+        for repository in catalog_assets:
+            if (
+                repository.asset_type != "repository"
+                or repository.id in represented_repository_ids
+                or (not browse and repository.id not in matched_ids)
+            ):
+                continue
+            if not _asset_matches_unit_filters(
+                repository,
+                related_repositories=[],
+                representations=representations,
+                states=states,
+                annotation_assets=annotation_assets,
+                domain=domain,
+                status=status,
+                author=author,
+                year_from=year_from,
+                year_to=year_to,
+                tags=tags,
+                has_pdf=has_pdf,
+                has_html=has_html,
+                has_code=has_code,
+                has_guide=has_guide,
+                has_annotation=has_annotation,
+            ):
+                continue
+            score = _asset_search_score(repository.id, search_hits)
+            payload = serialize_research_unit(
+                unit_id=str(repository.id),
+                unit_kind="repository",
+                primary_asset=serialize_asset(
+                    repository,
+                    reading_state=states.get(repository.id),
+                    annotation_summary=summaries.get(repository.id),
+                ),
+                related_repositories=[],
+                quick_actions=_research_unit_quick_actions(repository, [], representations),
+                matched_assets=[
+                    _serialize_matched_asset(
+                        repository,
+                        search_hits=search_hits,
+                        query=query,
+                        states=states,
+                        summaries=summaries,
+                    )
+                ],
+                score=score,
+                snippet=_asset_search_snippet(repository, search_hits, query),
+                match_source="browse" if browse else "repository",
+            )
+            sortable_units.append(
+                (
+                    -score,
+                    matched_order.get(repository.id, len(matched_order)),
+                    -(
+                        repository.updated_at.timestamp()
+                        if repository.updated_at is not None
+                        else 0.0
+                    ),
+                    str(repository.id),
+                    payload,
+                    repository,
+                )
+            )
+
+    sortable_units.sort(key=lambda item: item[:4])
+    return (
+        [item[4] for item in sortable_units],
+        [item[5] for item in sortable_units],
+    )
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -685,6 +1327,10 @@ def _domain_catalog(settings: ApiSettings) -> list[dict[str, Any]]:
                     "slug": slug,
                     "label": str(item.get("label") or slug),
                     "aliases": list(item.get("aliases", [])),
+                    "description": (
+                        str(item["description"]) if item.get("description") else None
+                    ),
+                    "tags": list(item.get("tags", [])),
                 }
             )
     return result
@@ -693,11 +1339,13 @@ def _domain_catalog(settings: ApiSettings) -> list[dict[str, Any]]:
 @router.get("/dashboard")
 def dashboard(request: Request) -> dict[str, Any]:
     with _database(request).session() as session:
-        assets = list(
-            session.scalars(
+        assets = [
+            asset
+            for asset in session.scalars(
                 select(Asset).where(Asset.deleted_at.is_(None)).order_by(Asset.updated_at.desc())
             ).all()
-        )
+            if not _is_system_hidden_asset(asset)
+        ]
         states, summaries = _asset_context(session, assets)
         reading_counts = {"unread": 0, "reading": 0, "read": 0}
         for asset in assets:
@@ -773,6 +1421,7 @@ def search_assets(
     request: Request,
     q: str = "",
     mode: str = Query("hybrid", pattern="^(exact|hybrid|semantic)$"),
+    group_by: str = Query("none", pattern="^(paper|none)$"),
     domain: str | None = None,
     status: str | None = Query(None, pattern="^(unread|reading|read)$"),
     author: str | None = None,
@@ -788,10 +1437,11 @@ def search_assets(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     offset = decode_cursor(cursor)
+    paper_grouping = group_by == "paper" and asset_type in {None, "all", "paper"}
     filters: dict[str, Any] = {
         "domain": domain,
         "status": status,
-        "type": asset_type,
+        "type": asset_type if asset_type != "all" else None,
         "year_from": year_from,
         "year_to": year_to,
         "tags": tag,
@@ -801,15 +1451,29 @@ def search_assets(
         "has_guide": has_guide,
     }
     filters = {key: value for key, value in filters.items() if value is not None}
+    runtime_filters = {} if paper_grouping else filters
     search_hits: dict[UUID, Any] = {}
     search_detail: dict[str, Any] = {}
     if q.strip():
         try:
+            search_window = max(100, offset + PAGE_SIZE)
+            search_options: dict[str, Any] = {}
+            if paper_grouping:
+                with _database(request).session() as count_session:
+                    active_asset_count = (
+                        count_session.scalar(
+                            select(func.count(Asset.id)).where(Asset.deleted_at.is_(None))
+                        )
+                        or 0
+                    )
+                search_window = max(search_window, active_asset_count)
+                search_options["candidate_limit"] = search_window
             result = _search_runtime(request).service.search(
                 q,
                 mode=mode,
-                filters=filters,
-                limit=max(100, offset + PAGE_SIZE),
+                filters=runtime_filters,
+                limit=search_window,
+                **search_options,
             )
             for hit in result.hits:
                 try:
@@ -847,16 +1511,17 @@ def search_assets(
             }
 
     with _database(request).session() as session:
+        catalog_assets = [
+            asset
+            for asset in session.scalars(
+                select(Asset)
+                .where(Asset.deleted_at.is_(None))
+                .order_by(Asset.updated_at.desc(), Asset.id)
+            ).all()
+            if not _is_system_hidden_asset(asset)
+        ]
         if search_hits:
-            indexed_assets = {
-                item.id: item
-                for item in session.scalars(
-                    select(Asset).where(
-                        Asset.id.in_(search_hits),
-                        Asset.deleted_at.is_(None),
-                    )
-                ).all()
-            }
+            indexed_assets = {item.id: item for item in catalog_assets if item.id in search_hits}
             assets = [
                 indexed_assets[asset_id] for asset_id in search_hits if asset_id in indexed_assets
             ]
@@ -867,82 +1532,76 @@ def search_assets(
                     "errors": ["hybrid-runtime:stale-or-foreign-index"],
                     "detail": "PostgreSQL metadata fallback is active.",
                 }
-                assets = list(
-                    session.scalars(
-                        select(Asset)
-                        .where(Asset.deleted_at.is_(None))
-                        .order_by(Asset.updated_at.desc(), Asset.id)
-                    ).all()
-                )
+                assets = catalog_assets
         else:
-            assets = list(
-                session.scalars(
-                    select(Asset)
-                    .where(Asset.deleted_at.is_(None))
-                    .order_by(Asset.updated_at.desc(), Asset.id)
-                ).all()
-            )
-        states, summaries = _asset_context(session, assets)
+            assets = catalog_assets
+
+        context_assets = catalog_assets if paper_grouping else assets
+        states, summaries = _asset_context(session, context_assets)
+        context_asset_ids = [asset.id for asset in context_assets]
         annotation_assets = {
             asset_id
             for asset_id in session.scalars(
                 select(Annotation.asset_id).where(
                     Annotation.deleted_at.is_(None),
-                    Annotation.asset_id.in_([asset.id for asset in assets]),
+                    Annotation.asset_id.in_(context_asset_ids),
                 )
             )
         }
-        available_types: dict[UUID, set[str]] = defaultdict(set)
-        for asset_id, representation_type in session.execute(
-            select(
-                Representation.asset_id,
-                Representation.representation_type,
-            ).where(
-                Representation.deleted_at.is_(None),
-                Representation.availability == "available",
-                Representation.asset_id.in_([asset.id for asset in assets]),
-            )
-        ):
-            available_types[asset_id].add(str(representation_type))
+        representations: dict[UUID, list[Representation]] = defaultdict(list)
+        if context_asset_ids:
+            for representation in session.scalars(
+                select(Representation)
+                .where(
+                    Representation.deleted_at.is_(None),
+                    Representation.asset_id.in_(context_asset_ids),
+                )
+                .order_by(
+                    Representation.asset_id,
+                    Representation.role,
+                    Representation.representation_type,
+                    Representation.id,
+                )
+            ):
+                representations[representation.asset_id].append(representation)
         filtered: list[Asset] = []
         for asset in assets:
-            if domain and domain not in (asset.domain_slugs or []):
-                continue
-            if asset_type and asset.asset_type != asset_type:
-                continue
-            if author and not any(
-                author.casefold() in item.casefold() for item in asset.authors or []
-            ):
-                continue
-            if year_from is not None and (asset.year is None or asset.year < year_from):
-                continue
-            if year_to is not None and (asset.year is None or asset.year > year_to):
-                continue
-            if tag and not set(tag).intersection(asset.tags or []):
-                continue
-            reading_state = states.get(asset.id)
-            reading_status = reading_state.status if reading_state is not None else "unread"
-            if status and reading_status != status:
-                continue
-            if has_annotation is not None and ((asset.id in annotation_assets) != has_annotation):
-                continue
-            availability_flags = {
-                "pdf": "pdf" in available_types[asset.id],
-                "html": "html" in available_types[asset.id],
-                "code": (
-                    asset.asset_type == "repository"
-                    or bool({"source_code", "repository", "notebook"} & available_types[asset.id])
-                ),
-                "guide": bool({"guide", "analysis", "markdown"} & available_types[asset.id]),
-            }
-            if has_pdf is not None and availability_flags["pdf"] != has_pdf:
-                continue
-            if has_html is not None and availability_flags["html"] != has_html:
-                continue
-            if has_code is not None and availability_flags["code"] != has_code:
-                continue
-            if has_guide is not None and availability_flags["guide"] != has_guide:
-                continue
+            if not paper_grouping:
+                if domain and domain not in (asset.domain_slugs or []):
+                    continue
+                if asset_type and asset_type != "all" and asset.asset_type != asset_type:
+                    continue
+                if author and not any(
+                    author.casefold() in item.casefold() for item in asset.authors or []
+                ):
+                    continue
+                if year_from is not None and (asset.year is None or asset.year < year_from):
+                    continue
+                if year_to is not None and (asset.year is None or asset.year > year_to):
+                    continue
+                if tag and not set(tag).intersection(asset.tags or []):
+                    continue
+                reading_state = states.get(asset.id)
+                reading_status = reading_state.status if reading_state is not None else "unread"
+                if status and reading_status != status:
+                    continue
+                if has_annotation is not None and (
+                    (asset.id in annotation_assets) != has_annotation
+                ):
+                    continue
+                asset_representations = representations.get(asset.id, [])
+                availability_flags = {
+                    kind: _has_available_action(asset_representations, kind)
+                    for kind in ("pdf", "html", "code", "guide")
+                }
+                if has_pdf is not None and availability_flags["pdf"] != has_pdf:
+                    continue
+                if has_html is not None and availability_flags["html"] != has_html:
+                    continue
+                if has_code is not None and availability_flags["code"] != has_code:
+                    continue
+                if has_guide is not None and availability_flags["guide"] != has_guide:
+                    continue
             if q.strip() and not search_hits:
                 haystack = " ".join(
                     [
@@ -959,25 +1618,40 @@ def search_assets(
                 ):
                     continue
             filtered.append(asset)
+
+        if paper_grouping:
+            units, facet_assets = _build_research_units(
+                session,
+                catalog_assets=catalog_assets,
+                matched_assets=filtered,
+                search_hits=search_hits,
+                query=q,
+                states=states,
+                summaries=summaries,
+                annotation_assets=annotation_assets,
+                representations=representations,
+                include_independent_repositories=asset_type != "paper",
+                domain=domain,
+                status=status,
+                author=author,
+                year_from=year_from,
+                year_to=year_to,
+                tags=tag,
+                has_pdf=has_pdf,
+                has_html=has_html,
+                has_code=has_code,
+                has_guide=has_guide,
+                has_annotation=has_annotation,
+            )
+            payload = _list_payload(units[offset : offset + PAGE_SIZE], offset, len(units))
+            payload["mode"] = mode
+            payload["group_by"] = "paper"
+            payload.update(search_detail)
+            payload.setdefault("degraded", bool(q.strip() and not search_hits))
+            payload["facets"] = _asset_facets(facet_assets, states)
+            return payload
+
         page = filtered[offset : offset + PAGE_SIZE]
-        page_representations: dict[UUID, list[dict[str, Any]]] = defaultdict(list)
-        if page:
-            for representation in session.scalars(
-                select(Representation)
-                .where(
-                    Representation.asset_id.in_([asset.id for asset in page]),
-                    Representation.deleted_at.is_(None),
-                    Representation.availability == "available",
-                )
-                .order_by(
-                    Representation.asset_id,
-                    Representation.role,
-                    Representation.representation_type,
-                )
-            ):
-                page_representations[representation.asset_id].append(
-                    serialize_representation(representation)
-                )
         items: list[dict[str, Any]] = []
         for asset in page:
             selected_hit = search_hits.get(asset.id)
@@ -1000,39 +1674,17 @@ def search_assets(
                         "exact_match": selected_hit.exact_match,
                     }
                 )
-            item["representations"] = page_representations[asset.id]
+            item["representations"] = [
+                serialize_representation(representation)
+                for representation in representations.get(asset.id, [])
+                if representation.availability == "available"
+            ]
             items.append(item)
         payload = _list_payload(items, offset, len(filtered))
         payload["mode"] = mode
         payload.update(search_detail)
         payload.setdefault("degraded", bool(q.strip() and not search_hits))
-        payload["facets"] = {
-            "domains": dict(
-                Counter(
-                    domain_slug for asset in filtered for domain_slug in asset.domain_slugs or []
-                ).most_common()
-            ),
-            "years": dict(
-                sorted(
-                    Counter(
-                        str(asset.year) for asset in filtered if asset.year is not None
-                    ).items(),
-                    reverse=True,
-                )
-            ),
-            "types": dict(Counter(asset.asset_type for asset in filtered).most_common()),
-            "reading_status": dict(
-                Counter(
-                    states[asset.id].status if asset.id in states else "unread"
-                    for asset in filtered
-                ).most_common()
-            ),
-            "tags": dict(
-                Counter(
-                    tag_value for asset in filtered for tag_value in asset.tags or []
-                ).most_common(50)
-            ),
-        }
+        payload["facets"] = _asset_facets(filtered, states)
         return payload
 
 
@@ -1043,13 +1695,18 @@ def list_assets(
     status: str | None = Query(None, pattern="^(unread|reading|read)$"),
     cursor: str | None = None,
     include_deleted: bool = False,
+    include: str | None = Query(None, pattern="^representations$"),
 ) -> dict[str, Any]:
     offset = decode_cursor(cursor)
     with _database(request).session() as session:
         statement = select(Asset).order_by(Asset.updated_at.desc(), Asset.id)
         if not include_deleted:
             statement = statement.where(Asset.deleted_at.is_(None))
-        assets = list(session.scalars(statement).all())
+        assets = [
+            asset
+            for asset in session.scalars(statement).all()
+            if not _is_system_hidden_asset(asset)
+        ]
         states, summaries = _asset_context(session, assets)
         filtered: list[Asset] = []
         for asset in assets:
@@ -1069,6 +1726,27 @@ def list_assets(
             )
             for item in page
         ]
+        if include == "representations":
+            page_representations: dict[UUID, list[dict[str, Any]]] = defaultdict(list)
+            if page:
+                for representation in session.scalars(
+                    select(Representation)
+                    .where(
+                        Representation.asset_id.in_([item.id for item in page]),
+                        Representation.deleted_at.is_(None),
+                    )
+                    .order_by(
+                        Representation.asset_id,
+                        Representation.role,
+                        Representation.representation_type,
+                        Representation.id,
+                    )
+                ):
+                    page_representations[representation.asset_id].append(
+                        serialize_representation(representation)
+                    )
+            for item, asset in zip(items, page, strict=True):
+                item["representations"] = page_representations[asset.id]
         return _list_payload(items, offset, len(filtered))
 
 
@@ -1698,18 +2376,30 @@ def list_representations(asset_id: UUID, request: Request) -> dict[str, Any]:
 def open_representation(
     representation_id: UUID,
     request: Request,
+    payload: Annotated[RepresentationOpenRequest | None, Body()] = None,
 ) -> dict[str, Any]:
     settings = _settings(request)
+    requested_presentation = payload.presentation if payload is not None else "original"
+    embed = payload.embed if payload is not None else False
     with _database(request).session() as session:
         representation = session.get(Representation, representation_id)
         if representation is None or representation.deleted_at is not None:
             raise not_found("Representation", representation_id)
+        if representation.availability != "available":
+            raise conflict("Only representations with availability=available can be opened.")
         if representation.external_url and not representation.path_ref:
-            return {
+            result: dict[str, Any] = {
                 "kind": "external_url",
                 "url": representation.external_url,
                 "network_required": representation.network_required,
+                "presentation": "original",
+                "embed": embed,
             }
+            if requested_presentation == "hub":
+                result["warning"] = (
+                    "Hub presentation is unavailable for an external-only representation."
+                )
+            return result
         try:
             token = create_gateway_token(
                 settings.gateway_secret,
@@ -1726,11 +2416,15 @@ def open_representation(
             ) from error
         origin = settings.gateway_origin.rstrip("/")
         url = f"{origin}/session/{representation.id}?token={quote(token, safe='')}"
+        if payload is not None:
+            url = f"{url}&presentation={requested_presentation}"
         return {
             "kind": "gateway_session",
             "url": url,
             "expires_in": settings.gateway_session_seconds,
             "representation_id": str(representation.id),
+            "presentation": requested_presentation,
+            "embed": embed,
         }
 
 
@@ -2393,22 +3087,152 @@ def create_relation_evidence(
         return result
 
 
+def _domain_overview_warning(representation: Representation) -> str | None:
+    if representation.availability == "available":
+        if representation.external_url and not representation.path_ref:
+            return "The overview is external-only and uses its original presentation."
+        return None
+    if representation.availability == "missing":
+        return _representation_missing_reason(representation)
+    return f"Overview representation is {representation.availability}."
+
+
+def _domain_overviews(
+    session: Session,
+    portal_assets: list[Asset],
+) -> dict[str, dict[str, Any]]:
+    portal_ids = [asset.id for asset in portal_assets]
+    representations: dict[UUID, list[Representation]] = defaultdict(list)
+    if portal_ids:
+        for representation in session.scalars(
+            select(Representation)
+            .where(
+                Representation.asset_id.in_(portal_ids),
+                Representation.deleted_at.is_(None),
+                Representation.representation_type.in_(_HTML_REPRESENTATION_TYPES),
+            )
+            .order_by(Representation.asset_id, Representation.id)
+        ):
+            representations[representation.asset_id].append(representation)
+
+    result: dict[str, dict[str, Any]] = {}
+    domain_slugs = {
+        slug for asset in portal_assets for slug in (asset.domain_slugs or [])
+    }
+    for slug in sorted(domain_slugs):
+        matching_assets = sorted(
+            (asset for asset in portal_assets if slug in (asset.domain_slugs or [])),
+            key=lambda asset: (
+                -(asset.updated_at.timestamp() if asset.updated_at is not None else 0.0),
+                str(asset.id),
+            ),
+        )
+        candidates = sorted(
+            (
+                (representation, asset, None)
+                for asset in matching_assets
+                for representation in representations.get(asset.id, [])
+            ),
+            key=_representation_choice_key,
+        )
+        if not candidates:
+            asset = matching_assets[0]
+            result[slug] = serialize_domain_overview(
+                asset_id=str(asset.id),
+                representation_id=None,
+                status="unavailable",
+                default_presentation="original",
+                last_verified_at=None,
+                warning="No HTML representation is registered for this domain overview.",
+            )
+            continue
+        representation, asset, _ = candidates[0]
+        if representation.availability == "available":
+            status = (
+                "network_required"
+                if _representation_requires_network(representation)
+                else "available"
+            )
+        elif representation.availability == "missing":
+            status = "missing"
+        else:
+            status = "unavailable"
+        default_presentation = (
+            "hub"
+            if representation.availability == "available" and representation.path_ref
+            else "original"
+        )
+        result[slug] = serialize_domain_overview(
+            asset_id=str(asset.id),
+            representation_id=str(representation.id),
+            status=status,
+            default_presentation=default_presentation,
+            last_verified_at=representation.verified_at,
+            warning=_domain_overview_warning(representation),
+        )
+    return result
+
+
 def _domains_with_counts(
     session: Session,
     settings: ApiSettings,
     assets: list[Asset] | None = None,
+    *,
+    include_overview: bool = False,
 ) -> list[dict[str, Any]]:
-    assets = assets or list(session.scalars(select(Asset).where(Asset.deleted_at.is_(None))).all())
-    states, _ = _asset_context(session, assets)
+    all_assets = list(
+        session.scalars(select(Asset).where(Asset.deleted_at.is_(None))).all()
+    )
+    portal_assets = [
+        asset for asset in all_assets if _is_domain_overview_asset(asset)
+    ]
+    content_assets = (
+        [asset for asset in all_assets if not _is_system_hidden_asset(asset)]
+        if assets is None
+        else [asset for asset in assets if not _is_system_hidden_asset(asset)]
+    )
+    states, _ = _asset_context(session, content_assets)
+    overviews = _domain_overviews(session, portal_assets)
+    confirmed_repository_ids = set(
+        session.scalars(
+            select(Relation.object_asset_id).where(
+                Relation.relation_type == "implemented_by",
+                Relation.confirmation_status == "confirmed",
+                Relation.deleted_at.is_(None),
+            )
+        ).all()
+    )
     result: list[dict[str, Any]] = []
-    known = {item["slug"] for item in _domain_catalog(settings)}
     catalog = _domain_catalog(settings)
-    for unknown in sorted(
-        {slug for asset in assets for slug in (asset.domain_slugs or [])} - known
-    ):
-        catalog.append({"slug": unknown, "label": unknown, "aliases": []})
+    known = {item["slug"] for item in catalog}
+    discovered = {
+        slug
+        for asset in [*content_assets, *portal_assets]
+        for slug in (asset.domain_slugs or [])
+    }
+    for unknown in sorted(discovered - known):
+        catalog.append(
+            {
+                "slug": unknown,
+                "label": unknown,
+                "aliases": [],
+                "description": None,
+                "tags": [],
+            }
+        )
+    unavailable_overview = serialize_domain_overview(
+        asset_id=None,
+        representation_id=None,
+        status="unavailable",
+        default_presentation="original",
+        last_verified_at=None,
+        warning="No domain overview is registered.",
+    )
     for domain in catalog:
-        matching = [item for item in assets if domain["slug"] in (item.domain_slugs or [])]
+        slug = str(domain["slug"])
+        matching = [
+            item for item in content_assets if slug in (item.domain_slugs or [])
+        ]
         reading_counts = {"unread": 0, "reading": 0, "read": 0}
         for asset in matching:
             reading_state = states.get(asset.id)
@@ -2426,20 +3250,31 @@ def _domains_with_counts(
                 )
                 or 0
             )
-        result.append(
-            {
-                **domain,
-                "name": domain["label"],
-                "asset_count": len(matching),
-                "paper_count": sum(item.asset_type == "paper" for item in matching),
-                "annotation_count": annotation_count,
-                "reading_counts": reading_counts,
-                "recent_assets": _serialize_assets(
-                    session,
-                    sorted(matching, key=lambda item: item.updated_at, reverse=True)[:5],
-                ),
-            }
+        paper_count = sum(item.asset_type == "paper" for item in matching)
+        repository_count = sum(item.asset_type == "repository" for item in matching)
+        independent_repository_count = sum(
+            item.asset_type == "repository" and item.id not in confirmed_repository_ids
+            for item in matching
         )
+        overview = overviews.get(slug, unavailable_overview)
+        item = {
+            **domain,
+            "name": domain["label"],
+            "asset_count": len(matching),
+            "paper_count": paper_count,
+            "repository_count": repository_count,
+            "research_unit_count": paper_count + independent_repository_count,
+            "annotation_count": annotation_count,
+            "reading_counts": reading_counts,
+            "overview_status": overview["status"],
+            "recent_assets": _serialize_assets(
+                session,
+                sorted(matching, key=lambda asset: asset.updated_at, reverse=True)[:5],
+            ),
+        }
+        if include_overview:
+            item["overview"] = overview
+        result.append(item)
     return result
 
 
@@ -2453,7 +3288,11 @@ def list_domains(request: Request) -> dict[str, Any]:
 @router.get("/domains/{slug}")
 def get_domain(slug: str, request: Request) -> dict[str, Any]:
     with _database(request).session() as session:
-        for item in _domains_with_counts(session, _settings(request)):
+        for item in _domains_with_counts(
+            session,
+            _settings(request),
+            include_overview=True,
+        ):
             if item["slug"] == slug:
                 return item
     raise not_found("Domain", slug)
@@ -2785,7 +3624,13 @@ def list_comparisons(request: Request) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
         for view in views:
             ids = [UUID(value) for value in view.definition.get("asset_ids", [])]
-            assets = list(session.scalars(select(Asset).where(Asset.id.in_(ids))).all())
+            assets = [
+                asset
+                for asset in session.scalars(
+                    select(Asset).where(Asset.id.in_(ids))
+                ).all()
+                if not _is_system_hidden_asset(asset)
+            ]
             order = {asset_id: index for index, asset_id in enumerate(ids)}
             assets.sort(key=lambda item: order.get(item.id, len(order)))
             items.append(serialize_comparison(view, _serialize_assets(session, assets)))

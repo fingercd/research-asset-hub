@@ -55,6 +55,7 @@ class _CountingKeywordIndex(InMemoryKeywordIndex):
     def __init__(self) -> None:
         super().__init__()
         self.search_calls = 0
+        self.last_limit: int | None = None
 
     def search(
         self,
@@ -64,6 +65,7 @@ class _CountingKeywordIndex(InMemoryKeywordIndex):
         filters: Mapping[str, Any] | None = None,
     ) -> list[SearchHit]:
         self.search_calls += 1
+        self.last_limit = limit
         return super().search(
             query,
             limit=limit,
@@ -258,6 +260,36 @@ def test_hybrid_search_protects_exact_identifier_and_filters() -> None:
         filters={"domain": "agent"},
     )
     assert {hit.document.asset_id for hit in filtered.hits} == {exact.asset_id}
+
+
+def test_hybrid_search_can_expand_candidate_window_per_call() -> None:
+    keyword = _CountingKeywordIndex()
+    keyword.upsert(
+        [
+            SearchDocument(
+                document_id=f"asset:{index:03d}",
+                asset_id=f"{index:032d}",
+                kind="asset",
+                title=f"Wide candidate {index:03d}",
+                text="wide candidate",
+            )
+            for index in range(121)
+        ]
+    )
+    service = HybridSearchService({"assets": keyword}, candidate_limit=100)
+
+    default = service.search("wide candidate", mode=SearchMode.KEYWORD, limit=121)
+    assert len(default.hits) == 100
+    assert keyword.last_limit == 100
+
+    expanded = service.search(
+        "wide candidate",
+        mode=SearchMode.KEYWORD,
+        limit=121,
+        candidate_limit=121,
+    )
+    assert len(expanded.hits) == 121
+    assert keyword.last_limit == 121
 
 
 class _MemoryMeiliAdmin:

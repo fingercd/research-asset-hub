@@ -91,6 +91,72 @@ def serialize_representation(representation: Representation) -> dict[str, Any]:
     }
 
 
+def serialize_quick_action(
+    *,
+    kind: str,
+    status: str,
+    representation_id: str | None,
+    owner_asset_id: str | None,
+    relation_type: str | None,
+    reason: str | None,
+    alternatives: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "status": status,
+        "representation_id": representation_id,
+        "owner_asset_id": owner_asset_id,
+        "relation_type": relation_type,
+        "reason": reason,
+        "alternatives": list(alternatives or []),
+    }
+
+
+def serialize_research_unit(
+    *,
+    unit_id: str,
+    unit_kind: str,
+    primary_asset: dict[str, Any],
+    related_repositories: list[dict[str, Any]],
+    quick_actions: list[dict[str, Any]],
+    matched_assets: list[dict[str, Any]],
+    score: float,
+    snippet: str | None,
+    match_source: str,
+) -> dict[str, Any]:
+    return {
+        "unit_id": unit_id,
+        "unit_kind": unit_kind,
+        "primary_asset": primary_asset,
+        "related_repositories": related_repositories,
+        "quick_actions": quick_actions,
+        "matched_assets": matched_assets,
+        "covered_asset_count": 1 + len(related_repositories),
+        "score": score,
+        "snippet": snippet,
+        "match_source": match_source,
+    }
+
+
+def serialize_domain_overview(
+    *,
+    asset_id: str | None,
+    representation_id: str | None,
+    status: str,
+    default_presentation: str,
+    last_verified_at: datetime | None,
+    warning: str | None,
+) -> dict[str, Any]:
+    return {
+        "asset_id": asset_id,
+        "representation_id": representation_id,
+        "status": status,
+        "default_presentation": default_presentation,
+        "last_verified_at": _iso(last_verified_at),
+        "warning": warning,
+    }
+
+
 def serialize_annotation(annotation: Annotation) -> dict[str, Any]:
     return {
         "id": str(annotation.id),

@@ -17,6 +17,10 @@ class ApiSettings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8767, ge=1, le=65535)
     api_reload: bool = False
+    web_host: str = "127.0.0.1"
+    web_port: int = Field(default=8765, ge=1, le=65535)
+    asset_gateway_host: str = "127.0.0.1"
+    asset_gateway_port: int = Field(default=8766, ge=1, le=65535)
 
     database_url: str = (
         "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub"
@@ -27,7 +31,7 @@ class ApiSettings(BaseSettings):
     meilisearch_url: str = "http://127.0.0.1:7700"
     meilisearch_api_key: str = "research-hub-local-meili-key"
     qdrant_url: str = "http://127.0.0.1:6333"
-    search_vector_version: str = "bge_m3_v1"
+    search_vector_version: str = "20260726-domain-expansion"
     embedding_model: str = "BAAI/bge-m3"
     embedding_batch_size: int = Field(default=8, ge=1, le=64)
     embedding_max_sequence_length: int = Field(default=512, ge=64, le=8192)
@@ -35,6 +39,7 @@ class ApiSettings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     reranker_batch_size: int = Field(default=4, ge=1, le=32)
     reranker_max_sequence_length: int = Field(default=512, ge=64, le=8192)
+    search_model_idle_seconds: float = Field(default=900.0, ge=0)
 
     worker_heartbeat_path: Path = Path("work/state/worker-heartbeat.json")
     worker_stale_after_seconds: float = Field(default=30.0, gt=0)
@@ -49,6 +54,7 @@ class ApiSettings(BaseSettings):
 
     gateway_origin: str = "http://127.0.0.1:8766"
     web_origin: str = "http://127.0.0.1:8765"
+    web_api_proxy_timeout_seconds: float = Field(default=180.0, gt=0, le=3600)
     gateway_secret: str = ""
     gateway_session_seconds: int = Field(default=900, ge=30, le=86400)
     sources_config_path: Path = PROJECT_ROOT / "config" / "sources.yaml"

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   BookOpen,
+  FolderKanban,
   LibraryBig,
   Network,
   Search,
@@ -82,6 +83,81 @@ export function HomePage() {
       ) : data ? (
         <>
           <IndexNotice status={index?.status} detail={index?.detail} />
+          <section
+            className="section-block home-domain-section"
+            aria-labelledby="home-domains-heading"
+          >
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">完整研究版图</p>
+                <h2 id="home-domains-heading">研究方向</h2>
+              </div>
+              <Link className="text-link" to="/domains">
+                查看领域目录 <ArrowRight size={14} aria-hidden="true" />
+              </Link>
+            </div>
+            {data.domains?.length ? (
+              <div className="domain-grid">
+                {data.domains.map((domain) => (
+                  <article className="domain-card home-domain-card" key={domain.slug}>
+                    <div className="domain-card-icon" aria-hidden="true">
+                      <FolderKanban size={20} />
+                    </div>
+                    <div>
+                      <div className="domain-card-kicker">
+                        <p className="eyebrow">{domain.slug}</p>
+                        <span
+                          className={`overview-status is-${
+                            domain.overview_status ?? "unavailable"
+                          }`}
+                        >
+                          {domain.overview_status === "available"
+                            ? "总览可用"
+                            : domain.overview_status === "network_required"
+                              ? "总览需联网"
+                              : "原生目录"}
+                        </span>
+                      </div>
+                      <h3>{domain.label ?? domain.name ?? domain.slug}</h3>
+                      <p>{domain.description || "暂无领域说明。"}</p>
+                    </div>
+                    <dl className="domain-counts">
+                      <div>
+                        <dt>论文</dt>
+                        <dd>{domain.paper_count ?? 0}</dd>
+                      </div>
+                      <div>
+                        <dt>仓库</dt>
+                        <dd>{domain.repository_count ?? 0}</dd>
+                      </div>
+                      <div>
+                        <dt>研究单元</dt>
+                        <dd>
+                          {domain.research_unit_count ?? domain.paper_count ?? 0}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>阅读中</dt>
+                        <dd>{domain.reading_counts?.reading ?? 0}</dd>
+                      </div>
+                    </dl>
+                    <Link
+                      className="text-link"
+                      to={`/domains/${encodeURIComponent(domain.slug)}`}
+                    >
+                      进入领域 <ArrowRight size={14} aria-hidden="true" />
+                    </Link>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState
+                title="尚未连接领域"
+                detail="领域会随已注册来源动态出现，无需修改前端。"
+              />
+            )}
+          </section>
+
           <section className="metric-grid" aria-label="资产概况">
             <article>
               <span className="metric-icon">
@@ -125,64 +201,35 @@ export function HomePage() {
             </article>
           </section>
 
-          <div className="dashboard-grid">
-            <section className="section-block">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">继续工作</p>
-                  <h2>{data.continue_reading?.length ? "继续阅读" : "最近资产"}</h2>
-                </div>
-                <Link className="text-link" to="/search">
-                  查看全部 <ArrowRight size={14} aria-hidden="true" />
-                </Link>
+          <section className="section-block home-recent-section">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">继续工作</p>
+                <h2>{data.continue_reading?.length ? "继续阅读" : "最近资产"}</h2>
               </div>
-              {recent.length ? (
-                <div className="asset-list">
-                  {recent.slice(0, 4).map((asset) => (
-                    <AssetCard asset={asset} compact key={asset.id} />
-                  ))}
-                </div>
-              ) : (
-                <EmptyState
-                  title="还没有可展示的资产"
-                  detail="完成首次只读导入后，最近论文与阅读进度会出现在这里。"
-                  kind="index"
-                  action={
-                    <Link className="button secondary" to="/jobs">
-                      查看导入任务
-                    </Link>
-                  }
-                />
-              )}
-            </section>
-
-            <aside className="section-block domain-overview">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">领域</p>
-                  <h2>研究版图</h2>
-                </div>
-                <Link className="text-link" to="/domains">
-                  管理领域
-                </Link>
+              <Link className="text-link" to="/search">
+                查看全部 <ArrowRight size={14} aria-hidden="true" />
+              </Link>
+            </div>
+            {recent.length ? (
+              <div className="asset-list">
+                {recent.slice(0, 4).map((asset) => (
+                  <AssetCard asset={asset} compact key={asset.id} />
+                ))}
               </div>
-              {data.domains?.length ? (
-                <div className="domain-mini-list">
-                  {data.domains.slice(0, 6).map((domain) => (
-                    <Link to={`/domains/${encodeURIComponent(domain.slug)}`} key={domain.slug}>
-                      <span>{domain.label ?? domain.name ?? domain.slug}</span>
-                      <strong>{domain.asset_count ?? 0}</strong>
-                    </Link>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState
-                  title="尚未连接领域"
-                  detail="领域会随已注册来源动态出现，无需修改前端。"
-                />
-              )}
-            </aside>
-          </div>
+            ) : (
+              <EmptyState
+                title="还没有可展示的资产"
+                detail="完成首次只读导入后，最近论文与阅读进度会出现在这里。"
+                kind="index"
+                action={
+                  <Link className="button secondary" to="/jobs">
+                    查看导入任务
+                  </Link>
+                }
+              />
+            )}
+          </section>
         </>
       ) : null}
     </div>

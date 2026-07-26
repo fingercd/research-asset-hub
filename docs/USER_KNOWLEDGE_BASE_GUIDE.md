@@ -6,6 +6,8 @@
 
 平台的 Restic 备份只保护 PostgreSQL、项目配置和开放目录，不包含放在项目外的原始 PDF、代码和 HTML；这些来源文件仍需要你使用外置硬盘、NAS、Git 或其他方式单独备份。
 
+普通的一篇论文使用 `generic_manifest` 旁车，不需要运行 VLN、游戏强化学习、WSVAD 或领域门户的批量快照构建器。完整写库顺序固定为：全量 dry-run 通过、创建备份、第一次全量正式导入、在输入不变时第二次全量正式导入并确认新增计数为 0。
+
 ## 1. 最省事的方法：直接告诉 Agent
 
 你可以把下面这段作为以后给 Agent 的请求模板：
@@ -56,11 +58,20 @@ example-paper-2026/
 
 文件名可以不同，重点是旁车 manifest 中的路径必须正确。不要把依赖环境、`.git`、缓存、模型权重、训练数据或无关构建输出当成论文正式表示。
 
+一篇论文 + PDF + HTML + 代码的最短闭环是：
+
+1. 把 `paper.pdf`、`code/`、`guide.html` 或 `original.html` 放进同一个永久资料目录。
+2. 新建 `config/intake/<new-source-id>/manifest.json`，其中只放这一条稳定 `items[].id` 记录。
+3. 在 `config/sources.yaml` 新增 `read_only: true`、`adapter: generic_manifest` 的 source，并让 `asset_roots` 指向永久资料目录。
+4. 运行全来源检查和 dry-run，核对 PDF、HTML、代码路径及身份合并候选。
+5. 备份后执行两次 `ingest -All`；第二次不得新增任何记录、资产、表示、关系或字段声明。
+6. 完成抽取、HTML 审计、索引和网站打开验证。
+
 ## 3. 先决定加入哪里
 
 ### 加入已有领域
 
-复用已有 domain slug，但不要修改七个既有来源目录或 manifest。为这组新资料创建一个新的旁车 source。
+复用已有 domain slug，但不要修改任何已登记来源目录或 manifest。为这组新资料创建一个新的旁车 source。
 
 ### 建立旁车来源
 
@@ -84,6 +95,33 @@ research-asset-hub\config\intake\intake-example-paper-2026\manifest.json
 - `docs/templates/knowledge-source.example.yaml`
 
 模板只是参考，不要用它覆盖现有 `config/sources.yaml`。旁车 source 首次正式导入时，系统会自动冻结 manifest 和 source 配置摘要；下一组资料使用新的 source ID 和 intake 目录。
+
+### 普通旁车与规范快照不要混用
+
+当前 `config/intake/` 同时保存两类小型旁车：
+
+| 类型 | 用途 | 入口 |
+| --- | --- | --- |
+| 普通 `generic_manifest` | 用户新增一篇或少量论文、PDF、HTML、代码 | 手工按模板创建新的 `config/intake/<source-id>/manifest.json` |
+| `canonical_snapshot` | 项目已定义的批量来源和领域整体 HTML 门户 | 由确定性构建脚本生成，正式导入后冻结 |
+
+当前已验证的批量旁车包括：
+
+- `config/intake/vln-atlas-20260726/manifest.json`：VLN 72 条；
+- `config/intake/game-rl-atlas-20260724/manifest.json`：游戏强化学习 72 条；
+- `config/intake/wsvad-atlas-20260724/manifest.json`：WSVAD 45 条；
+- `config/intake/domain-portals-20260726/manifest.json`：10 个领域的整体 HTML。
+
+构建脚本可以用 `--help` 查看固定参数：
+
+```powershell
+./.venv/Scripts/python.exe scripts/build_canonical_snapshot.py --help
+./.venv/Scripts/python.exe scripts/build_domain_portal_snapshot.py --help
+```
+
+`build_canonical_snapshot.py` 只支持 `vln`、`game_rl`、`wsvad` 三个固定 profile，并且只连接 profile 明确声明的目录，不递归扫描整个来源或 `work/`。`build_domain_portal_snapshot.py` 只生成项目定义的 10 条领域门户记录。它们的输出在 `config/intake/`，原 PDF、代码和 HTML 保持原位、只读。
+
+这四份现有旁车已经过正式导入并冻结；不要原地重建、追加或修改。只有在新 source 首次正式导入之前，才可以为受支持的批量 profile 生成一个新的输出并完整核对。普通单篇论文始终使用前述 `generic_manifest` 流程。
 
 ## 4. 填写 manifest
 
@@ -196,6 +234,8 @@ cd "D:\ResearchLibrary\research-asset-hub"
 
 `DryRun` 本身只需要 Python、配置和可读来源。这里先运行 `start` 是为了继续完成正式数据库导入、抽取、索引和网站验证；如果你只想检查 manifest，可以暂时不启动完整服务。
 
+本机入口分别是：网站 <http://127.0.0.1:8765>、API 文档 <http://127.0.0.1:8767/docs>、隔离资产网关健康检查 <http://127.0.0.1:8766/health>。
+
 打开 `work/validation/ingest-dry-run.json`，确认：
 
 - `status` 是 `passed`；
@@ -248,7 +288,7 @@ cd "D:\ResearchLibrary\research-asset-hub"
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/build_indexes.py `
-  --version bge_m3_v1 `
+  --version 20260726-domain-expansion `
   --report work/validation/index-build-bge-m3.json
 ```
 
@@ -280,6 +320,8 @@ HTML 会按静态、可信本地交互或需要联网三种策略隔离打开。
 4. 检查领域、作者、年份和标签。
 5. 确认代码仓库关系正确。
 6. 切换阅读状态并添加一条真实批注。
+
+如果本次新增或调整了领域整体 HTML，还要进入对应领域详情，确认“领域总览”默认嵌入成功，并分别测试“统一样式”“原始样式”和“新窗口打开”。样式切换只作用于网关响应，不应造成来源文件 hash 变化。
 
 刷新开放目录：
 
