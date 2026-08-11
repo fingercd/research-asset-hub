@@ -1,6 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
 import {
-  BookOpenText,
   ChevronDown,
   Code2,
   ExternalLink,
@@ -25,7 +24,6 @@ const actionDefinitions: Array<{
 }> = [
   { kind: "pdf", label: "PDF", icon: FileText },
   { kind: "html", label: "HTML", icon: ExternalLink },
-  { kind: "guide", label: "导读", icon: BookOpenText },
   { kind: "code", label: "代码", icon: Code2 },
 ];
 

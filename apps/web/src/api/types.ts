@@ -2,7 +2,7 @@ export type ReadingStatus = "unread" | "reading" | "read";
 export type SearchMode = "exact" | "keyword";
 export type SearchGroupBy = "paper" | "none";
 export type RepresentationPresentation = "hub" | "original";
-export type QuickActionKind = "pdf" | "html" | "guide" | "code";
+export type QuickActionKind = "pdf" | "html" | "code";
 export type QuickActionStatus =
   | "available"
   | "missing"

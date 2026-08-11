@@ -1047,7 +1047,7 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
     ]
 
     actions = {action["kind"]: action for action in first_unit["quick_actions"]}
-    assert list(actions) == ["pdf", "html", "guide", "code"]
+    assert list(actions) == ["pdf", "html", "code"]
     assert actions["pdf"]["status"] == "available"
     assert actions["pdf"]["representation_id"] == representation_ids["local_pdf"]
     assert actions["pdf"]["alternatives"] == [
@@ -1069,8 +1069,6 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
     )
     assert unavailable_open.status_code == 409
     assert unavailable_open.headers["content-type"].startswith("application/problem+json")
-    assert actions["guide"]["status"] == "not_provided"
-    assert actions["guide"]["representation_id"] is None
     assert actions["code"]["status"] == "network_required"
     assert actions["code"]["representation_id"] == representation_ids["shared_code"]
     assert actions["code"]["owner_asset_id"] == shared_repository["id"]
@@ -1150,7 +1148,6 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
     assert guide_unit["unit_id"] == papers[1]["id"]
     guide_actions = {action["kind"]: action for action in guide_unit["quick_actions"]}
     assert guide_actions["html"]["status"] == "not_provided"
-    assert guide_actions["guide"]["representation_id"] == representation_ids["guide_html"]
 
     raw_html = client.get(
         "/api/v1/search",

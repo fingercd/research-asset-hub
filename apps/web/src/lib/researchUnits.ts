@@ -13,8 +13,6 @@ const representationKinds: Record<
   pdf: (type) => type === "pdf",
   html: (type, role) =>
     ["html", "html_document"].includes(type) && role !== "guide",
-  guide: (type, role) =>
-    ["guide", "analysis", "markdown"].includes(type) || role === "guide",
   code: (type) => ["repository", "source_code", "notebook"].includes(type),
 };
 

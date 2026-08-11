@@ -83,12 +83,6 @@ describe("ResearchUnitCard", () => {
           alternatives: [],
         },
         {
-          kind: "guide",
-          status: "not_provided",
-          owner_asset_id: "paper-1",
-          alternatives: [],
-        },
-        {
           kind: "code",
           status: "network_required",
           representation_id: "code-remote",
@@ -114,7 +108,6 @@ describe("ResearchUnitCard", () => {
     expect(actionButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
       "PDF缺失",
       "HTML",
-      "导读",
       "代码（需联网）",
     ]);
     expect(actionButtons[0]).toBeDisabled();
@@ -124,10 +117,9 @@ describe("ResearchUnitCard", () => {
     );
     expect(actionButtons[1]).toBeEnabled();
     expect(actionButtons[2]).toBeDisabled();
-    expect(actionButtons[3]).toBeDisabled();
-    expect(actionButtons[3]).toHaveClass("is-unavailable");
-    expect(actionButtons[3]).toHaveTextContent("需联网");
-    expect(actionButtons[3]).toHaveAttribute(
+    expect(actionButtons[2]).toHaveClass("is-unavailable");
+    expect(actionButtons[2]).toHaveTextContent("需联网");
+    expect(actionButtons[2]).toHaveAttribute(
       "title",
       expect.stringContaining("需要联网"),
     );
@@ -144,7 +136,7 @@ describe("ResearchUnitCard", () => {
         "noopener,noreferrer",
       ),
     );
-    fireEvent.click(actionButtons[3]!);
+    fireEvent.click(actionButtons[2]!);
     expect(screen.queryByRole("dialog", { name: "代码打开方式" })).not.toBeInTheDocument();
     expect(open).not.toHaveBeenCalledWith("code-remote");
 
@@ -201,12 +193,6 @@ describe("ResearchUnitCard", () => {
           kind: "html",
           status: "available",
           representation_id: "html-only",
-          owner_asset_id: "multi-entry",
-          alternatives: [],
-        },
-        {
-          kind: "guide",
-          status: "not_provided",
           owner_asset_id: "multi-entry",
           alternatives: [],
         },
@@ -316,12 +302,6 @@ describe("ResearchUnitCard", () => {
         },
         {
           kind: "html",
-          status: "not_provided",
-          owner_asset_id: "repo-standalone",
-          alternatives: [],
-        },
-        {
-          kind: "guide",
           status: "not_provided",
           owner_asset_id: "repo-standalone",
           alternatives: [],

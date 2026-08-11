@@ -58,7 +58,6 @@ export function representationLabel(representation: Representation): string {
     pdf: "PDF",
     repository: "代码仓库",
     source_code: "源代码",
-    guide: "导读",
     markdown: "Markdown",
     html: "原始 HTML",
     html_document: "HTML",

@@ -563,7 +563,6 @@ def _quick_action(
         missing_reasons = {
             "pdf": "来源未提供 PDF。",
             "html": "来源未提供 HTML。",
-            "guide": "来源未提供导读。",
             "code": (
                 "没有已确认且可用的代码仓库。"
                 if missing_relation_type == "implemented_by"
@@ -646,7 +645,7 @@ def _research_unit_quick_actions(
     source_aliases: dict[UUID, str] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
-    for kind in ("pdf", "html", "guide"):
+    for kind in ("pdf", "html"):
         candidates = [
             (representation, primary_asset, None)
             for representation in representations.get(primary_asset.id, [])
