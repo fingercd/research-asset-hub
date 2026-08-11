@@ -60,7 +60,10 @@
 6. 重建正式关键词/向量索引；不得把 hashing 降级伪装成 BGE-M3 正式索引。
 7. 有 HTML 时完成静态审计、策略应用和必要的浏览器抽样。
 8. 运行来源完整性校验，确认已登记来源没有被平台修改。
-9. 在网站中验证：可以搜索到、详情元数据正确、PDF/代码/导读/HTML 可以安全打开、关系和阅读状态正常。
+9. 在网站中验证：可以搜索到、详情元数据正确、PDF/代码/导读/HTML 可以安全打开、关系和阅读状态正常；
+   研究单元卡片四按钮（PDF/HTML/代码）必须跑 `./.venv/Scripts/python.exe scripts/check_unit_actions.py --domain <domain>` 全绿（红线基线 + 修复后全绿），
+   论文↔代码关联必须用 `scripts/reconcile_repository_relations.py --confirmation-status confirmed --apply` 建立。
+   新入库规则详见 `prj.md`。
 10. 刷新开放目录；按用户需要同步 Obsidian、生成 Zotero 包。
 11. 运行与改动相称的测试，并把报告留在 `work/validation/`。
 12. 完成报告必须列出：新增/更新/合并/缺失/失败数量、幂等结果、索引状态、来源完整性、备份 ID、未完成人工步骤。
