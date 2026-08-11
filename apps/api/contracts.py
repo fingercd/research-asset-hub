@@ -210,12 +210,6 @@ class ComparisonCreate(BaseModel):
     title: str | None = None
 
 
-class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=20_000)
-    asset_ids: list[UUID] = Field(default_factory=list, max_length=20)
-    conversation_id: UUID | None = None
-
-
 class ConflictResolutionRequest(BaseModel):
     strategy: Literal["keep_local", "accept_incoming", "merge"]
     resolved_value: Any | None = None

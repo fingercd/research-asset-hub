@@ -99,7 +99,7 @@ describe("ResearchUnitCard", () => {
     });
 
     expect(screen.getByRole("heading", { name: "Primary Paper" })).toBeInTheDocument();
-    expect(screen.getByText("命中关联代码")).toBeInTheDocument();
+    expect(screen.queryByText("命中关联代码")).not.toBeInTheDocument();
     expect(screen.getByText("主论文批注")).toBeInTheDocument();
     expect(screen.queryByText("仓库批注不应显示")).not.toBeInTheDocument();
     expect(screen.getByLabelText("阅读状态")).toHaveValue("reading");
@@ -107,6 +107,7 @@ describe("ResearchUnitCard", () => {
       "href",
       "/assets/repo-1",
     );
+    expect(screen.getByRole("button", { name: "复制ID" })).toBeInTheDocument();
 
     const actionGroup = screen.getByLabelText("快速打开");
     const actionButtons = within(actionGroup).getAllByRole("button");
@@ -123,8 +124,8 @@ describe("ResearchUnitCard", () => {
     );
     expect(actionButtons[1]).toBeEnabled();
     expect(actionButtons[2]).toBeDisabled();
-    expect(actionButtons[3]).toBeEnabled();
-    expect(actionButtons[3]).toHaveClass("requires-network");
+    expect(actionButtons[3]).toBeDisabled();
+    expect(actionButtons[3]).toHaveClass("is-unavailable");
     expect(actionButtons[3]).toHaveTextContent("需联网");
     expect(actionButtons[3]).toHaveAttribute(
       "title",
@@ -144,7 +145,8 @@ describe("ResearchUnitCard", () => {
       ),
     );
     fireEvent.click(actionButtons[3]!);
-    await waitFor(() => expect(open).toHaveBeenLastCalledWith("code-remote"));
+    expect(screen.queryByRole("dialog", { name: "代码打开方式" })).not.toBeInTheDocument();
+    expect(open).not.toHaveBeenCalledWith("code-remote");
 
     fireEvent.click(screen.getByRole("button", { name: "加入对比" }));
     expect(JSON.parse(window.localStorage.getItem("rah.compare-assets") ?? "[]")).toEqual([
@@ -253,7 +255,40 @@ describe("ResearchUnitCard", () => {
     await waitFor(() => expect(open).toHaveBeenLastCalledWith("pdf-remote"));
   });
 
-  it("shows only code and linked-paper information for an independent repository", () => {
+  it("greys out code when the paper does not provide an open-source repository", () => {
+    renderCard({
+      unit_id: "paper:no-code",
+      unit_kind: "paper",
+      primary_asset: {
+        id: "paper-no-code",
+        asset_type: "paper",
+        title: "Paper Without Code",
+      },
+      related_repositories: [],
+      matched_assets: [],
+      covered_asset_count: 1,
+      match_source: "paper",
+      quick_actions: [
+        {
+          kind: "code",
+          status: "not_provided",
+          owner_asset_id: "paper-no-code",
+          reason: "没有已确认且可用的代码仓库。",
+          alternatives: [],
+        },
+      ],
+    });
+
+    const codeButton = screen.getByRole("button", { name: "代码" });
+    expect(codeButton).toBeDisabled();
+    expect(codeButton).toHaveClass("is-unavailable");
+    expect(codeButton).toHaveAttribute(
+      "title",
+      expect.stringContaining("没有已确认且可用的代码仓库"),
+    );
+  });
+
+  it("shows only code and linked-paper information for an independent repository", async () => {
     renderCard({
       unit_id: "repository:repo-standalone",
       unit_kind: "repository",
@@ -301,10 +336,9 @@ describe("ResearchUnitCard", () => {
     });
 
     const actionGroup = screen.getByLabelText("快速打开");
-    expect(within(actionGroup).getByRole("link", { name: "代码" })).toHaveAttribute(
-      "href",
-      "/assets/repo-standalone",
-    );
+    const codeButton = within(actionGroup).getByRole("button", { name: "代码" });
+    fireEvent.click(codeButton);
+    expect(await screen.findByText("该仓库未提供源码")).toBeInTheDocument();
     expect(within(actionGroup).queryByRole("button", { name: /PDF/ })).toBeNull();
     expect(within(actionGroup).queryByRole("button", { name: "HTML" })).toBeNull();
     expect(within(actionGroup).queryByRole("button", { name: "导读" })).toBeNull();

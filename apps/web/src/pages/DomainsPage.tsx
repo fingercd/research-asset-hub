@@ -129,7 +129,7 @@ export function DomainDetailPage() {
       api.search(
         {
           q: "",
-          mode: "hybrid",
+          mode: "keyword",
           group_by: "paper",
           domain: slug,
           cursor: pageParam,

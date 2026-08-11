@@ -333,7 +333,7 @@ export function ComparePage() {
   const search = useQuery({
     queryKey: ["search", "compare", query],
     queryFn: ({ signal }) =>
-      api.search({ q: query, mode: "hybrid", group_by: "none" }, signal),
+      api.search({ q: query, mode: "keyword", group_by: "none" }, signal),
     enabled: Boolean(query),
   });
   const saved = useQuery({

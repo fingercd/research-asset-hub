@@ -14,18 +14,23 @@ from uuid import UUID, uuid4
 import httpx
 import yaml
 from fastapi import APIRouter, Body, Header, Query, Request, Response
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from apps.api.code_browser import (
+    CodeBrowserPathError,
+    CodeBrowserUnavailable,
+    list_code_directory,
+    local_code_repository,
+    read_code_file,
+)
 from apps.api.config import PROJECT_ROOT, ApiSettings
 from apps.api.contracts import (
     AnnotationCreate,
     AnnotationPatch,
     AssetCreate,
     AssetPatch,
-    ChatRequest,
     ComparisonCreate,
     ConflictResolutionRequest,
     OverrideCreate,
@@ -37,10 +42,10 @@ from apps.api.contracts import (
     SyncApplyRequest,
 )
 from apps.api.database import DatabaseManager
+from apps.api.editor import CODE_REPRESENTATION_TYPES, resolve_editor_path
 from apps.api.events import record_mutation, replay_idempotent, stable_hash
 from apps.api.pagination import decode_cursor, encode_cursor
 from apps.api.problem import ApiProblem, conflict, not_found
-from apps.api.rag_runtime import answer_with_rag
 from apps.api.search_runtime import SearchRuntime
 from apps.api.serialization import (
     serialize_annotation,
@@ -54,6 +59,7 @@ from apps.api.serialization import (
     serialize_research_unit,
     serialize_sync_conflict,
 )
+from apps.asset_gateway.registry import SourceRegistry
 from apps.asset_gateway.security import create_gateway_token
 from packages.backup import BackupManager, create_platform_backup
 from packages.domain.enums import (
@@ -74,9 +80,6 @@ from packages.domain.models import (
     Asset,
     AssetRedirect,
     BackupRun,
-    ChatMessage,
-    ChatSession,
-    Citation,
     DocumentChunk,
     FieldClaim,
     FieldResolution,
@@ -88,6 +91,7 @@ from packages.domain.models import (
     RelationEvidenceModel,
     Representation,
     SavedView,
+    Source,
     SourceRecordVersion,
     SyncConflict,
     SyncRun,
@@ -154,6 +158,49 @@ def _search_runtime(request: Request) -> SearchRuntime:
     runtime = SearchRuntime.connect(_settings(request))
     request.app.state.search_runtime = runtime
     return runtime
+
+
+def _source_registry(request: Request) -> SourceRegistry:
+    registry = getattr(request.app.state, "source_registry", None)
+    if isinstance(registry, SourceRegistry):
+        return registry
+    registry = SourceRegistry.load(_settings(request).sources_config_path)
+    request.app.state.source_registry = registry
+    return registry
+
+
+def _editor_payload(
+    request: Request,
+    representation: Representation,
+    *,
+    source_alias: str | None,
+) -> dict[str, Any]:
+    resolution = resolve_editor_path(
+        _source_registry(request),
+        representation,
+        source_alias=source_alias,
+    )
+    return {
+        "available": resolution.available,
+        "editor": resolution.editor,
+        "path": resolution.path,
+        "uri": resolution.uri,
+        "reason": resolution.reason,
+    }
+
+
+def _serialize_representation_for_ui(
+    request: Request,
+    representation: Representation,
+    *,
+    source_alias: str | None,
+) -> dict[str, Any]:
+    result = serialize_representation(representation)
+    if representation.representation_type in CODE_REPRESENTATION_TYPES:
+        editor = _editor_payload(request, representation, source_alias=source_alias)
+        result["local_available"] = editor["available"]
+        result["local_reason"] = editor["reason"]
+    return result
 
 
 def _request_id(request: Request) -> str | None:
@@ -383,23 +430,62 @@ def _has_available_action(
     )
 
 
-def _representation_is_local(representation: Representation) -> bool:
-    return bool(representation.path_ref) and representation.materialization_kind != "url"
+def _representation_is_local(
+    representation: Representation,
+    *,
+    source_registry: SourceRegistry | None = None,
+    source_alias: str | None = None,
+) -> bool:
+    if bool(representation.path_ref) and representation.materialization_kind != "url":
+        return True
+    if (
+        source_registry is not None
+        and representation.representation_type in CODE_REPRESENTATION_TYPES
+    ):
+        return resolve_editor_path(
+            source_registry,
+            representation,
+            source_alias=source_alias,
+        ).available
+    return False
 
 
-def _representation_requires_network(representation: Representation) -> bool:
+def _representation_requires_network(
+    representation: Representation,
+    *,
+    source_registry: SourceRegistry | None = None,
+    source_alias: str | None = None,
+) -> bool:
+    if _representation_is_local(
+        representation,
+        source_registry=source_registry,
+        source_alias=source_alias,
+    ):
+        return False
     return bool(
-        representation.network_required
-        or (
-            not _representation_is_local(representation) and representation.external_url is not None
-        )
+        representation.network_required or representation.external_url is not None
     )
 
 
-def _representation_action_status(representation: Representation) -> str:
+def _representation_action_status(
+    representation: Representation,
+    *,
+    source_registry: SourceRegistry | None = None,
+    source_alias: str | None = None,
+) -> str:
     if representation.availability != "available":
         return "missing"
-    if _representation_requires_network(representation):
+    if _representation_is_local(
+        representation,
+        source_registry=source_registry,
+        source_alias=source_alias,
+    ):
+        return "available"
+    if _representation_requires_network(
+        representation,
+        source_registry=source_registry,
+        source_alias=source_alias,
+    ):
         return "network_required"
     return "available"
 
@@ -415,13 +501,28 @@ def _representation_timestamp(representation: Representation) -> float:
 
 def _representation_choice_key(
     candidate: tuple[Representation, Asset, str | None],
+    *,
+    source_registry: SourceRegistry | None = None,
+    source_alias: str | None = None,
 ) -> tuple[int, int, int, int, float, str]:
     representation, _, _ = candidate
     return (
         0 if representation.availability == "available" else 1,
-        0 if _representation_is_local(representation) else 1,
+        0
+        if _representation_is_local(
+            representation,
+            source_registry=source_registry,
+            source_alias=source_alias,
+        )
+        else 1,
         _REPRESENTATION_ROLE_ORDER.get(representation.role, 100),
-        0 if not _representation_requires_network(representation) else 1,
+        0
+        if not _representation_requires_network(
+            representation,
+            source_registry=source_registry,
+            source_alias=source_alias,
+        )
+        else 1,
         -_representation_timestamp(representation),
         str(representation.id),
     )
@@ -442,8 +543,22 @@ def _quick_action(
     candidates: Sequence[tuple[Representation, Asset, str | None]],
     missing_owner_asset_id: UUID | None,
     missing_relation_type: str | None,
+    source_registry: SourceRegistry | None = None,
+    source_aliases: dict[UUID, str] | None = None,
 ) -> dict[str, Any]:
-    ordered = sorted(candidates, key=_representation_choice_key)
+    def source_alias_for(representation: Representation) -> str | None:
+        if source_aliases is None or representation.source_id is None:
+            return None
+        return source_aliases.get(representation.source_id)
+
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: _representation_choice_key(
+            candidate,
+            source_registry=source_registry,
+            source_alias=source_alias_for(candidate[0]),
+        ),
+    )
     if not ordered:
         missing_reasons = {
             "pdf": "来源未提供 PDF。",
@@ -468,7 +583,11 @@ def _quick_action(
         )
 
     representation, owner, relation_type = ordered[0]
-    status = _representation_action_status(representation)
+    status = _representation_action_status(
+        representation,
+        source_registry=source_registry,
+        source_alias=source_alias_for(representation),
+    )
     if status == "missing":
         stored_reason = _representation_missing_reason(representation)
         reason: str | None = (
@@ -499,7 +618,11 @@ def _quick_action(
                     "owner_asset_id": str(alternative_owner.id),
                     "label": (alternative_owner.title if kind == "code" else alternative.role),
                     "role": alternative.role,
-                    "status": _representation_action_status(alternative),
+                    "status": _representation_action_status(
+                        alternative,
+                        source_registry=source_registry,
+                        source_alias=source_alias_for(alternative),
+                    ),
                     "relation_type": alternative_relation_type,
                 }
             )
@@ -518,6 +641,9 @@ def _research_unit_quick_actions(
     primary_asset: Asset,
     related_repositories: list[Asset],
     representations: dict[UUID, list[Representation]],
+    *,
+    source_registry: SourceRegistry | None = None,
+    source_aliases: dict[UUID, str] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     for kind in ("pdf", "html", "guide"):
@@ -532,6 +658,8 @@ def _research_unit_quick_actions(
                 candidates=candidates,
                 missing_owner_asset_id=primary_asset.id,
                 missing_relation_type=None,
+                source_registry=source_registry,
+                source_aliases=source_aliases,
             )
         )
 
@@ -561,6 +689,8 @@ def _research_unit_quick_actions(
             missing_relation_type=(
                 "implemented_by" if primary_asset.asset_type == "paper" else relation_type
             ),
+            source_registry=source_registry,
+            source_aliases=source_aliases,
         )
     )
     return actions
@@ -730,8 +860,15 @@ def _build_research_units(
     has_code: bool | None,
     has_guide: bool | None,
     has_annotation: bool | None,
+    source_registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], list[Asset]]:
     assets_by_id = {asset.id: asset for asset in catalog_assets}
+    source_aliases: dict[UUID, str] = {}
+    if source_registry is not None:
+        source_aliases = {
+            source.id: source.alias
+            for source in session.scalars(select(Source)).all()
+        }
     paper_repository_ids: dict[UUID, set[UUID]] = defaultdict(set)
     relations = session.scalars(
         select(Relation)
@@ -838,6 +975,8 @@ def _build_research_units(
                 paper,
                 related_repositories,
                 representations,
+                source_registry=source_registry,
+                source_aliases=source_aliases,
             ),
             matched_assets=[
                 _serialize_matched_asset(
@@ -906,7 +1045,13 @@ def _build_research_units(
                     annotation_summary=summaries.get(repository.id),
                 ),
                 related_repositories=[],
-                quick_actions=_research_unit_quick_actions(repository, [], representations),
+                quick_actions=_research_unit_quick_actions(
+                    repository,
+                    [],
+                    representations,
+                    source_registry=source_registry,
+                    source_aliases=source_aliases,
+                ),
                 matched_assets=[
                     _serialize_matched_asset(
                         repository,
@@ -1421,7 +1566,7 @@ def dashboard(request: Request) -> dict[str, Any]:
 def search_assets(
     request: Request,
     q: str = "",
-    mode: str = Query("hybrid", pattern="^(exact|hybrid|semantic)$"),
+    mode: str = Query("keyword", pattern="^(exact|keyword)$"),
     group_by: str = Query("none", pattern="^(paper|none)$"),
     domain: str | None = None,
     status: str | None = Query(None, pattern="^(unread|reading|read)$"),
@@ -1467,7 +1612,10 @@ def search_assets(
                         )
                         or 0
                     )
-                search_window = max(search_window, active_asset_count)
+                search_window = max(
+                    search_window,
+                    min(active_asset_count, 300),
+                )
                 search_options["candidate_limit"] = search_window
             result = _search_runtime(request).service.search(
                 q,
@@ -1485,29 +1633,12 @@ def search_assets(
             search_detail = {
                 "degraded": result.degraded,
                 "errors": list(result.errors),
-                "embedding": (
-                    {
-                        "provider": result.embedding_status.provider,
-                        "model": result.embedding_status.model,
-                        "detail": result.embedding_status.detail,
-                    }
-                    if result.embedding_status
-                    else None
-                ),
-                "reranker": (
-                    {
-                        "provider": result.reranker_status.provider,
-                        "model": result.reranker_status.model,
-                        "detail": result.reranker_status.detail,
-                    }
-                    if result.reranker_status
-                    else None
-                ),
+                "mode": result.mode.value,
             }
         except Exception as error:
             search_detail = {
                 "degraded": True,
-                "errors": [f"hybrid-runtime:{type(error).__name__}"],
+                "errors": [f"keyword-runtime:{type(error).__name__}"],
                 "detail": "PostgreSQL metadata fallback is active.",
             }
 
@@ -1530,7 +1661,7 @@ def search_assets(
                 search_hits.clear()
                 search_detail = {
                     "degraded": True,
-                    "errors": ["hybrid-runtime:stale-or-foreign-index"],
+                    "errors": ["keyword-runtime:stale-or-foreign-index"],
                     "detail": "PostgreSQL metadata fallback is active.",
                 }
                 assets = catalog_assets
@@ -1643,6 +1774,7 @@ def search_assets(
                 has_code=has_code,
                 has_guide=has_guide,
                 has_annotation=has_annotation,
+                source_registry=_source_registry(request),
             )
             payload = _list_payload(units[offset : offset + PAGE_SIZE], offset, len(units))
             payload["mode"] = mode
@@ -2366,11 +2498,95 @@ def list_representations(asset_id: UUID, request: Request) -> dict[str, Any]:
                 .order_by(Representation.role, Representation.representation_type)
             ).all()
         )
+        source_aliases = {
+            source.id: source.alias
+            for source in session.scalars(
+                select(Source).where(
+                    Source.id.in_(
+                        {
+                            item.source_id
+                            for item in items
+                            if item.source_id is not None
+                        }
+                    )
+                )
+            ).all()
+        }
         return {
-            "items": [serialize_representation(item) for item in items],
+            "items": [
+                _serialize_representation_for_ui(
+                    request,
+                    item,
+                    source_alias=source_aliases.get(item.source_id),
+                )
+                for item in items
+            ],
             "next_cursor": None,
             "total": len(items),
         }
+
+
+def _local_code_context(
+    request: Request,
+    representation_id: UUID,
+) -> tuple[Representation, Path]:
+    with _database(request).session() as session:
+        representation = session.get(Representation, representation_id)
+        if representation is None or representation.deleted_at is not None:
+            raise not_found("Representation", representation_id)
+        if representation.representation_type not in CODE_REPRESENTATION_TYPES:
+            raise conflict("该表示不是代码项目。")
+        if representation.availability != "available":
+            raise conflict("该代码表示当前不可用。")
+        source = (
+            session.get(Source, representation.source_id)
+            if representation.source_id is not None
+            else None
+        )
+        source_alias = source.alias if source is not None else None
+        try:
+            root = local_code_repository(
+                _source_registry(request),
+                representation,
+                source_alias=source_alias,
+            )
+        except CodeBrowserUnavailable as error:
+            raise conflict(str(error)) from error
+        return representation, root
+
+
+@router.get("/representations/{representation_id}/code/tree")
+def code_tree(
+    representation_id: UUID,
+    request: Request,
+    path: str = Query(default=""),
+) -> dict[str, Any]:
+    representation, root = _local_code_context(request, representation_id)
+    try:
+        return list_code_directory(
+            root,
+            representation_id=str(representation.id),
+            relative_path=path,
+        )
+    except CodeBrowserPathError as error:
+        raise conflict(str(error)) from error
+
+
+@router.get("/representations/{representation_id}/code/file")
+def code_file(
+    representation_id: UUID,
+    request: Request,
+    path: str = Query(..., min_length=1),
+) -> dict[str, Any]:
+    representation, root = _local_code_context(request, representation_id)
+    try:
+        return read_code_file(
+            root,
+            representation_id=str(representation.id),
+            relative_path=path,
+        )
+    except CodeBrowserPathError as error:
+        raise conflict(str(error)) from error
 
 
 @router.post("/representations/{representation_id}/open-actions")
@@ -2388,6 +2604,18 @@ def open_representation(
             raise not_found("Representation", representation_id)
         if representation.availability != "available":
             raise conflict("Only representations with availability=available can be opened.")
+        editor_payload: dict[str, Any] | None = None
+        if representation.representation_type in CODE_REPRESENTATION_TYPES:
+            source = (
+                session.get(Source, representation.source_id)
+                if representation.source_id is not None
+                else None
+            )
+            editor_payload = _editor_payload(
+                request,
+                representation,
+                source_alias=source.alias if source is not None else None,
+            )
         if representation.external_url and not representation.path_ref:
             result: dict[str, Any] = {
                 "kind": "external_url",
@@ -2396,6 +2624,8 @@ def open_representation(
                 "presentation": "original",
                 "embed": embed,
             }
+            if editor_payload is not None:
+                result["editor"] = editor_payload
             if requested_presentation == "hub":
                 result["warning"] = (
                     "Hub presentation is unavailable for an external-only representation."
@@ -2419,7 +2649,7 @@ def open_representation(
         url = f"{origin}/session/{representation.id}?token={quote(token, safe='')}"
         if payload is not None:
             url = f"{url}&presentation={requested_presentation}"
-        return {
+        result = {
             "kind": "gateway_session",
             "url": url,
             "expires_in": settings.gateway_session_seconds,
@@ -2427,6 +2657,9 @@ def open_representation(
             "presentation": requested_presentation,
             "embed": embed,
         }
+        if editor_payload is not None:
+            result["editor"] = editor_payload
+        return result
 
 
 @router.get("/annotations")
@@ -3642,6 +3875,193 @@ def graph_timeline(
         }
 
 
+def _gitnexus_registry_index(
+    registry_path: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    registry_path = registry_path or Path.home() / ".gitnexus" / "registry.json"
+    try:
+        value = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in value:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        key = str(Path(item["path"]).resolve()).casefold()
+        result[key] = {
+            "name": item.get("name"),
+            "indexed_at": item.get("indexedAt"),
+        }
+    return result
+
+
+def _load_code_graph_hidden(settings: ApiSettings) -> dict[str, Any]:
+    """Load hidden-repository rules that affect Hub code graph display only."""
+
+    try:
+        document = _load_yaml(settings.code_graph_hidden_path)
+    except (OSError, yaml.YAMLError):
+        return {"registry_names": set(), "title_patterns": []}
+    rules = document.get("hidden_repositories", [])
+    if not isinstance(rules, list):
+        return {"registry_names": set(), "title_patterns": []}
+    registry_names: set[str] = set()
+    title_patterns: list[str] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        name = str(rule.get("registry_name") or "").strip()
+        if name:
+            registry_names.add(name.casefold())
+        pattern = str(rule.get("title") or "").strip()
+        if pattern:
+            title_patterns.append(pattern.casefold())
+    return {
+        "registry_names": registry_names,
+        "title_patterns": title_patterns,
+    }
+
+
+@router.get("/code-graph")
+def code_graph(request: Request) -> dict[str, Any]:
+    """Read-only repository inventory grouped by research direction."""
+
+    settings = _settings(request)
+    source_registry = _source_registry(request)
+    gitnexus_registry = _gitnexus_registry_index()
+    gitnexus_paths = set(gitnexus_registry)
+    hidden_rules = _load_code_graph_hidden(settings)
+    hidden_registry_names = hidden_rules["registry_names"]
+    hidden_title_patterns = hidden_rules["title_patterns"]
+    taxonomy = _load_yaml(settings.taxonomy_config_path)
+    domain_labels = {
+        str(item.get("id")): str(item.get("label") or item.get("id"))
+        for item in taxonomy.get("domains", [])
+        if isinstance(item, dict)
+    }
+
+    with _database(request).session() as session:
+        rows = session.execute(
+            select(Representation, Asset, Source)
+            .join(Asset, Asset.id == Representation.asset_id)
+            .join(Source, Source.id == Representation.source_id)
+            .where(
+                Representation.deleted_at.is_(None),
+                Asset.deleted_at.is_(None),
+                Representation.representation_type.in_(CODE_REPRESENTATION_TYPES),
+            )
+            .order_by(Asset.title, Representation.id)
+        ).all()
+
+    assets: dict[UUID, dict[str, Any]] = {}
+    for representation, asset, source in rows:
+        resolution = resolve_editor_path(
+            source_registry,
+            representation,
+            source_alias=str(source.alias),
+        )
+        entry = assets.setdefault(
+            asset.id,
+            {
+                "id": str(asset.id),
+                "title": asset.title,
+                "title_zh": asset.title_zh,
+                "asset_type": asset.asset_type,
+                "year": asset.year,
+                "domain_slugs": list(asset.domain_slugs or []),
+                "paths": [],
+                "representation_count": 0,
+            },
+        )
+        entry["representation_count"] += 1
+        if resolution.available and resolution.path:
+            normalized = str(Path(resolution.path).resolve())
+            if normalized not in entry["paths"]:
+                entry["paths"].append(normalized)
+
+    for entry in assets.values():
+        indexed_path = next(
+            (
+                path
+                for path in entry["paths"]
+                if path.casefold() in gitnexus_paths
+            ),
+            None,
+        )
+        entry["gitnexus_indexed"] = indexed_path is not None
+        entry["gitnexus_repo_name"] = (
+            (
+                gitnexus_registry[indexed_path.casefold()].get("name")
+                or None
+            )
+            if indexed_path is not None
+            else None
+        )
+        title = (entry["title"] or entry["title_zh"] or "").casefold()
+        repo_name = (entry["gitnexus_repo_name"] or "").casefold()
+        entry["hidden"] = (
+            repo_name in hidden_registry_names
+            or any(pattern in title for pattern in hidden_title_patterns)
+        )
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    grouped_hidden: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in assets.values():
+        slugs = [slug for slug in entry["domain_slugs"] if slug]
+        if slugs:
+            for slug in slugs:
+                (grouped_hidden if entry["hidden"] else grouped)[slug].append(
+                    entry
+                )
+        else:
+            (grouped_hidden if entry["hidden"] else grouped)[
+                "unassigned"
+            ].append(entry)
+    for slug in grouped:
+        grouped[slug].sort(
+            key=lambda item: (item["title_zh"] or item["title"]).casefold()
+        )
+    for slug in grouped_hidden:
+        grouped_hidden[slug].sort(
+            key=lambda item: (item["title_zh"] or item["title"]).casefold()
+        )
+
+    domains = [
+        {
+            "slug": slug,
+            "label": domain_labels.get(
+                slug,
+                "未归类" if slug == "unassigned" else slug,
+            ),
+            "repository_count": len(grouped.get(slug, [])),
+            "indexed_count": sum(
+                1
+                for item in grouped.get(slug, [])
+                if item["gitnexus_indexed"]
+            ),
+            "repositories": grouped.get(slug, []),
+            "hidden_repositories": grouped_hidden.get(slug, []),
+            "hidden_count": len(grouped_hidden.get(slug, [])),
+        }
+        for slug, _ in sorted(
+            (grouped | grouped_hidden).items(),
+            key=lambda item: item[0],
+        )
+    ]
+    repositories = [
+        entry for entry in assets.values() if not entry["hidden"]
+    ]
+    hidden_count = sum(1 for entry in assets.values() if entry["hidden"])
+    return {
+        "total_count": len(repositories),
+        "indexed_count": sum(1 for item in repositories if item["gitnexus_indexed"]),
+        "hidden_count": hidden_count,
+        "domains": domains,
+    }
+
+
 def _comparison_columns(assets: list[Asset]) -> list[dict[str, Any]]:
     fields: list[tuple[str, str, Any]] = [
         ("year", "年份", lambda item: item.year),
@@ -3783,7 +4203,7 @@ def similar_assets(asset_id: UUID, request: Request) -> dict[str, Any]:
     with _database(request).session() as session:
         target = _live_asset(session, asset_id)
         try:
-            semantic = _search_runtime(request).service.search(
+            keyword = _search_runtime(request).service.search(
                 "\n".join(
                     value
                     for value in (
@@ -3794,17 +4214,16 @@ def similar_assets(asset_id: UUID, request: Request) -> dict[str, Any]:
                     )
                     if value
                 ),
-                mode="semantic",
+                mode="keyword",
                 filters={"type": "paper"},
                 limit=60,
-                rerank=True,
             )
         except Exception:
-            semantic = None
-        if semantic is not None:
+            keyword = None
+        if keyword is not None:
             ranked_ids: list[UUID] = []
             hit_by_asset: dict[UUID, Any] = {}
-            for hit in semantic.hits:
+            for hit in keyword.hits:
                 try:
                     candidate_id = UUID(hit.document.asset_id)
                 except ValueError:
@@ -3840,9 +4259,9 @@ def similar_assets(asset_id: UUID, request: Request) -> dict[str, Any]:
                     ],
                     "next_cursor": None,
                     "total": len(values),
-                    "method": "semantic-vector-rrf",
-                    "degraded": semantic.degraded,
-                    "errors": list(semantic.errors),
+                    "method": "keyword-meilisearch",
+                    "degraded": keyword.degraded,
+                    "errors": list(keyword.errors),
                 }
         candidates = list(
             session.scalars(
@@ -3890,190 +4309,6 @@ def similar_assets(asset_id: UUID, request: Request) -> dict[str, Any]:
             "method": "metadata-fallback",
             "degraded": True,
         }
-
-
-@router.post("/chat")
-def chat(payload: ChatRequest, request: Request) -> dict[str, Any]:
-    with _database(request).session() as session:
-        canonical_asset_ids = tuple(
-            _live_asset(session, asset_id).id for asset_id in payload.asset_ids
-        )
-        chat_session: ChatSession | None = None
-        if payload.conversation_id is not None:
-            chat_session = session.get(
-                ChatSession,
-                payload.conversation_id,
-                with_for_update=True,
-            )
-            if chat_session is None or chat_session.deleted_at is not None:
-                raise not_found("Chat session", payload.conversation_id)
-        if chat_session is None:
-            chat_session = ChatSession(
-                title=payload.message[:120],
-                filters={"asset_ids": [str(item) for item in canonical_asset_ids]},
-            )
-            session.add(chat_session)
-            session.flush()
-        next_sequence = (
-            session.scalar(
-                select(func.max(ChatMessage.sequence)).where(
-                    ChatMessage.session_id == chat_session.id
-                )
-            )
-            or 0
-        ) + 1
-        session.add(
-            ChatMessage(
-                session_id=chat_session.id,
-                role="user",
-                content=payload.message,
-                sequence=next_sequence,
-                status="complete",
-            )
-        )
-        rag_result = answer_with_rag(
-            session,
-            _settings(request),
-            payload.message,
-            asset_ids=canonical_asset_ids,
-            request_id=_request_id(request),
-            search_runtime=_search_runtime(request),
-        )
-        answer = rag_result.answer.text
-        assistant = ChatMessage(
-            session_id=chat_session.id,
-            role="assistant",
-            content=answer,
-            sequence=next_sequence + 1,
-            status="complete",
-            provider=rag_result.answer.provider,
-            model=rag_result.answer.model,
-            prompt_version=str(rag_result.audit.get("prompt_version") or "grounded-json-v1"),
-            retrieval_snapshot=rag_result.audit,
-        )
-        session.add(assistant)
-        session.flush()
-        citation_payloads: list[dict[str, Any]] = []
-        for ordinal, citation in enumerate(rag_result.answer.citations, 1):
-            if (
-                citation.chunk_id is None
-                or citation.representation_id is None
-                or citation.chunk_hash is None
-            ):
-                continue
-            chunk = session.get(DocumentChunk, UUID(citation.chunk_id))
-            if chunk is None:
-                continue
-            excerpt = " ".join(chunk.text_content.split())[:360]
-            session.add(
-                Citation(
-                    message_id=assistant.id,
-                    asset_id=UUID(citation.asset_id),
-                    representation_id=UUID(citation.representation_id),
-                    chunk_id=UUID(citation.chunk_id),
-                    ordinal=ordinal,
-                    excerpt=excerpt,
-                    anchor=citation.anchor,
-                    content_digest=citation.chunk_hash,
-                )
-            )
-            citation_payloads.append(
-                {
-                    "asset_id": citation.asset_id,
-                    "title": citation.title,
-                    "excerpt": excerpt,
-                    "representation_id": citation.representation_id,
-                    "chunk_id": citation.chunk_id,
-                    "anchor": citation.anchor,
-                    "url": citation.url,
-                }
-            )
-        record_mutation(
-            session,
-            entity_type="chat_message",
-            entity_id=assistant.id,
-            action=AuditAction.CREATE,
-            before=None,
-            after={
-                "id": str(assistant.id),
-                "session_id": str(chat_session.id),
-                "role": assistant.role,
-                "citation_count": len(citation_payloads),
-            },
-            request_id=_request_id(request),
-            event_type="chat.answer-created",
-        )
-        return {
-            "answer": answer,
-            "citations": citation_payloads,
-            "retrieved": [
-                {
-                    "asset_id": item.asset_id,
-                    "title": item.title,
-                    "representation_id": item.representation_id,
-                    "chunk_id": item.chunk_id,
-                    "anchor": item.anchor,
-                    "score": item.score,
-                    "sources": list(item.sources),
-                    "url": item.url,
-                }
-                for item in rag_result.retrieved
-            ],
-            "conversation_id": str(chat_session.id),
-            "mode": (
-                "deepseek-grounded" if rag_result.stop_reason == "completed" else "retrieval-only"
-            ),
-            "provider": rag_result.answer.provider,
-            "model": rag_result.answer.model,
-            "stop_reason": rag_result.stop_reason,
-        }
-
-
-@router.post("/chat/stream", response_class=StreamingResponse)
-def chat_stream(
-    payload: ChatRequest,
-    request: Request,
-) -> StreamingResponse:
-    result = chat(payload, request)
-
-    def events() -> Iterable[str]:
-        event_payloads = (
-            ("evidence", {"items": result["retrieved"]}),
-            (
-                "answer",
-                {
-                    "answer": result["answer"],
-                    "citations": result["citations"],
-                    "mode": result["mode"],
-                    "provider": result["provider"],
-                    "model": result["model"],
-                    "stop_reason": result["stop_reason"],
-                },
-            ),
-            (
-                "done",
-                {
-                    "conversation_id": result["conversation_id"],
-                    "stop_reason": result["stop_reason"],
-                },
-            ),
-        )
-        for event_name, event_payload in event_payloads:
-            encoded = json.dumps(
-                event_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            yield f"event: {event_name}\ndata: {encoded}\n\n"
-
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @router.get("/extractions")
@@ -4908,15 +5143,11 @@ def settings_endpoint(request: Request) -> dict[str, Any]:
             "database_status": readiness.status,
             "database_revision": readiness.revision,
             "gateway_origin": settings.gateway_origin,
+            "gitnexus_url": settings.gitnexus_url,
         },
         "search": {
             "keyword_provider": "meilisearch",
-            "vector_provider": "qdrant",
             "api_fallback": "metadata-lexical",
-        },
-        "rag": {
-            "mode": "local-extractive",
-            "privacy": "local-only",
         },
         "sources": sources,
         "integrations": integrations,

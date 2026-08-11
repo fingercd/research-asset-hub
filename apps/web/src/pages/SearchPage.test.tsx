@@ -66,7 +66,7 @@ describe("SearchPage", () => {
       }),
       expect.any(AbortSignal),
     );
-    expect(screen.getByText(/全部资产 · 混合检索/)).toBeInTheDocument();
+    expect(screen.getByText(/全部资产 · 关键词检索/)).toBeInTheDocument();
   });
 
   it("switches repository searches to ungrouped results", async () => {

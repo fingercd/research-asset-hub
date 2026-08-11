@@ -63,7 +63,7 @@ def main() -> int:
             job.error = {
                 "code": "superseded_by_bulk_index",
                 "detail": (
-                    "A versioned bulk Meilisearch/Qdrant rebuild superseded this "
+                    "A versioned bulk Meilisearch rebuild superseded this "
                     "per-entity index job."
                 ),
                 "index_version": args.index_version,

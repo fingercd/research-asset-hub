@@ -20,8 +20,8 @@ Research Asset Hub 是一个只在本机运行的个人科研数字资产平台�
 - 搜索卡片直接打开 PDF、代码、导读或原始 HTML，并显示阅读状态与约 60 字批语摘要；没有批注时显示“无”。
 - 统一资产详情页：元数据、阅读状态、批注、PDF、代码、导读、关系、相似论文和隔离 HTML。
 - PostgreSQL 关系图谱，支持邻居、1–3 跳、最短路径、共同邻居和状态过滤。
+- 图谱节点详情抽屉与 Ctrl/Cmd 多选并排对比；GitNexus 本地代码图谱随 Hub 启动，在站内独立页面按研究方向三列窗口展示，支持隐藏名单、当前页面直达与 Hub 自研图谱前端。
 - 2–4 篇论文并排比较、保存比较视图及 Markdown 导出。
-- DeepSeek 资料库问答：本地混合召回、引用锚点验证、prompt-injection 隔离和硬预算控制。
 - Obsidian 三方同步、Zotero/Better BibTeX 审查式导入包、开放 JSONL/Markdown/RO-Crate 导出。
 - 持久作业队列、lease/heartbeat/retry/dead-letter、事务 Outbox、软删除、审计与版本冲突保护。
 - Restic 加密本机备份及独立 Compose 环境恢复演练。
@@ -35,7 +35,7 @@ Research Asset Hub 是一个只在本机运行的个人科研数字资产平台�
 
 ## 本地启动
 
-先决条件：Windows PowerShell 5.1+、Python 3.11+、Node.js 20+、pnpm 11，以及可工作的 Docker Desktop/WSL2 后端。
+先决条件：Windows PowerShell 5.1+、Python 3.11+、Node.js 20+、pnpm 11、可工作的 Docker Desktop/WSL2 后端，以及 GitNexus CLI（`npm install -g gitnexus`）。
 
 首次安装依赖：
 
@@ -57,6 +57,7 @@ pnpm --filter @research-asset-hub/web build
 - API 文档：<http://127.0.0.1:8767/docs>
 - 健康检查：<http://127.0.0.1:8767/api/health>
 - 隔离资产网关：<http://127.0.0.1:8766/health>
+- GitNexus 代码图谱：<http://127.0.0.1:4747>
 
 `start` 只提供 `apps/web/dist` 中的构建产物；需要 Vite 热更新时使用：
 
@@ -108,17 +109,8 @@ VLN、游戏强化学习、WSVAD 的确定性规范快照以及 10 个领域门�
 .\.venv\Scripts\python.exe scripts\seed_jobs.py
 .\.venv\Scripts\python.exe -m apps.worker.main
 .\.venv\Scripts\python.exe scripts\build_indexes.py `
-  --version 20260726-domain-expansion `
-  --report work\validation\index-build-bge-m3.json
-```
-
-只更新 Meilisearch 而保留向量：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\build_indexes.py `
-  --version 20260726-domain-expansion `
-  --keyword-only `
-  --report work\validation\index-build-keywords.json
+  --version v1 `
+  --report work\validation\index-build.json
 ```
 
 ## 开放导出与外部工具
@@ -148,19 +140,6 @@ Obsidian 默认同步到现有 Vault 的 `00_Home/Research Asset Hub`：
 
 在 Zotero 中安装 Better BibTeX 后，人工确认导入 `outputs/zotero/research-assets.csl.json` 或 `research-assets.bib`。平台读取 Zotero 本地 API；当前不会直接修改 Zotero SQLite。
 
-## DeepSeek 问答
-
-DeepSeek 密钥只存 Windows Credential Manager，服务名为 `research-asset-hub`，账户名为 `deepseek-api-key`；不要写入 `.env`、源码或命令日志。模型通过官方 `/models` 动态发现，业务代码不固定模型 ID。
-
-默认硬预算：
-
-- 单次任务不超过 ¥5
-- 单日不超过 ¥10
-- 单月不超过 ¥50
-- 预留 20% 安全余量
-
-未知价格、预算超限、模型不可用或引用校验失败时，平台保留本地检索证据并停止生成；不返回未经验证的模型引用。
-
 ## 备份与恢复
 
 备份仓库默认为：
@@ -182,7 +161,7 @@ DeepSeek 密钥只存 Windows Credential Manager，服务名为 `research-asset-
   --run-id <unique-run-id>
 ```
 
-演练使用独立 Compose project、卷、数据库和端口，恢复后重建 Meilisearch/Qdrant 并验证固定查询，不覆盖活跃环境。当前仓库仍是同机副本，发布报告会持续标记 `local-copy-only` 风险；重要资料还应增加外置硬盘、NAS 或云端副本。
+演练使用独立 Compose project、卷、数据库和端口，恢复后重建 Meilisearch 并验证固定查询，不覆盖活跃环境。当前仓库仍是同机副本，发布报告会持续标记 `local-copy-only` 风险；重要资料还应增加外置硬盘、NAS 或云端副本。
 
 ## 验证与发布报告
 
@@ -213,7 +192,7 @@ pnpm --filter @research-asset-hub/web build
 
 ## 安全边界
 
-- Web、API、资产网关、PostgreSQL、Meilisearch 和 Qdrant 均只监听 `127.0.0.1`。
+- Web、API、资产网关、PostgreSQL 和 Meilisearch 均只监听 `127.0.0.1`。
 - 网关只接受已登记 `representation_id` 的短时签名会话，不接受任意绝对路径。
 - 原始 HTML 在独立 origin 中按静态、可信本地交互或需要联网三类 CSP/sandbox 策略打开。
 - 所有业务写操作在同一事务写审计和 Outbox；删除默认是软删除，来源文件永不随 API 删除。

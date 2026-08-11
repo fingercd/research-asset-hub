@@ -819,19 +819,10 @@ def _index_summary(document: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": document.get("status", "completed" if document else "unavailable"),
         "index_version": document.get("index_version"),
-        "embedding_provider": document.get("embedding_provider"),
-        "embedding_model": document.get("embedding_model"),
-        "embedding_dimension": document.get("embedding_dimension"),
-        "degraded": document.get("degraded"),
         "keyword_counts": dict(
             _mapping(
                 document.get("keyword_counts_after")
                 or document.get("keyword_counts")
-            )
-        ),
-        "vector_counts": dict(
-            _mapping(
-                document.get("vector_counts_after") or document.get("vector_counts")
             )
         ),
     }
@@ -855,9 +846,6 @@ def _restore_summary(document: Mapping[str, Any]) -> dict[str, Any]:
         "fixed_query": {
             "keyword_exact_hit": _mapping(rebuild.get("fixed_query")).get(
                 "keyword_exact_hit"
-            ),
-            "vector_self_hit": _mapping(rebuild.get("fixed_query")).get(
-                "vector_self_hit"
             ),
         },
         "cleanup_status": cleanup.get("status"),
@@ -943,7 +931,6 @@ def build_release_report(
     html = _html_summary(_mapping(reports.get("html_audit")))
     index_build = _index_summary(_mapping(reports.get("index_build")))
     search = _evaluation_summary(_mapping(reports.get("search_evaluation")))
-    rag = _evaluation_summary(_mapping(reports.get("rag_evaluation")))
     restore = _restore_summary(_mapping(reports.get("restore_rehearsal")))
     formal_import = _mapping(reports.get("formal_import"))
     import_counters = _mapping(formal_import.get("counters"))
@@ -1332,7 +1319,7 @@ def build_release_report(
             detail="已知不可抽取文件可以作为警告发布，但不得隐藏。",
         )
     )
-    index_ready = bool(index_build) and index_build.get("degraded") is False
+    index_ready = bool(index_build) and bool(index_build.get("keyword_counts"))
     if not index_ready and not index_build:
         index_status: GateStatus = "fail"
     elif index_ready:
@@ -1342,11 +1329,11 @@ def build_release_report(
     gates.append(
         _gate(
             "production-index",
-            "生产混合索引",
+            "生产关键词索引",
             index_status,
             observed=index_build,
-            expected="本地 BGE 版本、degraded=false、关键词与向量计数非空",
-            detail="Meilisearch/Qdrant 是可重建状态，但发布时必须有验证产物。",
+            expected="Meilisearch 关键词索引存在且计数非空",
+            detail="Meilisearch 是可重建状态，但发布时必须有验证产物。",
         )
     )
     gates.append(
@@ -1357,16 +1344,6 @@ def build_release_report(
             observed=search,
             expected="固定查询评测 status=passed",
             detail="精确标识、Recall、nDCG 和热缓存 P95 由独立报告给出。",
-        )
-    )
-    gates.append(
-        _gate(
-            "rag-evaluation",
-            "RAG 引用评测",
-            "pass" if rag.get("status") == "passed" else "fail",
-            observed=rag,
-            expected="30 题或等价正式评测 status=passed、引用可打开",
-            detail="报告只保留聚合指标，不复制问题、答案或私人片段。",
         )
     )
     html_db_count = _integer(representations, "html_candidates")
@@ -1561,7 +1538,6 @@ def build_release_report(
         "html": html,
         "index_build": index_build,
         "search_evaluation": search,
-        "rag_evaluation": rag,
         "recovery_fixture": _report_summary(recovery_fixture),
         "restore_rehearsal": restore,
         "failures": {

@@ -1,9 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompareProvider } from "../state/CompareContext";
 import { AssetCard } from "./AssetCard";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("AssetCard", () => {
   it("shows reading state, annotation, and all four quick actions", () => {
@@ -43,6 +47,30 @@ describe("AssetCard", () => {
     expect(screen.getByRole("button", { name: "HTML" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "导读" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "代码" })).toBeDisabled();
+  });
+
+  it("copies the asset id without showing it", async () => {
+    window.localStorage.clear();
+    const clipboard = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: clipboard },
+      configurable: true,
+    });
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <CompareProvider>
+            <AssetCard asset={{ id: "paper-copy-1", title: "Copy Paper" }} />
+          </CompareProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "复制ID" }));
+
+    expect(clipboard).toHaveBeenCalledWith("paper-copy-1");
+    expect(screen.queryByText("paper-copy-1")).not.toBeInTheDocument();
   });
 
   it("shows 无 when the asset has no annotation", () => {

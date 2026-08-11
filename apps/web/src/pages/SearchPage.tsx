@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Database, Search, SlidersHorizontal } from "lucide-react";
+import { Search, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
@@ -14,15 +14,14 @@ import { ResearchUnitCard } from "../components/ResearchUnitCard";
 import { researchUnitFromAsset } from "../lib/researchUnits";
 
 const modeLabels: Record<SearchMode, string> = {
-  hybrid: "混合检索",
+  keyword: "关键词检索",
   exact: "精确匹配",
-  semantic: "语义检索",
 };
 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") ?? "";
-  const mode = (searchParams.get("mode") as SearchMode | null) ?? "hybrid";
+  const mode = (searchParams.get("mode") as SearchMode | null) ?? "keyword";
   const domain = searchParams.get("domain") ?? "";
   const status = (searchParams.get("status") as ReadingStatus | null) ?? "";
   const assetType = searchParams.get("type") ?? "";
@@ -187,7 +186,7 @@ export function SearchPage() {
       <PageHeader
         eyebrow="统一检索"
         title="跨领域搜索"
-        description="在论文、代码、导读和批注中查找证据；可切换精确、混合或语义模式。"
+        description="在论文、代码、导读和批注中查找证据；默认关键词检索，可切换到精确匹配。"
       />
 
       <form className="search-workbench" onSubmit={submit} role="search">
@@ -385,12 +384,6 @@ export function SearchPage() {
                 {q ? `“${q}”` : "全部资产"} · {modeLabels[mode]}
               </small>
             </div>
-            {mode === "semantic" && (
-              <span className="index-chip">
-                <Database size={13} aria-hidden="true" />
-                向量索引
-              </span>
-            )}
           </div>
           <div className="asset-list">
             {units.map((unit) => (
@@ -413,7 +406,7 @@ export function SearchPage() {
       ) : (
         <EmptyState
           title="没有找到匹配资产"
-          detail="尝试减少筛选条件、切换混合检索，或换用更宽泛的关键词。"
+          detail="尝试减少筛选条件、切换精确匹配，或换用更宽泛的关键词。"
           kind="search"
         />
       )}

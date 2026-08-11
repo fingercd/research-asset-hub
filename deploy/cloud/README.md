@@ -5,7 +5,7 @@
 
 ## 安全边界
 
-- 只有 Caddy 暴露 `80/443`；PostgreSQL、Meilisearch、Qdrant、OIDC 代理和
+- 只有 Caddy 暴露 `80/443`；PostgreSQL、Meilisearch、OIDC 代理和
   Hub 进程都没有宿主机端口。
 - Caddy 为主站和资产子域自动申请 TLS，两个域都先经过 OAuth2 Proxy 的
   OIDC 校验。
@@ -72,7 +72,7 @@ Range、目录 bundle 和 hash 校验。`s3-compatible` 仅是预留契约，状
 ## 已知上线门禁
 
 - 云端需要把数据库备份、开放导出和私有来源快照放到独立持久存储，并完成
-  一次隔离恢复演练；Meili/Qdrant 继续视为可重建缓存。
+  一次隔离恢复演练；Meili 继续视为可重建缓存。
 - 当前资产 HTML 的 CSP 与 gateway session cookie 是本地 v1 策略。正式上云
   前必须做浏览器级回归，确认资产子域嵌入策略和 Secure Cookie；未通过时
   只能新标签页打开原始 HTML。

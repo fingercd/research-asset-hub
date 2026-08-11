@@ -117,30 +117,6 @@ def meilisearch_filter(filters: Mapping[str, Any] | None) -> list[str]:
     return clauses
 
 
-def qdrant_filter(filters: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Translate canonical filters to Qdrant's payload filter format."""
-
-    normalized = canonical_filters(filters)
-    must: list[dict[str, Any]] = []
-    lower = normalized.pop("year_from", None)
-    upper = normalized.pop("year_to", None)
-    if lower is not None or upper is not None:
-        range_value: dict[str, int] = {}
-        if lower is not None:
-            range_value["gte"] = int(lower)
-        if upper is not None:
-            range_value["lte"] = int(upper)
-        must.append({"key": "metadata.year", "range": range_value})
-    for key, value in normalized.items():
-        match: dict[str, Any]
-        if _is_sequence(value):
-            match = {"any": list(value)}
-        else:
-            match = {"value": value}
-        must.append({"key": f"metadata.{key}", "match": match})
-    return {"must": must} if must else {}
-
-
 def _is_sequence(value: object) -> TypeGuard[Sequence[Any]]:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 

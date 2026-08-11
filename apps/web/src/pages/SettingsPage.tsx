@@ -62,7 +62,7 @@ export function SettingsPage() {
   });
 
   const data = settings.data;
-  const known = new Set(["app", "search", "rag", "sources", "integrations"]);
+  const known = new Set(["app", "search", "sources", "integrations"]);
   const other = data
     ? Object.fromEntries(Object.entries(data).filter(([key]) => !known.has(key)))
     : {};
@@ -72,7 +72,7 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="只读配置概览"
         title="设置"
-        description="查看本地服务、搜索、RAG 与来源配置。敏感字段在界面中始终隐藏。"
+        description="查看本地服务、搜索与来源配置。敏感字段在界面中始终隐藏。"
       />
       <div className="notice">
         <LockKeyhole size={17} aria-hidden="true" />
@@ -89,7 +89,6 @@ export function SettingsPage() {
         <div className="settings-grid">
           <SettingsGroup title="应用" icon={Settings2} values={data.app} />
           <SettingsGroup title="搜索与索引" icon={Search} values={data.search} />
-          <SettingsGroup title="RAG" icon={Database} values={data.rag} />
           {!!data.sources?.length && (
             <section className="settings-card span-full">
               <header><span><HardDrive size={19} aria-hidden="true" /></span><h2>来源</h2></header>

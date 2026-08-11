@@ -2,7 +2,6 @@ import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { AnnotationsPage } from "./pages/AnnotationsPage";
-import { ChatPage } from "./pages/ChatPage";
 import { ConflictsPage } from "./pages/ConflictsPage";
 import { DomainDetailPage, DomainsPage } from "./pages/DomainsPage";
 import { HomePage } from "./pages/HomePage";
@@ -26,6 +25,11 @@ const GraphPage = lazy(() =>
     default: module.GraphPage,
   })),
 );
+const CodeGraphPage = lazy(() =>
+  import("./pages/CodeGraphPage").then((module) => ({
+    default: module.CodeGraphPage,
+  })),
+);
 
 export default function App() {
   return (
@@ -44,9 +48,9 @@ export default function App() {
           <Route path="domains" element={<DomainsPage />} />
           <Route path="domains/:slug" element={<DomainDetailPage />} />
           <Route path="graph" element={<GraphPage />} />
+          <Route path="code-graph" element={<CodeGraphPage />} />
           <Route path="compare" element={<ComparePage />} />
           <Route path="annotations" element={<AnnotationsPage />} />
-          <Route path="chat" element={<ChatPage />} />
           <Route path="jobs" element={<JobsPage />} />
           <Route path="conflicts" element={<ConflictsPage />} />
           <Route path="settings" element={<SettingsPage />} />

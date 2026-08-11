@@ -28,8 +28,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--postgres-port", type=int, default=55432)
     parser.add_argument("--meili-port", type=int, default=57700)
-    parser.add_argument("--qdrant-http-port", type=int, default=56333)
-    parser.add_argument("--qdrant-grpc-port", type=int, default=56334)
     return parser
 
 
@@ -47,8 +45,6 @@ def main() -> int:
         ports=RestorePorts(
             postgres=arguments.postgres_port,
             meilisearch=arguments.meili_port,
-            qdrant_http=arguments.qdrant_http_port,
-            qdrant_grpc=arguments.qdrant_grpc_port,
         ),
     )
     manager: BackupManager | None = None

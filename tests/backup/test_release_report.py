@@ -252,13 +252,8 @@ def _reports() -> dict[str, dict[str, object]]:
         },
         "index_build": {
             "status": "passed",
-            "index_version": "bge_m3_v1",
-            "embedding_provider": "sentence-transformers",
-            "embedding_model": "BAAI/bge-m3",
-            "embedding_dimension": 1024,
-            "degraded": False,
+            "index_version": "v1",
             "keyword_counts_after": {"assets": 799},
-            "vector_counts_after": {"rah_assets_bge_m3_v1": 799},
         },
         "search_evaluation": {
             "status": "passed",
@@ -268,12 +263,6 @@ def _reports() -> dict[str, dict[str, object]]:
                 "ndcg_at_10": 0.8,
             },
             "checks": {"exact_recall_at_5": True},
-        },
-        "rag_evaluation": {
-            "status": "passed",
-            "question_count": 30,
-            "metrics": {"citation_coverage": 1.0, "invalid_citations": 0},
-            "checks": {"citation_coverage": True},
         },
         "recovery_fixture": {
             "schema": "research-asset-hub.recovery-fixture/v1",
@@ -674,7 +663,7 @@ def test_write_json_and_markdown_reports(tmp_path: Path) -> None:
     )
 
 
-def test_release_discovery_prefers_production_html_and_bge_index(
+def test_release_discovery_prefers_production_html_and_keyword_index(
     tmp_path: Path,
 ) -> None:
     validation = tmp_path / "validation"
@@ -683,7 +672,6 @@ def test_release_discovery_prefers_production_html_and_bge_index(
         "html-audit.json": {"kind": "static"},
         "html-audit-production.json": {"kind": "production"},
         "index-build-keywords.json": {"kind": "keywords"},
-        "index-build-bge-m3.json": {"kind": "bge"},
         "source-integrity.json": {"kind": "source-integrity"},
     }
     for name, document in fixtures.items():
@@ -696,6 +684,6 @@ def test_release_discovery_prefers_production_html_and_bge_index(
 
     assert reports["html_audit"]["kind"] == "production"
     assert discovered["html_audit"] == "html-audit-production.json"
-    assert reports["index_build"]["kind"] == "bge"
-    assert discovered["index_build"] == "index-build-bge-m3.json"
+    assert reports["index_build"]["kind"] == "keywords"
+    assert discovered["index_build"] == "index-build-keywords.json"
     assert reports["source_integrity"]["kind"] == "source-integrity"

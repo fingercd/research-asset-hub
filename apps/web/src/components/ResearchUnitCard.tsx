@@ -8,21 +8,9 @@ import {
 } from "../api/types";
 import { annotationSnippet, formatAuthors } from "../lib/format";
 import { useCompare } from "../state/CompareContext";
+import { CopyIdButton } from "./CopyIdButton";
 import { ReadingStatusControl } from "./ReadingStatusControl";
 import { ResearchUnitActions } from "./ResearchUnitActions";
-
-function matchSourceLabel(unit: ResearchUnitSummary): string {
-  if (
-    unit.match_source === "related_repository" ||
-    unit.match_source === "paper_and_related_repository"
-  ) {
-    return "命中关联代码";
-  }
-  if (unit.match_source === "paper") return "命中主论文";
-  if (unit.match_source === "repository") return "命中代码仓库";
-  if (unit.match_source === "browse") return "领域浏览";
-  return unit.match_source || "聚合匹配";
-}
 
 function assetType(asset: Asset): string {
   return asset.asset_type ?? asset.type ?? "asset";
@@ -33,10 +21,9 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
   const compare = useCompare();
   const selected = compare.has(primary.id);
   const domains = getAssetDomains(primary);
+  const remainingDomains = domains.slice(1, 4);
   const isRepository =
     unit.unit_kind === "repository" || assetType(primary) === "repository";
-  const primaryKindLabel =
-    assetType(primary) === "paper" ? "主论文" : assetType(primary);
   const relatedPapers = unit.matched_assets.filter(
     (asset) => asset.id !== primary.id && assetType(asset) === "paper",
   );
@@ -54,15 +41,16 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
     >
       <div className="asset-card-main">
         <div className="asset-card-kicker">
-          <span className="asset-type">
-            {isRepository ? "独立仓库" : primaryKindLabel}
-          </span>
+          {domains[0] && (
+            <Link
+              className="asset-domain-chip"
+              to={`/domains/${encodeURIComponent(domains[0])}`}
+            >
+              {domains[0]}
+            </Link>
+          )}
           {primary.year && <span>{primary.year}</span>}
           {primary.venue && <span>{primary.venue}</span>}
-          <span className="match-source">
-            匹配来源：<strong>{matchSourceLabel(unit)}</strong>
-          </span>
-          <span>{unit.covered_asset_count} 项资产</span>
         </div>
         <h3>
           <Link to={`/assets/${encodeURIComponent(primary.id)}`}>
@@ -117,9 +105,9 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
           )
         )}
 
-        {!!domains.length && (
+        {remainingDomains.length > 0 && (
           <div className="tag-row" aria-label="所属领域">
-            {domains.slice(0, 4).map((domain) => (
+            {remainingDomains.map((domain) => (
               <Link to={`/domains/${encodeURIComponent(domain)}`} key={domain}>
                 {domain}
               </Link>
@@ -134,6 +122,7 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
           value={getReadingStatus(primary)}
           compact
         />
+        <CopyIdButton assetId={primary.id} />
         <button
           className={`compare-toggle ${selected ? "is-selected" : ""}`}
           type="button"
@@ -156,6 +145,11 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
           actions={unit.quick_actions}
           ownerAssetId={primary.id}
           repositoryOnly={isRepository}
+          repositoryLabel={
+            isRepository
+              ? primary.title
+              : (unit.related_repositories[0]?.title ?? primary.title)
+          }
         />
         {percentage !== null && <span className="score">相关度 {percentage}%</span>}
       </div>

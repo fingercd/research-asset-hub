@@ -123,7 +123,7 @@ def create_platform_backup(
             "open-catalog",
             "configuration",
         ],
-        "excluded_rebuildable": ["meilisearch-volume", "qdrant-volume"],
+        "excluded_rebuildable": ["meilisearch-volume"],
         "risk": "local-copy-only",
         "files": files,
         "tree_digests": {

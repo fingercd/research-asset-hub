@@ -57,9 +57,6 @@ def _discover_reports(
     production_html = _newest(
         list(validation_directory.glob("html-audit-production*.json"))
     )
-    bge_index_build = _newest(
-        list(validation_directory.glob("index-build-bge*.json"))
-    )
     fixed: dict[str, Path | None] = {
         "inventory_current": validation_directory / "baseline-inventory.json",
         "inventory_baseline": (
@@ -75,10 +72,8 @@ def _discover_reports(
             list(validation_directory.glob("recovery-fixture-*verify*.json"))
         ),
         "search_evaluation": validation_directory / "search-evaluation.json",
-        "rag_evaluation": validation_directory / "rag-evaluation.json",
         "index_build": (
-            bge_index_build
-            or _newest(list(validation_directory.glob("index-build*.json")))
+            _newest(list(validation_directory.glob("index-build*.json")))
         ),
         "restore_rehearsal": (
             restore_report

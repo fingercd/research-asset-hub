@@ -6,6 +6,7 @@ import { representationLabel } from "../lib/format";
 import { useRepresentationUrl } from "../lib/useRepresentationUrl";
 import { EmptyState, ErrorState, LoadingState } from "./PageState";
 import { SafeOpenLink } from "./SafeOpenLink";
+import { CodeBrowser } from "./CodeBrowser";
 
 function IsolatedFrame({
   representation,
@@ -113,22 +114,10 @@ export function CodePanel({
   if (!representation) {
     return <EmptyState title="暂无代码" detail="该资产没有登记代码仓库、源代码或 Notebook。" />;
   }
-  if (representation.external_url && !representation.path_ref) {
-    return (
-      <section className="external-code-card">
-        <div>
-          <strong>{representationLabel(representation)}</strong>
-          <span>外部代码仓库不会在本机执行；请在新窗口中只读查看。</span>
-        </div>
-        <SafeOpenLink url={representation.external_url} label="打开代码仓库" />
-      </section>
-    );
-  }
   return (
-    <IsolatedFrame
-      representation={representation}
-      title="只读代码浏览器"
-      sandbox="allow-same-origin"
+    <CodeBrowser
+      representationId={representation.id}
+      repositoryLabel={representationLabel(representation)}
     />
   );
 }

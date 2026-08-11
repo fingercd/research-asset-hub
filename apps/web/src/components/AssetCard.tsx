@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { getAssetDomains, getReadingStatus, type Asset } from "../api/types";
 import { annotationSnippet, formatAuthors } from "../lib/format";
 import { useCompare } from "../state/CompareContext";
+import { CopyIdButton } from "./CopyIdButton";
 import { ReadingStatusControl } from "./ReadingStatusControl";
 import { RepresentationActions } from "./RepresentationActions";
 
@@ -59,6 +60,7 @@ export function AssetCard({
           value={getReadingStatus(asset)}
           compact
         />
+        <CopyIdButton assetId={asset.id} />
         <button
           className={`compare-toggle ${selected ? "is-selected" : ""}`}
           type="button"

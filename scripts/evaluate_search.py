@@ -1,4 +1,4 @@
-"""Evaluate the production hybrid-search indexes against a fixed truth set.
+"""Evaluate the production Meilisearch keyword indexes against a fixed truth set.
 
 The evaluator reports asset-level metrics.  Multiple matching chunks from the
 same asset are collapsed before scoring so repository-heavy papers cannot
@@ -77,7 +77,7 @@ def load_queries(path: Path) -> tuple[SearchEvaluationQuery, ...]:
         if not query_id or not query or not category:
             raise ValueError(f"queries[{index}] requires id, query, and category")
         try:
-            mode = SearchMode(str(item.get("mode") or "hybrid"))
+            mode = SearchMode(str(item.get("mode") or "keyword"))
         except ValueError as error:
             raise ValueError(f"queries[{index}].mode is invalid") from error
         raw_relevance = _mapping(
@@ -226,7 +226,6 @@ def _timed_searches(
                 query.query,
                 mode=mode,
                 limit=10,
-                rerank=False,
             )
     latencies: list[float] = []
     for _ in range(measured_runs):
@@ -236,7 +235,6 @@ def _timed_searches(
                 query.query,
                 mode=mode,
                 limit=10,
-                rerank=False,
             )
             latencies.append((perf_counter() - started) * 1_000)
     return latencies
@@ -282,16 +280,6 @@ def run_live_evaluation(
                     "id": query.query_id,
                     "degraded": result.degraded,
                     "errors": list(result.errors),
-                    "embedding": (
-                        asdict(result.embedding_status)
-                        if result.embedding_status is not None
-                        else None
-                    ),
-                    "reranker": (
-                        asdict(result.reranker_status)
-                        if result.reranker_status is not None
-                        else None
-                    ),
                 }
             )
 
@@ -327,18 +315,17 @@ def run_live_evaluation(
         return {
             "status": "passed" if all(checks.values()) else "failed",
             "generated_at": datetime.now(UTC).isoformat(),
-            "vector_version": settings.search_vector_version,
+            "index_version": "meilisearch-keyword",
             "missing_truth_assets": missing_truth_assets,
             "execution": execution,
             "metrics": metrics,
             "latency_methodology": {
                 "structured": (
-                    "Exact-mode identifier/title lookup; vectors and reranking "
-                    "disabled; warm-cache nearest-rank P95."
+                    "Exact-mode identifier/title lookup; warm-cache nearest-rank P95."
                 ),
                 "keyword": (
-                    "Keyword-only lookup over all four Meilisearch indexes; "
-                    "vectors and reranking disabled; warm-cache nearest-rank P95."
+                    "Keyword lookup over all four Meilisearch indexes; "
+                    "warm-cache nearest-rank P95."
                 ),
             },
             "thresholds": asdict(thresholds),

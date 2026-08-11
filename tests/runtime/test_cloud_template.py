@@ -26,7 +26,6 @@ def test_cloud_compose_has_one_public_edge_and_file_backed_secrets() -> None:
         "meilisearch",
         "oauth2-proxy",
         "postgres",
-        "qdrant",
     }
     assert all("ports" not in service for name, service in services.items() if name != "caddy")
     assert services["hub"]["volumes"][1]["read_only"] is True

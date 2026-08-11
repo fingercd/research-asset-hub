@@ -23,6 +23,7 @@ const asset = {
       representation_type: "repository",
       role: "official",
       external_url: "https://example.test/repository",
+      local_available: true,
     },
     {
       id: "guide-1",
@@ -50,12 +51,62 @@ const secondAsset = {
 };
 
 const domain = {
-  slug: "agents",
+  slug: "agent",
   label: "智能体系统",
   description: "智能体研究资料。",
   asset_count: 1,
   paper_count: 1,
   reading_counts: { unread: 1, reading: 0, read: 0 },
+};
+
+const portalSection = (
+  id: string,
+  title: string,
+  content: Record<string, unknown> = {},
+) => ({ id, kind: id.replaceAll("-", "_"), title, status: "reviewed", content });
+
+const portal = {
+  schema: "research-asset-hub.domain-portal/v2",
+  slug: domain.slug,
+  label: domain.label,
+  description: domain.description,
+  content_version: "2026.08.04",
+  content_digest: "a".repeat(64),
+  review_status: "reviewed",
+  stale: false,
+  stale_reasons: [],
+  original_selector: {
+    source_id: "domain-portals-20260726",
+    source_record_id: "overview:agent",
+  },
+  sections: [
+    portalSection("scope", "领域定位与边界", { markdown: "智能体研究范围。" }),
+    portalSection("timeline", "发展时间线", { stages: [] }),
+    portalSection("capability-method-map", "能力与方法版图", {
+      capabilities: [],
+      methods: [],
+      cells: [],
+    }),
+    portalSection("landmarks", "代表工作与技术路线", { items: [] }),
+    portalSection("benchmarks", "任务、数据集与评测", { rows: [] }),
+    portalSection("reading-routes", "推荐阅读路线", { routes: [] }),
+    portalSection("catalog", "论文、代码与导读目录", {
+      summary: "正式库动态生成完整目录。",
+    }),
+    portalSection("frontiers", "前沿趋势与开放问题", { markdown: "开放问题。" }),
+    portalSection("evidence", "证据、来源与版本说明", { source_inputs: [] }),
+  ],
+};
+
+const portalResponse = {
+  schema: "research-asset-hub.domain-portal-response/v2",
+  renderer: "v2",
+  domain: {
+    ...domain,
+    repository_count: 0,
+    research_unit_count: 1,
+  },
+  portal,
 };
 
 const researchUnit = {
@@ -160,13 +211,6 @@ async function installApiMock(page: Page) {
         status: "healthy",
         checked_at: "2026-07-24T12:00:00Z",
         components: { api: { status: "healthy" } },
-        search_models: {
-          state: "cold",
-          device: null,
-          idle_seconds: 900,
-          embedder: { state: "cold", device: null },
-          reranker: { state: "cold", device: null },
-        },
       });
     }
     if (path === "/api/v1/dashboard") {
@@ -187,14 +231,85 @@ async function installApiMock(page: Page) {
       });
     }
     if (path === "/api/v1/domains") return json(route, list([domain]));
-    if (path === "/api/v1/domains/agents") return json(route, domain);
+    if (path === "/api/v1/domains/agent/portal") return json(route, portalResponse);
     if (path === "/api/v1/assets/paper-1/representations") {
       return json(route, list(asset.representations));
+    }
+    if (path === "/api/v1/representations/repository-1/code/tree") {
+      return json(route, {
+        representation_id: "repository-1",
+        repository_name: "demo-repository",
+        path: "",
+        entries: [
+          {
+            name: "src",
+            path: "src",
+            kind: "directory",
+            size_bytes: null,
+            language: null,
+          },
+          {
+            name: "README.md",
+            path: "README.md",
+            kind: "file",
+            size_bytes: 18,
+            language: "markdown",
+          },
+        ],
+        truncated: false,
+      });
+    }
+    if (path === "/api/v1/representations/repository-1/code/file") {
+      return json(route, {
+        representation_id: "repository-1",
+        path: "README.md",
+        language: "markdown",
+        size_bytes: 18,
+        line_count: 2,
+        content: "# demo\nlocal code\n",
+        previewable: true,
+        truncated: false,
+      });
     }
     if (path === "/api/v1/assets/paper-1") return json(route, asset);
     if (path === "/api/v1/assets") return json(route, list([asset]));
     if (path === "/api/v1/annotations") return json(route, list([]));
     if (path === "/api/v1/similar/paper-1") return json(route, list([secondAsset]));
+    if (path === "/api/v1/code-graph") {
+      return json(route, {
+        total_count: 2,
+        indexed_count: 2,
+        hidden_count: 1,
+        domains: [
+          {
+            slug: "agent",
+            label: "智能体系统",
+            repository_count: 2,
+            indexed_count: 2,
+            repositories: [
+              {
+                id: "repository-1",
+                title: "示例仓库",
+                paths: ["D:/code/demo"],
+                gitnexus_indexed: true,
+                gitnexus_repo_name: "demo-repository",
+              },
+            ],
+            hidden_repositories: [
+              {
+                id: "repository-hidden",
+                title: "OpenBMB/BMTools",
+                paths: ["D:/code/bmtools"],
+                gitnexus_indexed: true,
+                gitnexus_repo_name: "BMTools",
+                hidden: true,
+              },
+            ],
+            hidden_count: 1,
+          },
+        ],
+      });
+    }
     if (path === "/api/v1/search") {
       return json(
         route,
@@ -235,9 +350,8 @@ async function installApiMock(page: Page) {
     if (path === "/api/v1/sync-conflicts") return json(route, list([]));
     if (path === "/api/v1/settings") {
       return json(route, {
-        app: { mode: "local" },
+        app: { mode: "local", gitnexus_url: "http://127.0.0.1:4747" },
         search: { status: "ready" },
-        rag: { provider: "configured" },
         sources: [],
         integrations: [],
       });
@@ -259,11 +373,11 @@ const routes = [
   ["/search", "跨领域搜索"],
   ["/assets/paper-1", "示例论文"],
   ["/domains", "研究领域"],
-  ["/domains/agents", "智能体系统"],
+  ["/domains/agent", "智能体系统"],
   ["/graph", "关系图谱"],
+  ["/code-graph", "代码图谱"],
   ["/compare", "论文对比"],
   ["/annotations", "全部批注"],
-  ["/chat", "向资料库提问"],
   ["/jobs", "后台任务"],
   ["/conflicts", "同步冲突"],
   ["/settings", "设置"],
@@ -323,7 +437,9 @@ test("详情页统一标签覆盖 PDF、代码、导读、关系、相似论文�
     .toBeGreaterThan(0);
 
   await page.getByRole("tab", { name: "代码", exact: true }).click();
-  await expect(page.getByRole("link", { name: "打开代码仓库" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "站内代码浏览器" })).toBeVisible();
+  await page.getByRole("button", { name: "打开文件 README.md" }).click();
+  await expect(page.locator(".code-browser-source code")).toContainText("# demo");
 
   await page.getByRole("tab", { name: "关系", exact: true }).click();
   await expect(page.getByRole("heading", { name: "关系资产" })).toBeVisible();
@@ -342,6 +458,46 @@ test("Cytoscape 渲染可交互图谱", async ({ page }) => {
   await expect(canvas).toBeVisible();
   await expect(canvas.locator("canvas").first()).toBeVisible();
   await expect(page.getByText("第二篇论文")).toBeVisible();
+  await expect(page.getByText("打开代码图谱")).toHaveCount(0);
+});
+
+test("代码图谱内嵌 GitNexus 并可直达仓库", async ({ page }) => {
+  await page.goto("/code-graph");
+
+  const viewer = page.locator('iframe[title="GitNexus 代码图谱"]');
+  await expect(viewer).toBeVisible();
+  await expect(viewer).toHaveAttribute("src", "http://127.0.0.1:4747");
+  await expect(page.locator(".code-graph-window-grid")).toBeVisible();
+  await expect(page.locator(".code-graph-window-scroll")).toBeVisible();
+
+  await page.getByRole("button", { name: "打开图谱" }).click();
+  await expect(viewer).toHaveAttribute(
+    "src",
+    "http://127.0.0.1:4747/?project=demo-repository",
+  );
+  await expect(page.getByText("GitNexus 官方界面")).toBeVisible();
+});
+
+test("代码图谱默认隐藏仓库并可在当前窗口打开", async ({ page }) => {
+  await page.goto("/code-graph");
+
+  await expect(page.getByText("OpenBMB/BMTools")).toHaveCount(0);
+  await page.getByRole("button", { name: /显示已隐藏仓库/ }).click();
+  await expect(
+    page.getByRole("button", { name: /OpenBMB\/BMTools/ }),
+  ).toBeVisible();
+
+  const viewer = page.locator('iframe[title="GitNexus 代码图谱"]');
+  await page
+    .locator(".code-graph-repo")
+    .filter({ hasText: "OpenBMB/BMTools" })
+    .getByRole("button", { name: "打开图谱" })
+    .click();
+  await expect(viewer).toHaveAttribute(
+    "src",
+    "http://127.0.0.1:4747/?project=BMTools",
+  );
+  await expect(page).toHaveURL(/\/code-graph$/);
 });
 
 test("比较页保存完整研究维度并导出 Markdown", async ({ page }) => {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,29 +12,10 @@ from starlette.responses import Response
 
 from apps.api.config import ApiSettings, get_settings
 from apps.api.database import DatabaseManager
-from apps.api.health import (
-    ComponentHealth,
-    HealthResponse,
-    SearchModelHealth,
-    SearchModelsHealth,
-    collect_health,
-)
+from apps.api.health import ComponentHealth, HealthResponse, collect_health
 from apps.api.problem import install_problem_handlers
 from apps.api.routes_v1 import router as v1_router
 from apps.api.search_runtime import SearchRuntime
-
-
-def _search_model_check_interval(idle_seconds: float) -> float:
-    return max(0.05, min(30.0, idle_seconds / 4.0))
-
-
-async def _monitor_search_models(application: FastAPI, idle_seconds: float) -> None:
-    interval = _search_model_check_interval(idle_seconds)
-    while True:
-        await asyncio.sleep(interval)
-        search_runtime = getattr(application.state, "search_runtime", None)
-        if isinstance(search_runtime, SearchRuntime):
-            await asyncio.to_thread(search_runtime.unload_if_idle)
 
 
 def create_app(
@@ -48,21 +29,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(lifespan_app: FastAPI) -> AsyncIterator[None]:
-        monitor_task: asyncio.Task[None] | None = None
-        if app_settings.search_model_idle_seconds > 0:
-            monitor_task = asyncio.create_task(
-                _monitor_search_models(
-                    lifespan_app,
-                    app_settings.search_model_idle_seconds,
-                )
-            )
         try:
             yield
         finally:
-            if monitor_task is not None:
-                monitor_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await monitor_task
             search_runtime = getattr(lifespan_app.state, "search_runtime", None)
             if isinstance(search_runtime, SearchRuntime):
                 await asyncio.to_thread(search_runtime.close)
@@ -153,23 +122,6 @@ def create_app(
                 detail=f"{readiness.status}: {readiness.detail}",
             )
             result.status = "degraded"
-        search_runtime = getattr(application.state, "search_runtime", None)
-        if isinstance(search_runtime, SearchRuntime):
-            models = search_runtime.search_models
-            result.search_models = SearchModelsHealth(
-                state=models.state,
-                device=models.device,
-                idle_seconds=models.idle_seconds,
-                idle_for_seconds=models.idle_for_seconds,
-                embedder=SearchModelHealth(
-                    state=models.embedder.state,
-                    device=models.embedder.device,
-                ),
-                reranker=SearchModelHealth(
-                    state=models.reranker.state,
-                    device=models.reranker.device,
-                ),
-            )
         return result
 
     @application.get("/api", tags=["system"])

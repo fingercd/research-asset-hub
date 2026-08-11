@@ -366,12 +366,6 @@ export function AssetDetailPage() {
                   <Network size={17} aria-hidden="true" />
                   查看关系
                 </button>
-                <Link
-                  to={`/chat?asset_id=${encodeURIComponent(data.id)}`}
-                >
-                  <BotMessageSquare size={17} aria-hidden="true" />
-                  基于此资产提问
-                </Link>
                 <Link to="#annotations">
                   <StickyNote size={17} aria-hidden="true" />
                   添加批注
@@ -485,7 +479,7 @@ export function AssetDetailPage() {
             <section className="section-block">
               <div className="section-heading">
                 <div>
-                  <p className="eyebrow">语义相似</p>
+                  <p className="eyebrow">相似论文</p>
                   <h2>相似论文</h2>
                 </div>
               </div>
@@ -498,7 +492,7 @@ export function AssetDetailPage() {
           ) : (
             <EmptyState
               title="暂无相似论文"
-              detail="向量索引建立后会给出延伸阅读建议。"
+              detail="关键词索引建立后会给出延伸阅读建议。"
             />
           ))}
       </div>

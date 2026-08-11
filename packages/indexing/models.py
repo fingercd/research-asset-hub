@@ -39,9 +39,3 @@ class SearchHit:
     source: str
     exact_match: bool = False
 
-
-@dataclass(frozen=True, slots=True)
-class VectorPoint:
-    point_id: str
-    document: SearchDocument
-    vector: tuple[float, ...]

@@ -1,32 +1,23 @@
-"""Search backend abstractions, fallbacks and fusion."""
+"""Meilisearch keyword search abstractions and index builders."""
 
 from .builder import (
-    DEFAULT_VECTOR_VERSION,
+    DEFAULT_INDEX_VERSION,
     KEYWORD_INDEX_NAMES,
     IndexBuilder,
-    IndexBuildReport,
     IndexCatalog,
+    KeywordBuildReport,
     PostgresIndexCatalog,
     RemoteIndexSuite,
-    degraded_hashing_embedder,
 )
 from .code_search import CodeSearch
-from .embeddings import (
-    Embedder,
-    EmbeddingStatus,
-    HashingEmbedder,
-    ResilientEmbedder,
-    SentenceTransformerEmbedder,
-)
 from .filters import (
     canonical_filters,
     matches_metadata,
     meilisearch_filter,
     metadata_filters,
-    qdrant_filter,
 )
 from .fusion import apply_score_boosts, reciprocal_rank_fusion
-from .hybrid import HybridSearchResult, HybridSearchService, SearchMode
+from .keyword import KeywordSearchResult, KeywordSearchService, SearchMode
 from .meili import (
     HttpxJSONTransport,
     InMemoryKeywordIndex,
@@ -37,81 +28,41 @@ from .meili import (
     ResilientKeywordIndex,
     tokenize,
 )
-from .model_lifecycle import ManagedModel, ModelRuntimeStatus
 from .models import (
     BackendHealth,
     BackendState,
     SearchDocument,
     SearchHit,
-    VectorPoint,
 )
-from .qdrant import (
-    InMemoryVectorIndex,
-    QdrantAdmin,
-    QdrantIndex,
-    ResilientVectorIndex,
-    VectorIndex,
-    cosine_similarity,
-)
-from .rerank import (
-    LexicalReranker,
-    Reranker,
-    RerankerStatus,
-    ResilientReranker,
-    SentenceTransformerReranker,
-)
-from .similarity import SimilarPaperFinder
 
 __all__ = [
     "BackendHealth",
     "BackendState",
     "CodeSearch",
-    "DEFAULT_VECTOR_VERSION",
-    "Embedder",
-    "EmbeddingStatus",
-    "HashingEmbedder",
-    "HybridSearchResult",
-    "HybridSearchService",
+    "DEFAULT_INDEX_VERSION",
     "HttpxJSONTransport",
     "InMemoryKeywordIndex",
-    "InMemoryVectorIndex",
-    "IndexBuildReport",
     "IndexBuilder",
     "IndexCatalog",
     "JSONTransport",
     "KEYWORD_INDEX_NAMES",
+    "KeywordBuildReport",
     "KeywordIndex",
-    "LexicalReranker",
+    "KeywordSearchResult",
+    "KeywordSearchService",
     "MeilisearchAdmin",
     "MeilisearchIndex",
-    "ManagedModel",
-    "ModelRuntimeStatus",
     "PostgresIndexCatalog",
-    "QdrantAdmin",
-    "QdrantIndex",
     "RemoteIndexSuite",
-    "Reranker",
-    "RerankerStatus",
-    "ResilientEmbedder",
     "ResilientKeywordIndex",
-    "ResilientReranker",
-    "ResilientVectorIndex",
     "SearchDocument",
     "SearchHit",
-    "SentenceTransformerEmbedder",
-    "SentenceTransformerReranker",
-    "SimilarPaperFinder",
     "SearchMode",
-    "VectorIndex",
-    "VectorPoint",
     "apply_score_boosts",
     "canonical_filters",
-    "cosine_similarity",
-    "degraded_hashing_embedder",
     "matches_metadata",
     "meilisearch_filter",
     "metadata_filters",
-    "qdrant_filter",
     "reciprocal_rank_fusion",
     "tokenize",
 ]

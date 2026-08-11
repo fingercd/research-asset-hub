@@ -1,5 +1,5 @@
 export type ReadingStatus = "unread" | "reading" | "read";
-export type SearchMode = "exact" | "hybrid" | "semantic";
+export type SearchMode = "exact" | "keyword";
 export type SearchGroupBy = "paper" | "none";
 export type RepresentationPresentation = "hub" | "original";
 export type QuickActionKind = "pdf" | "html" | "guide" | "code";
@@ -39,6 +39,8 @@ export interface Representation {
   size_bytes?: number | null;
   sha256?: string | null;
   network_required?: boolean;
+  local_available?: boolean;
+  local_reason?: string | null;
   attributes?: Record<string, unknown>;
   row_version?: number;
 }
@@ -52,6 +54,43 @@ export interface RepresentationOpenAction {
   presentation?: RepresentationPresentation;
   embed?: boolean;
   warning?: string | null;
+  editor?: EditorOpenAction | null;
+}
+
+export interface CodeTreeEntry {
+  name: string;
+  path: string;
+  kind: "directory" | "file" | string;
+  size_bytes?: number | null;
+  language?: string | null;
+}
+
+export interface CodeTreeResponse {
+  representation_id: string;
+  repository_name: string;
+  path: string;
+  entries: CodeTreeEntry[];
+  truncated?: boolean;
+}
+
+export interface CodeFileResponse {
+  representation_id: string;
+  path: string;
+  language: string;
+  size_bytes: number;
+  line_count: number;
+  content: string | null;
+  previewable: boolean;
+  truncated?: boolean;
+  reason?: string | null;
+}
+
+export interface EditorOpenAction {
+  available: boolean;
+  editor: "vscode" | string;
+  path?: string | null;
+  uri?: string | null;
+  reason?: string | null;
 }
 
 export interface Annotation {
@@ -283,6 +322,37 @@ export interface GraphResponse {
   truncated?: boolean;
 }
 
+export interface CodeGraphRepository {
+  id: string;
+  title: string;
+  title_zh?: string | null;
+  asset_type?: string;
+  year?: number | null;
+  domain_slugs?: string[];
+  paths?: string[];
+  representation_count?: number;
+  gitnexus_indexed?: boolean;
+  gitnexus_repo_name?: string | null;
+  hidden?: boolean;
+}
+
+export interface CodeGraphDomain {
+  slug: string;
+  label: string;
+  repository_count: number;
+  indexed_count: number;
+  repositories: CodeGraphRepository[];
+  hidden_repositories?: CodeGraphRepository[];
+  hidden_count?: number;
+}
+
+export interface CodeGraphResponse {
+  total_count: number;
+  indexed_count: number;
+  hidden_count?: number;
+  domains: CodeGraphDomain[];
+}
+
 export interface Comparison {
   id?: string;
   title?: string;
@@ -296,20 +366,6 @@ export interface Comparison {
   synthesis?: string | null;
   created_at?: string;
   [key: string]: unknown;
-}
-
-export interface ChatCitation {
-  asset_id?: string;
-  title?: string;
-  excerpt?: string;
-  representation_id?: string;
-  url?: string;
-}
-
-export interface ChatResponse {
-  answer: string;
-  citations?: ChatCitation[];
-  conversation_id?: string;
 }
 
 export interface Job {
@@ -343,9 +399,14 @@ export interface SyncConflict {
 }
 
 export interface Settings {
-  app?: Record<string, unknown>;
+  app?: {
+    mode?: string;
+    database_status?: string;
+    database_revision?: string;
+    gateway_origin?: string;
+    gitnexus_url?: string;
+  };
   search?: Record<string, unknown>;
-  rag?: Record<string, unknown>;
   sources?: Array<Record<string, unknown>>;
   integrations?: Array<Record<string, unknown>>;
   [key: string]: unknown;
@@ -357,25 +418,11 @@ export interface ComponentHealth {
   latency_ms?: number | null;
 }
 
-export interface SearchModelHealth {
-  state: "cold" | "warm";
-  device: string | null;
-}
-
-export interface SearchModelsHealth {
-  state: "cold" | "warm";
-  device: string | null;
-  idle_seconds: number;
-  embedder: SearchModelHealth;
-  reranker: SearchModelHealth;
-}
-
 export interface HealthResponse {
   service: string;
   status: "healthy" | "degraded";
   checked_at: string;
   components: Record<string, ComponentHealth>;
-  search_models: SearchModelsHealth;
 }
 
 export function getReadingStatus(asset: Asset): ReadingStatus {

@@ -46,8 +46,7 @@ def test_fixed_search_fixture_covers_locked_exact_categories() -> None:
     }
     assert {item.mode for item in queries} >= {
         SearchMode.EXACT,
-        SearchMode.HYBRID,
-        SearchMode.SEMANTIC,
+        SearchMode.KEYWORD,
     }
 
 
@@ -65,7 +64,7 @@ def test_recall_ndcg_and_aggregate_metrics_use_fixed_relevance() -> None:
     query = SearchEvaluationQuery(
         query_id="q1",
         query="query",
-        mode=SearchMode.HYBRID,
+        mode=SearchMode.KEYWORD,
         category="concept",
         relevance={"asset-a": 3.0, "asset-b": 1.0},
         exact=True,

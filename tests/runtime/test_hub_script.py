@@ -60,3 +60,13 @@ def test_status_reports_runtime_urls_and_not_bootstrap_status() -> None:
     assert "Write-HubRuntimeStatus -Runtime $runtime" in script
     assert "API docs:" in script
     assert "Asset health:" in script
+
+
+def test_start_manages_gitnexus_service() -> None:
+    script = HUB_SCRIPT.read_text(encoding="utf-8")
+
+    assert "HUB_GITNEXUS_PORT' -Default 4747" in script
+    assert "gitnexus-serve" in script
+    assert "$env:HUB_GITNEXUS_URL = $gitnexusUrl" in script
+    assert "Invoke-HubHealthProbe -Name 'gitnexus-serve'" in script
+    assert "npm install -g gitnexus" in script

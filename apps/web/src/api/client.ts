@@ -2,7 +2,9 @@ import type {
   Annotation,
   ApiList,
   Asset,
-  ChatResponse,
+  CodeFileResponse,
+  CodeTreeResponse,
+  CodeGraphResponse,
   Comparison,
   Dashboard,
   Domain,
@@ -224,7 +226,7 @@ async function search(
     await request<unknown>(
       `${API_BASE}/search${params({
         q: searchParams.q,
-        mode: searchParams.mode ?? "hybrid",
+        mode: searchParams.mode ?? "keyword",
         group_by: searchParams.group_by,
         domain: searchParams.domain,
         status: searchParams.status,
@@ -309,6 +311,22 @@ export const api = {
       { method: "POST", body: options },
     ),
 
+  codeTree: (id: string, path = "", signal?: AbortSignal) =>
+    request<CodeTreeResponse>(
+      `${API_BASE}/representations/${encodeURIComponent(id)}/code/tree${params({
+        path,
+      })}`,
+      { signal },
+    ),
+
+  codeFile: (id: string, path: string, signal?: AbortSignal) =>
+    request<CodeFileResponse>(
+      `${API_BASE}/representations/${encodeURIComponent(id)}/code/file${params({
+        path,
+      })}`,
+      { signal },
+    ),
+
   annotations: async (assetId?: string, signal?: AbortSignal) =>
     normalizeList<Annotation>(
       await request<unknown>(
@@ -365,6 +383,9 @@ export const api = {
       { signal },
     ),
 
+  codeGraph: (signal?: AbortSignal) =>
+    request<CodeGraphResponse>(`${API_BASE}/code-graph`, { signal }),
+
   comparisons: async (signal?: AbortSignal) =>
     normalizeList<Comparison>(
       await request<unknown>(`${API_BASE}/comparisons`, { signal }),
@@ -382,13 +403,6 @@ export const api = {
         signal,
       }),
     ),
-
-  chat: (message: string, assetIds: string[] = []) =>
-    request<ChatResponse>(`${API_BASE}/chat`, {
-      method: "POST",
-      body: { message, asset_ids: assetIds },
-      timeout: 45_000,
-    }),
 
   jobs: async (signal?: AbortSignal) =>
     normalizeList<Job>(

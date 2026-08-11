@@ -151,7 +151,7 @@ export function JobsPage() {
       ) : (
         <EmptyState
           title="没有后台任务"
-          detail="导入、重建全文索引或生成向量时，任务会显示在这里。"
+          detail="导入或重建全文索引时，任务会显示在这里。"
         />
       )}
     </div>

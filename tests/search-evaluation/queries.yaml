@@ -42,21 +42,21 @@ queries:
 
   - id: hybrid-dqn-atari
     query: deep reinforcement learning human-level Atari control
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f93e5-206a-798c-a924-389005f1d674: 3
 
   - id: hybrid-variational-lower-bound
     query: variational autoencoder reparameterization lower bound
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f93e4-c8f2-71af-943e-5633e94b5cb8: 3
 
   - id: hybrid-dream-controller
     query: train an agent inside a learned world model dream
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f9d56-9380-7c99-8a2c-520e9dba9102: 3
@@ -65,14 +65,14 @@ queries:
 
   - id: hybrid-locally-linear-latent-control
     query: locally linear latent dynamics control from raw images
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f93e5-4b67-78e2-9c54-93cf2a281dc3: 3
 
   - id: hybrid-multi-agent-survey
     query: multi-agent deep reinforcement learning survey taxonomy
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f9d56-9afa-773b-b99a-9ab19abd55cc: 3
@@ -80,7 +80,7 @@ queries:
 
   - id: hybrid-megatron-model-parallelism
     query: Megatron tensor model parallel transformer training
-    mode: hybrid
+    mode: keyword
     category: concept
     relevant_assets:
       019f93e4-f42e-7bc4-b641-492e0c0d2cf4: 3
@@ -89,7 +89,7 @@ queries:
 
   - id: semantic-world-model-control
     query: learning an internal simulator for planning and control
-    mode: semantic
+    mode: keyword
     category: semantic
     relevant_assets:
       019f93e5-2d90-762b-9614-e6a39902f171: 3

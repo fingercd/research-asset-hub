@@ -1,4 +1,4 @@
-"""Build the four keyword indexes and two versioned vector collections."""
+"""Build the four Meilisearch keyword indexes from PostgreSQL."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeVar
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,54 +25,28 @@ from packages.domain.models import (
     Representation,
 )
 
-from .embeddings import Embedder, HashingEmbedder, ResilientEmbedder
-from .hybrid import HybridSearchService
+from .keyword import KeywordSearchService
 from .meili import (
     HttpxJSONTransport,
     KeywordIndex,
     MeilisearchAdmin,
     MeilisearchIndex,
 )
-from .models import SearchDocument, VectorPoint
-from .qdrant import QdrantAdmin, QdrantIndex, VectorIndex
-from .rerank import Reranker
+from .models import SearchDocument
 
 KEYWORD_INDEX_NAMES = ("assets", "documents", "code", "annotations")
-DEFAULT_VECTOR_VERSION = "v1"
-MAX_VECTOR_CODE_CHUNKS_PER_ASSET = 200
-MAX_EMBEDDING_TEXT_CHARS = 32_768
+DEFAULT_INDEX_VERSION = "v1"
 T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
 class IndexCatalog:
     keyword_documents: Mapping[str, tuple[SearchDocument, ...]]
-    asset_documents: tuple[SearchDocument, ...]
-    chunk_documents: tuple[SearchDocument, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class IndexBuildReport:
-    index_version: str
-    embedding_provider: str
-    embedding_model: str
-    embedding_dimension: int
-    degraded: bool
-    keyword_counts_before: Mapping[str, int]
-    keyword_counts_after: Mapping[str, int]
-    vector_counts_before: Mapping[str, int]
-    vector_counts_after: Mapping[str, int]
-    keyword_documents_upserted: Mapping[str, int]
-    vector_points_upserted: Mapping[str, int]
-    stale_keyword_documents_removed: Mapping[str, int]
-    stale_vector_points_removed: Mapping[str, int]
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class KeywordBuildReport:
+    index_version: str
     keyword_counts_before: Mapping[str, int]
     keyword_counts_after: Mapping[str, int]
     keyword_documents_upserted: Mapping[str, int]
@@ -85,14 +59,8 @@ class KeywordBuildReport:
 @dataclass(slots=True)
 class RemoteIndexSuite:
     keyword_indexes: dict[str, KeywordIndex]
-    asset_vectors: VectorIndex
-    chunk_vectors: VectorIndex
     meili_admin: MeilisearchAdmin
-    qdrant_admin: QdrantAdmin
     meili_transport: HttpxJSONTransport
-    qdrant_transport: HttpxJSONTransport
-    asset_collection: str
-    chunk_collection: str
 
     @classmethod
     def connect(
@@ -100,25 +68,15 @@ class RemoteIndexSuite:
         *,
         meilisearch_url: str,
         meilisearch_api_key: str | None,
-        qdrant_url: str,
-        dimension: int = 1024,
-        version: str = DEFAULT_VECTOR_VERSION,
     ) -> RemoteIndexSuite:
-        safe_version = _safe_version(version)
-        asset_collection = f"rah_assets_{safe_version}"
-        chunk_collection = f"rah_chunks_{safe_version}"
         meili_transport = HttpxJSONTransport(
             meilisearch_url,
             api_key=meilisearch_api_key,
             timeout=30,
         )
-        qdrant_transport = HttpxJSONTransport(qdrant_url, timeout=30)
         meili_admin = MeilisearchAdmin(meili_transport)
-        qdrant_admin = QdrantAdmin(qdrant_transport)
         for index_name in KEYWORD_INDEX_NAMES:
             meili_admin.ensure_index(index_name)
-        qdrant_admin.ensure_collection(asset_collection, dimension=dimension)
-        qdrant_admin.ensure_collection(chunk_collection, dimension=dimension)
         return cls(
             keyword_indexes={
                 index_name: MeilisearchIndex(
@@ -127,45 +85,19 @@ class RemoteIndexSuite:
                 )
                 for index_name in KEYWORD_INDEX_NAMES
             },
-            asset_vectors=QdrantIndex(
-                qdrant_transport,
-                collection_name=asset_collection,
-                dimension=dimension,
-            ),
-            chunk_vectors=QdrantIndex(
-                qdrant_transport,
-                collection_name=chunk_collection,
-                dimension=dimension,
-            ),
             meili_admin=meili_admin,
-            qdrant_admin=qdrant_admin,
             meili_transport=meili_transport,
-            qdrant_transport=qdrant_transport,
-            asset_collection=asset_collection,
-            chunk_collection=chunk_collection,
         )
 
     def close(self) -> None:
         self.meili_transport.close()
-        self.qdrant_transport.close()
 
-    def search_service(
-        self,
-        *,
-        embedder: Embedder,
-        reranker: Reranker | None = None,
-    ) -> HybridSearchService:
-        return HybridSearchService(
-            self.keyword_indexes,
-            asset_vectors=self.asset_vectors,
-            chunk_vectors=self.chunk_vectors,
-            embedder=embedder,
-            reranker=reranker,
-        )
+    def search_service(self) -> KeywordSearchService:
+        return KeywordSearchService(self.keyword_indexes)
 
 
 class PostgresIndexCatalog:
-    """Materialize backend-neutral documents from the operational database."""
+    """Materialize backend-neutral keyword documents from PostgreSQL."""
 
     def load(self, session: Session, *, user_id: str = "local") -> IndexCatalog:
         assets = list(
@@ -233,7 +165,6 @@ class PostgresIndexCatalog:
 
         asset_documents: list[SearchDocument] = []
         metadata_by_asset: dict[UUID, dict[str, Any]] = {}
-        exact_by_asset: dict[UUID, tuple[str, ...]] = {}
         for asset in assets:
             rep_types = sorted(representation_types[asset.id])
             metadata = _asset_metadata(
@@ -251,7 +182,6 @@ class PostgresIndexCatalog:
                 *identifiers[asset.id],
             )
             metadata_by_asset[asset.id] = metadata
-            exact_by_asset[asset.id] = exact_terms
             asset_documents.append(
                 SearchDocument(
                     document_id=f"asset:{asset.id}",
@@ -350,17 +280,13 @@ class PostgresIndexCatalog:
                     exact_terms=_unique_terms(annotation.title),
                 )
             )
-        semantic_code_chunks = _semantic_code_documents(code_chunks)
-        all_chunks = [*document_chunks, *semantic_code_chunks]
         return IndexCatalog(
             keyword_documents={
                 "assets": tuple(asset_documents),
                 "documents": tuple(document_chunks),
                 "code": tuple(code_chunks),
                 "annotations": tuple(annotation_documents),
-            },
-            asset_documents=tuple(asset_documents),
-            chunk_documents=tuple(all_chunks),
+            }
         )
 
 
@@ -369,151 +295,12 @@ class IndexBuilder:
         self,
         suite: RemoteIndexSuite,
         *,
-        embedder: Embedder | None = None,
-        version: str = DEFAULT_VECTOR_VERSION,
-        batch_size: int = 32,
+        version: str = DEFAULT_INDEX_VERSION,
         write_batch_size: int = 256,
-        vector_write_batch_size: int = 128,
     ) -> None:
         self.suite = suite
-        self.embedder = embedder or ResilientEmbedder()
-        self.version = version
-        self.batch_size = max(1, batch_size)
+        self.version = _safe_version(version)
         self.write_batch_size = max(1, write_batch_size)
-        self.vector_write_batch_size = max(1, vector_write_batch_size)
-
-    def build(
-        self,
-        session: Session,
-        *,
-        user_id: str = "local",
-        resume_vectors: bool = False,
-    ) -> IndexBuildReport:
-        catalog = PostgresIndexCatalog().load(session, user_id=user_id)
-        keyword_before = {
-            name: self.suite.meili_admin.document_count(name) for name in KEYWORD_INDEX_NAMES
-        }
-        vector_before = {
-            self.suite.asset_collection: self.suite.qdrant_admin.point_count(
-                self.suite.asset_collection
-            ),
-            self.suite.chunk_collection: self.suite.qdrant_admin.point_count(
-                self.suite.chunk_collection
-            ),
-        }
-        expected_keyword_ids = {
-            name: {document.document_id for document in documents}
-            for name, documents in catalog.keyword_documents.items()
-        }
-        expected_asset_points = {
-            _point_id(document.document_id) for document in catalog.asset_documents
-        }
-        expected_chunk_points = {
-            _point_id(document.document_id) for document in catalog.chunk_documents
-        }
-
-        removed_keyword: dict[str, int] = {}
-        keyword_upserts: dict[str, int] = {}
-        if resume_vectors:
-            mismatched_indexes = [
-                name
-                for name, expected_ids in expected_keyword_ids.items()
-                if self.suite.meili_admin.document_ids(name) != expected_ids
-            ]
-            if mismatched_indexes:
-                raise RuntimeError(
-                    "Cannot resume vector build because keyword indexes differ: "
-                    + ", ".join(sorted(mismatched_indexes))
-                )
-            for name in catalog.keyword_documents:
-                removed_keyword[name] = 0
-                keyword_upserts[name] = 0
-            actual_asset_points = self.suite.qdrant_admin.point_ids(self.suite.asset_collection)
-            if actual_asset_points != expected_asset_points:
-                raise RuntimeError(
-                    "Cannot resume vector build because asset vectors are incomplete."
-                )
-            stale_asset_points: set[str] = set()
-        else:
-            removed_keyword, keyword_upserts = self._rebuild_keyword_documents(
-                catalog,
-                expected_keyword_ids,
-            )
-            stale_asset_points = (
-                self.suite.qdrant_admin.point_ids(self.suite.asset_collection)
-                - expected_asset_points
-            )
-
-        actual_chunk_points = self.suite.qdrant_admin.point_ids(
-            self.suite.chunk_collection
-        )
-        stale_chunk_points = actual_chunk_points - expected_chunk_points
-        chunk_documents_to_upsert = (
-            tuple(
-                document
-                for document in catalog.chunk_documents
-                if _point_id(document.document_id) not in actual_chunk_points
-            )
-            if resume_vectors
-            else catalog.chunk_documents
-        )
-        if stale_asset_points:
-            self.suite.asset_vectors.delete(sorted(stale_asset_points))
-        if stale_chunk_points:
-            self.suite.chunk_vectors.delete(sorted(stale_chunk_points))
-        if not resume_vectors:
-            self._embed_and_upsert(
-                catalog.asset_documents,
-                self.suite.asset_vectors,
-            )
-        self._embed_and_upsert(
-            chunk_documents_to_upsert,
-            self.suite.chunk_vectors,
-        )
-
-        status = self.embedder.status
-        self._record_index_states(
-            session,
-            catalog,
-            provider=status.provider,
-            model=status.model,
-            dimension=status.dimension,
-        )
-        session.flush()
-        keyword_after = {
-            name: self.suite.meili_admin.document_count(name) for name in KEYWORD_INDEX_NAMES
-        }
-        vector_after = {
-            self.suite.asset_collection: self.suite.qdrant_admin.point_count(
-                self.suite.asset_collection
-            ),
-            self.suite.chunk_collection: self.suite.qdrant_admin.point_count(
-                self.suite.chunk_collection
-            ),
-        }
-        return IndexBuildReport(
-            index_version=self.version,
-            embedding_provider=status.provider,
-            embedding_model=status.model,
-            embedding_dimension=status.dimension,
-            degraded=status.provider == "local-hashing",
-            keyword_counts_before=keyword_before,
-            keyword_counts_after=keyword_after,
-            vector_counts_before=vector_before,
-            vector_counts_after=vector_after,
-            keyword_documents_upserted=keyword_upserts,
-            vector_points_upserted={
-                self.suite.asset_collection: (
-                    0 if resume_vectors else len(catalog.asset_documents)
-                ),
-                self.suite.chunk_collection: len(chunk_documents_to_upsert),
-            },
-            stale_keyword_documents_removed=removed_keyword,
-            stale_vector_points_removed={
-                self.suite.asset_collection: len(stale_asset_points),
-                self.suite.chunk_collection: len(stale_chunk_points),
-            },
-        )
 
     def rebuild_keywords(
         self,
@@ -534,11 +321,14 @@ class IndexBuilder:
             catalog,
             expected_ids,
         )
+        self._record_index_states(session, catalog)
+        session.flush()
         counts_after = {
             name: self.suite.meili_admin.document_count(name)
             for name in KEYWORD_INDEX_NAMES
         }
         return KeywordBuildReport(
+            index_version=self.version,
             keyword_counts_before=counts_before,
             keyword_counts_after=counts_after,
             keyword_documents_upserted=upserted,
@@ -552,11 +342,10 @@ class IndexBuilder:
     ) -> tuple[dict[str, int], dict[str, int]]:
         removed: dict[str, int] = {}
         upserted: dict[str, int] = {}
-        queued_transport = getattr(self.suite, "meili_transport", None)
         previous_wait_mode: bool | None = None
-        if isinstance(queued_transport, HttpxJSONTransport):
-            previous_wait_mode = queued_transport.wait_for_tasks
-            queued_transport.wait_for_tasks = False
+        if self.suite.meili_transport.wait_for_tasks:
+            previous_wait_mode = True
+            self.suite.meili_transport.wait_for_tasks = False
         try:
             for name, documents in catalog.keyword_documents.items():
                 stale_ids = self.suite.meili_admin.document_ids(name) - expected_ids[name]
@@ -567,54 +356,17 @@ class IndexBuilder:
                 for keyword_batch in _batches(documents, self.write_batch_size):
                     self.suite.keyword_indexes[name].upsert(keyword_batch)
         finally:
-            if (
-                isinstance(queued_transport, HttpxJSONTransport)
-                and previous_wait_mode is not None
-            ):
-                queued_transport.wait_for_tasks = previous_wait_mode
-        if isinstance(queued_transport, HttpxJSONTransport):
-            queued_transport.flush_pending_tasks()
+            if previous_wait_mode is not None:
+                self.suite.meili_transport.wait_for_tasks = previous_wait_mode
+        self.suite.meili_transport.flush_pending_tasks()
         return removed, upserted
-
-    def _embed_and_upsert(
-        self,
-        documents: Sequence[SearchDocument],
-        index: VectorIndex,
-    ) -> None:
-        """Embed and write bounded batches without retaining the full matrix."""
-
-        for document_batch in _batches(documents, self.vector_write_batch_size):
-            points = self._embed(document_batch)
-            index.upsert(points)
-
-    def _embed(self, documents: Sequence[SearchDocument]) -> list[VectorPoint]:
-        points: list[VectorPoint] = []
-        for batch in _batches(documents, self.batch_size):
-            texts = [
-                f"{document.title}\n{document.text[:MAX_EMBEDDING_TEXT_CHARS]}"
-                for document in batch
-            ]
-            vectors = self.embedder.encode(texts)
-            points.extend(
-                VectorPoint(
-                    point_id=_point_id(document.document_id),
-                    document=document,
-                    vector=tuple(vector),
-                )
-                for document, vector in zip(batch, vectors, strict=True)
-            )
-        return points
 
     def _record_index_states(
         self,
         session: Session,
         catalog: IndexCatalog,
-        *,
-        provider: str,
-        model: str,
-        dimension: int,
     ) -> None:
-        current: list[tuple[str, str, UUID, str, str, str | None, int | None]] = []
+        current: list[tuple[str, str, UUID, str, str]] = []
         for index_name, documents in catalog.keyword_documents.items():
             index_kind = IndexKind.CODE.value if index_name == "code" else IndexKind.KEYWORD.value
             current.extend(
@@ -624,35 +376,9 @@ class IndexBuilder:
                     _entity_id(document),
                     _document_digest(document),
                     index_kind,
-                    "meilisearch",
-                    None,
                 )
                 for document in documents
             )
-        current.extend(
-            (
-                self.suite.asset_collection,
-                "asset",
-                _entity_id(document),
-                _document_digest(document),
-                IndexKind.VECTOR.value,
-                provider,
-                dimension,
-            )
-            for document in catalog.asset_documents
-        )
-        current.extend(
-            (
-                self.suite.chunk_collection,
-                "chunk",
-                _entity_id(document),
-                _document_digest(document),
-                IndexKind.VECTOR.value,
-                provider,
-                dimension,
-            )
-            for document in catalog.chunk_documents
-        )
         index_names = {item[0] for item in current}
         existing = list(
             session.scalars(
@@ -681,8 +407,6 @@ class IndexBuilder:
             entity_id,
             digest,
             index_kind,
-            state_provider,
-            state_dimension,
         ) in current:
             key = (index_name, entity_type, entity_id, digest)
             current_state = by_key.get(key)
@@ -698,9 +422,9 @@ class IndexBuilder:
                 session.add(current_state)
                 by_key[key] = current_state
             current_state.status = IndexStatus.READY.value
-            current_state.provider = state_provider
-            current_state.model = model if index_kind == IndexKind.VECTOR.value else None
-            current_state.dimension = state_dimension
+            current_state.provider = "meilisearch"
+            current_state.model = None
+            current_state.dimension = None
             current_state.error = None
             current_state.indexed_at = indexed_at
 
@@ -746,31 +470,6 @@ def _is_code_chunk(
     )
 
 
-def _semantic_code_documents(
-    documents: Sequence[SearchDocument],
-) -> list[SearchDocument]:
-    """Bound vectors per repository while keeping every code chunk in Meilisearch."""
-
-    grouped: defaultdict[str, list[SearchDocument]] = defaultdict(list)
-    for document in documents:
-        grouped[document.asset_id].append(document)
-    selected: list[SearchDocument] = []
-    for asset_id in sorted(grouped):
-        ranked = sorted(
-            grouped[asset_id],
-            key=lambda document: (
-                not bool(
-                    isinstance(document.metadata.get("anchor"), Mapping)
-                    and document.metadata["anchor"].get("symbol")
-                ),
-                int(document.metadata.get("chunk_index") or 0),
-                document.document_id,
-            ),
-        )
-        selected.extend(ranked[:MAX_VECTOR_CODE_CHUNKS_PER_ASSET])
-    return selected
-
-
 def _anchor_exact_terms(anchor: Mapping[str, Any] | None) -> tuple[str, ...]:
     if not anchor:
         return ()
@@ -801,10 +500,6 @@ def _unique_terms(*values: str | None) -> tuple[str, ...]:
 def _batches(values: Sequence[T], size: int) -> Iterable[list[T]]:
     for offset in range(0, len(values), size):
         yield list(values[offset : offset + size])
-
-
-def _point_id(document_id: str) -> str:
-    return str(uuid5(NAMESPACE_URL, f"research-asset-hub:{document_id}"))
 
 
 def _entity_type(document: SearchDocument) -> str:
@@ -838,10 +533,4 @@ def _safe_version(value: str) -> str:
         character if character.isalnum() or character == "_" else "_"
         for character in value.casefold()
     ).strip("_")
-    return normalized or DEFAULT_VECTOR_VERSION
-
-
-def degraded_hashing_embedder(*, dimension: int = 1024) -> Embedder:
-    """Public helper for an explicit no-model build."""
-
-    return HashingEmbedder(dimension=dimension)
+    return normalized or DEFAULT_INDEX_VERSION

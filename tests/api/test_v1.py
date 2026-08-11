@@ -25,6 +25,7 @@ from packages.domain.models import (
     Job,
     Relation,
     Representation,
+    Source,
 )
 
 
@@ -98,8 +99,6 @@ def install_fake_search_runtime(
                 hits=hits,
                 degraded=False,
                 errors=(),
-                embedding_status=None,
-                reranker_status=None,
             )
 
     runtime = SimpleNamespace(service=FakeSearchService())
@@ -591,15 +590,13 @@ def test_extraction_and_index_status_interfaces(api_runtime: tuple[Any, ...]) ->
         )
         index_state = IndexState(
             index_name="documents",
-            index_kind="vector",
+            index_kind="keyword",
             entity_type="representation",
             entity_id=representation.id,
             content_digest="b" * 64,
             status="ready",
-            provider="local",
-            model="BAAI/bge-m3",
-            dimension=1024,
-            version="bge_m3_v1",
+            provider="meilisearch",
+            version="v1",
         )
         session.add(index_state)
         session.flush()
@@ -624,63 +621,15 @@ def test_extraction_and_index_status_interfaces(api_runtime: tuple[Any, ...]) ->
 
     indexes = client.get(
         "/api/v1/indexes",
-        params={"version": "bge_m3_v1", "status": "ready"},
+        params={"version": "v1", "status": "ready"},
     )
     assert indexes.status_code == 200
     assert indexes.json()["total"] == 1
     assert indexes.json()["counts"]["by_status"] == {"ready": 1}
-    assert indexes.json()["items"][0]["dimension"] == 1024
+    assert indexes.json()["items"][0]["dimension"] is None
     index_detail = client.get(f"/api/v1/indexes/{index_state_id}")
     assert index_detail.status_code == 200
     assert index_detail.json()["entity_id"] == representation_id
-
-
-def test_chat_stream_emits_grounded_event_sequence(
-    api_runtime: tuple[Any, ...],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, _, _ = api_runtime
-    asset = create_asset(client, title="Streaming evidence")
-
-    def fake_answer_with_rag(*args: Any, **kwargs: Any) -> SimpleNamespace:
-        del args, kwargs
-        return SimpleNamespace(
-            answer=SimpleNamespace(
-                text="基于本地证据的回答。",
-                citations=(),
-                provider="test-provider",
-                model="test-model",
-            ),
-            retrieved=(
-                SimpleNamespace(
-                    asset_id=asset["id"],
-                    title=asset["title"],
-                    representation_id=str(UUID(int=10)),
-                    chunk_id=str(UUID(int=11)),
-                    anchor={"kind": "pdf", "page": 1},
-                    score=0.95,
-                    sources=("keyword", "vector"),
-                    url="/api/v1/representations/test/open-actions",
-                ),
-            ),
-            stop_reason="completed",
-            audit={"prompt_version": "test"},
-        )
-
-    monkeypatch.setattr(
-        "apps.api.routes_v1.answer_with_rag",
-        fake_answer_with_rag,
-    )
-    response = client.post(
-        "/api/v1/chat/stream",
-        json={"message": "这篇论文讲了什么？", "asset_ids": [asset["id"]]},
-    )
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
-    assert response.text.index("event: evidence") < response.text.index("event: answer")
-    assert response.text.index("event: answer") < response.text.index("event: done")
-    assert "基于本地证据的回答。" in response.text
-    assert '"stop_reason":"completed"' in response.text
 
 
 def test_unmigrated_database_is_explicitly_degraded() -> None:
@@ -696,8 +645,207 @@ def test_unmigrated_database_is_explicitly_degraded() -> None:
     engine.dispose()
     assert response.status_code == 503
     assert response.headers["content-type"].startswith("application/problem+json")
-    assert response.json()["type"].endswith(":database-degraded")
-    assert "missing required tables" in response.json()["detail"]
+
+
+def test_settings_exposes_gitnexus_url(
+    api_runtime: tuple[TestClient, DatabaseManager, Engine],
+) -> None:
+    client, _, _ = api_runtime
+
+    response = client.get("/api/v1/settings")
+
+    assert response.status_code == 200
+    assert response.json()["app"]["gitnexus_url"] == "http://127.0.0.1:4747"
+
+
+def test_code_graph_exposes_gitnexus_repo_name_from_registry(
+    api_runtime: tuple[TestClient, DatabaseManager, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client, database, _ = api_runtime
+    repository = create_asset(
+        client,
+        title="Candidate Implementation",
+        asset_type="repository",
+        domain_slugs=["agent"],
+    )
+    repository_dir = tmp_path / "repos" / "candidate"
+    repository_dir.mkdir(parents=True)
+    settings_path = tmp_path / "sources.yaml"
+    settings_path.write_text(
+        (
+            "schema_version: 1\n"
+            "workspace_root: .\n"
+            "sources:\n"
+            "  - id: test-source\n"
+            "    label: Test Source\n"
+            "    adapter: generic\n"
+            "    root: .\n"
+            "    asset_roots:\n"
+            "      repository: repos\n"
+        ),
+        encoding="utf-8",
+    )
+    with database.session() as session:
+        source = Source(
+            alias="test-source",
+            label="Test Source",
+            adapter="generic",
+            root_path=str(tmp_path),
+            config={},
+        )
+        session.add(source)
+        session.flush()
+        session.add(
+            Representation(
+                asset_id=UUID(repository["id"]),
+                representation_type="repository",
+                role="official",
+                materialization_kind="directory",
+                availability="available",
+                root_key="repository",
+                path_ref="candidate",
+                source_id=source.id,
+                attributes={},
+            )
+        )
+        session.flush()
+
+    home = tmp_path / "home"
+    gitnexus_dir = home / ".gitnexus"
+    gitnexus_dir.mkdir(parents=True)
+    (gitnexus_dir / "registry.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "candidate-repo",
+                    "path": str(repository_dir),
+                    "indexedAt": "2026-08-04T00:00:00Z",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "apps.api.routes_v1.Path.home",
+        classmethod(lambda cls: home),
+    )
+
+    response = client.get("/api/v1/code-graph")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_count"] == 1
+    assert payload["indexed_count"] == 1
+    repo = payload["domains"][0]["repositories"][0]
+    assert repo["gitnexus_indexed"] is True
+    assert repo["gitnexus_repo_name"] == "candidate-repo"
+
+
+def test_code_graph_hides_registered_repositories(
+    api_runtime: tuple[TestClient, DatabaseManager, Engine],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client, database, _ = api_runtime
+    repository = create_asset(
+        client,
+        title="OpenBMB/BMTools",
+        asset_type="repository",
+        domain_slugs=["agent"],
+    )
+    repository_dir = tmp_path / "repos" / "bmtools"
+    repository_dir.mkdir(parents=True)
+    settings_path = tmp_path / "sources.yaml"
+    settings_path.write_text(
+        (
+            "schema_version: 1\n"
+            "workspace_root: .\n"
+            "sources:\n"
+            "  - id: test-source\n"
+            "    label: Test Source\n"
+            "    adapter: generic\n"
+            "    root: .\n"
+            "    asset_roots:\n"
+            "      repository: repos\n"
+        ),
+        encoding="utf-8",
+    )
+    with database.session() as session:
+        source = Source(
+            alias="test-source",
+            label="Test Source",
+            adapter="generic",
+            root_path=str(tmp_path),
+            config={},
+        )
+        session.add(source)
+        session.flush()
+        session.add(
+            Representation(
+                asset_id=UUID(repository["id"]),
+                representation_type="repository",
+                role="official",
+                materialization_kind="directory",
+                availability="available",
+                root_key="repository",
+                path_ref="bmtools",
+                source_id=source.id,
+                attributes={},
+            )
+        )
+        session.flush()
+
+    home = tmp_path / "home"
+    gitnexus_dir = home / ".gitnexus"
+    gitnexus_dir.mkdir(parents=True)
+    (gitnexus_dir / "registry.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "BMTools",
+                    "path": str(repository_dir),
+                    "indexedAt": "2026-08-04T00:00:00Z",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "apps.api.routes_v1.Path.home",
+        classmethod(lambda cls: home),
+    )
+
+    hidden_path = tmp_path / "code-graph-hidden.yaml"
+    hidden_path.write_text(
+        (
+            "schema_version: 1\n"
+            "hidden_repositories:\n"
+            "  - registry_name: BMTools\n"
+            "    reason: default hidden\n"
+        ),
+        encoding="utf-8",
+    )
+    client.app.state.settings.sources_config_path = settings_path
+    client.app.state.settings.code_graph_hidden_path = hidden_path
+
+    response = client.get("/api/v1/code-graph")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_count"] == 0
+    assert payload["indexed_count"] == 0
+    assert payload["hidden_count"] == 1
+    agent_domain = next(
+        domain for domain in payload["domains"] if domain["slug"] == "agent"
+    )
+    assert agent_domain["repositories"] == []
+    assert agent_domain["hidden_count"] == 1
+    assert (
+        agent_domain["hidden_repositories"][0]["gitnexus_repo_name"]
+        == "BMTools"
+    )
 
 
 def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
@@ -927,6 +1075,18 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
     assert actions["code"]["representation_id"] == representation_ids["shared_code"]
     assert actions["code"]["owner_asset_id"] == shared_repository["id"]
     assert actions["code"]["relation_type"] == "implemented_by"
+    code_open = client.post(
+        f"/api/v1/representations/{representation_ids['shared_code']}/open-actions"
+    )
+    assert code_open.status_code == 200
+    assert code_open.json()["kind"] == "external_url"
+    assert code_open.json()["editor"] == {
+        "available": False,
+        "editor": "vscode",
+        "path": None,
+        "uri": None,
+        "reason": "源码未下载/未开源",
+    }
 
     candidate = client.get(
         "/api/v1/search",

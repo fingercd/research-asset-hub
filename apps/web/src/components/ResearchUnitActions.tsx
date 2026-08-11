@@ -7,6 +7,7 @@ import {
   FileText,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { useState } from "react";
 import { api } from "../api/client";
 import type {
   QuickAction,
@@ -15,6 +16,7 @@ import type {
   QuickActionStatus,
 } from "../api/types";
 import { getOpenUrl } from "../lib/format";
+import { CodeOpenMenu } from "./CodeOpenMenu";
 
 const actionDefinitions: Array<{
   kind: QuickActionKind;
@@ -116,10 +118,12 @@ export function ResearchUnitActions({
   actions,
   ownerAssetId,
   repositoryOnly = false,
+  repositoryLabel = "代码项目",
 }: {
   actions: QuickAction[];
   ownerAssetId: string;
   repositoryOnly?: boolean;
+  repositoryLabel?: string;
 }) {
   const mutation = useMutation({
     mutationFn: (representationId: string) =>
@@ -129,6 +133,7 @@ export function ResearchUnitActions({
       if (url) window.open(url, "_blank", "noopener,noreferrer");
     },
   });
+  const [codeMenuAction, setCodeMenuAction] = useState<QuickAction | null>(null);
 
   const visibleDefinitions = repositoryOnly
     ? actionDefinitions.filter((definition) => definition.kind === "code")
@@ -197,6 +202,41 @@ export function ResearchUnitActions({
                 {content}
               </button>
             </span>
+          );
+        }
+
+        if (definition.kind === "code" && action.status !== "available") {
+          return (
+            <span
+              className="quick-action-tooltip"
+              title={title}
+              key={definition.kind}
+            >
+              <button
+                className="quick-action is-unavailable"
+                type="button"
+                disabled
+                title={title}
+                aria-label={accessibleLabel}
+              >
+                {content}
+              </button>
+            </span>
+          );
+        }
+
+        if (definition.kind === "code") {
+          return (
+            <button
+              className="quick-action"
+              type="button"
+              title={title}
+              aria-label={definition.label}
+              onClick={() => setCodeMenuAction(action)}
+              key={definition.kind}
+            >
+              {content}
+            </button>
           );
         }
 
@@ -304,6 +344,13 @@ export function ResearchUnitActions({
         );
       })}
       {mutation.isError && <span className="inline-error">无法打开</span>}
+      {codeMenuAction && (
+        <CodeOpenMenu
+          repositoryLabel={repositoryLabel}
+          action={codeMenuAction}
+          onClose={() => setCodeMenuAction(null)}
+        />
+      )}
     </div>
   );
 }

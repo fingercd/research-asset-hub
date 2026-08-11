@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  BotMessageSquare,
   BriefcaseBusiness,
   Command,
+  FolderGit2,
   GitCompareArrows,
   Home,
   LibraryBig,
@@ -24,9 +24,9 @@ const primaryNavigation = [
   { to: "/search", label: "跨领域搜索", icon: Search },
   { to: "/domains", label: "领域", icon: LibraryBig },
   { to: "/graph", label: "关系图谱", icon: Network },
+  { to: "/code-graph", label: "代码图谱", icon: FolderGit2 },
   { to: "/compare", label: "论文对比", icon: GitCompareArrows },
   { to: "/annotations", label: "批注", icon: StickyNote },
-  { to: "/chat", label: "RAG 问答", icon: BotMessageSquare },
 ];
 
 const systemNavigation = [
@@ -138,9 +138,6 @@ function CommandPalette({
           <div>
             <button type="button" onClick={() => (navigate("/domains"), close())}>
               领域
-            </button>
-            <button type="button" onClick={() => (navigate("/chat"), close())}>
-              RAG 问答
             </button>
             <button type="button" onClick={() => (navigate("/jobs"), close())}>
               任务状态

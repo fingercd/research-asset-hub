@@ -340,20 +340,16 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/build_indexes.py `
-  --version 20260726-domain-expansion `
-  --report work/validation/index-build-bge-m3.json
+  --version v1 `
+  --report work/validation/index-build.json
 ```
 
 正式完成条件：
 
-- embedding model 为 `BAAI/bge-m3`；
-- 向量维数为 1024；
-- `degraded` 为 false；
+- Meilisearch 四个关键词索引（assets/documents/code/annotations）计数非空；
 - 新增资产存在于 assets 索引；
 - 新增正文/代码存在于 documents/code 索引；
 - 不存在上一版本残留的失效文档。
-
-`--hashing-only` 只能用于明确的诊断或离线降级，不能冒充正式向量索引。
 
 ## 9. 验证用户真正能用
 
@@ -370,7 +366,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 3. 分别测试 PDF、代码、导读和原始 HTML；缺失按钮必须明确禁用。
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。
 5. 读取并核对阅读状态与批注摘要。只有用户本来就要求写入阅读状态或批注时才做写入验证，不得为了 smoke test 污染用户数据。
-6. 检查相似论文、图谱邻域和 RAG 引用能定位到有效锚点。
+6. 检查相似论文和图谱邻域能定位到有效锚点。
 7. 涉及领域或门户时，从首页确认领域动态出现，并验证：
    - `/api/v1/domains/<slug>/portal` 返回 v2、九章节、`stale: false`；
    - 默认页面存在 `article[data-domain-portal]`，没有 iframe、第二层滚动或横向溢出；
@@ -411,7 +407,7 @@ pnpm --filter @research-asset-hub/web test -- --run
 pnpm --filter @research-asset-hub/web build
 ```
 
-涉及前端、打开链路或 HTML 时还要运行 Playwright E2E。涉及索引/RAG 时重跑相应固定评测。
+涉及前端、打开链路或 HTML 时还要运行 Playwright E2E。涉及索引时重跑相应固定评测。
 
 批量导入、新来源、新领域或准备发布时，创建最终快照并做隔离恢复演练：
 

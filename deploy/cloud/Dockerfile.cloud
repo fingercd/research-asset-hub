@@ -38,7 +38,7 @@ RUN python -m venv /app/.venv \
     && /app/.venv/bin/pip install --no-cache-dir --upgrade pip \
     && /app/.venv/bin/pip install --no-cache-dir . \
     && chmod 0555 /app/deploy/cloud/bin/run_hub.py \
-    && mkdir -p /app/outputs /var/lib/research-asset-hub/models \
+    && mkdir -p /app/outputs /var/lib/research-asset-hub \
     && chown -R hub:hub /app /var/lib/research-asset-hub
 
 USER hub

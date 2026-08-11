@@ -13,8 +13,7 @@
     "caddy": "caddy:2.11.4-alpine",
     "oauth2_proxy": "quay.io/oauth2-proxy/oauth2-proxy:v7.15.2",
     "postgres": "postgres:16-alpine",
-    "meilisearch": "getmeili/meilisearch:v1.12",
-    "qdrant": "qdrant/qdrant:v1.13.6"
+    "meilisearch": "getmeili/meilisearch:v1.12"
   },
   "storage": {
     "filesystem": "wired-read-only",

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import shlex
 import socket
@@ -25,7 +24,7 @@ from .manager import BackupManager
 from .workflow import wsl_path
 
 ACTIVE_PROJECT_NAME = "research-asset-hub"
-ACTIVE_PORTS = frozenset({5432, 6333, 6334, 7700, 8765, 8766, 8767})
+ACTIVE_PORTS = frozenset({5432, 7700, 8765, 8766, 8767})
 CORE_TABLES = (
     "assets",
     "representations",
@@ -52,15 +51,11 @@ class RestoreSafetyError(ValueError):
 class RestorePorts:
     postgres: int = 55432
     meilisearch: int = 57700
-    qdrant_http: int = 56333
-    qdrant_grpc: int = 56334
 
     def values(self) -> tuple[int, ...]:
         return (
             self.postgres,
             self.meilisearch,
-            self.qdrant_http,
-            self.qdrant_grpc,
         )
 
 
@@ -134,7 +129,6 @@ class IndexRebuildContext:
     database_dsn: str
     meili_url: str
     meili_key: str
-    qdrant_url: str
 
 
 class IndexRebuilder(Protocol):
@@ -142,14 +136,7 @@ class IndexRebuilder(Protocol):
 
 
 class MetadataIndexRebuilder:
-    """Rebuild a deterministic asset metadata index in the isolated services.
-
-    The production BGE collections are deliberately excluded from backups.
-    This rehearsal uses the platform's deterministic 1024-dimensional fallback
-    so it can prove the complete rebuild path even on a machine without a loaded
-    GPU model. A production BGE rebuild command can be supplied through the same
-    ``IndexRebuilder`` protocol.
-    """
+    """Rebuild the keyword asset index in the isolated services."""
 
     def __init__(self, *, batch_size: int = 64) -> None:
         self.batch_size = batch_size
@@ -182,29 +169,22 @@ class MetadataIndexRebuilder:
             for row in rows
         ]
         meili = self._rebuild_meili(context, documents)
-        qdrant = self._rebuild_qdrant(context, documents)
         probe = self._fixed_query_probe(context, documents)
         expected = len(documents)
         status = (
             "verified"
             if meili["document_count"] == expected
-            and qdrant["point_count"] == expected
             and probe["keyword_exact_hit"]
-            and probe["vector_self_hit"]
             else "failed"
         )
         return {
             "status": status,
-            "strategy": "metadata-hashing-rebuild",
-            "embedding": "sha256-feature-hash-v1",
-            "dimension": 1024,
+            "strategy": "metadata-keyword-rebuild",
             "expected_assets": expected,
             "meilisearch": meili,
-            "qdrant": qdrant,
             "fixed_query": probe,
             "production_note": (
-                "This proves rebuildability with the deterministic offline fallback; "
-                "production BGE collections remain rebuildable state and are not restored."
+                "Meilisearch keyword indexes are rebuildable state and are not restored."
             ),
         }
 
@@ -289,45 +269,6 @@ class MetadataIndexRebuilder:
             time.sleep(0.1)
         raise TimeoutError(f"Meilisearch task {task_id} did not finish")
 
-    def _rebuild_qdrant(
-        self,
-        context: IndexRebuildContext,
-        documents: Sequence[Mapping[str, Any]],
-    ) -> dict[str, Any]:
-        with httpx.Client(base_url=context.qdrant_url, timeout=60.0) as client:
-            collection = "rah_assets_restore_v1"
-            created = client.put(
-                f"/collections/{collection}",
-                json={"vectors": {"size": 1024, "distance": "Cosine"}},
-            )
-            created.raise_for_status()
-            for offset in range(0, len(documents), self.batch_size):
-                batch = documents[offset : offset + self.batch_size]
-                texts = [f"{document['title']}\n{document['text']}" for document in batch]
-                vectors = _hashing_encode(texts, dimension=1024)
-                points = [
-                    {
-                        "id": document["document_id"],
-                        "vector": vector,
-                        "payload": dict(document),
-                    }
-                    for document, vector in zip(batch, vectors, strict=True)
-                ]
-                response = client.put(
-                    f"/collections/{collection}/points",
-                    params={"wait": "true"},
-                    json={"points": points},
-                )
-                response.raise_for_status()
-            details = client.get(f"/collections/{collection}")
-            details.raise_for_status()
-            payload = details.json()["result"]
-            return {
-                "status": "verified",
-                "collection": collection,
-                "point_count": int(payload.get("points_count") or 0),
-            }
-
     def _fixed_query_probe(
         self,
         context: IndexRebuildContext,
@@ -337,7 +278,6 @@ class MetadataIndexRebuilder:
             return {
                 "asset_id": None,
                 "keyword_exact_hit": True,
-                "vector_self_hit": True,
             }
         document = documents[0]
         asset_id = str(document["asset_id"])
@@ -351,24 +291,11 @@ class MetadataIndexRebuilder:
             )
             keyword.raise_for_status()
             keyword_ids = [str(hit["asset_id"]) for hit in keyword.json()["hits"]]
-            query_vector = _hashing_encode(
-                [f"{title}\n{document['text']}"],
-                dimension=1024,
-            )[0]
-            vector = client.post(
-                f"{context.qdrant_url}/collections/rah_assets_restore_v1/points/search",
-                json={"vector": query_vector, "limit": 1, "with_payload": True},
-            )
-            vector.raise_for_status()
-            vector_values = vector.json().get("result", [])
-            vector_id = str(vector_values[0]["payload"]["asset_id"]) if vector_values else None
         return {
             "asset_id": asset_id,
             "query_title": title,
             "keyword_top5": keyword_ids,
             "keyword_exact_hit": asset_id in keyword_ids,
-            "vector_top1": vector_id,
-            "vector_self_hit": vector_id == asset_id,
         }
 
 
@@ -384,11 +311,6 @@ def render_restore_compose(plan: RestorePlan) -> str:
         "wget -q -O - "
         f"--header='Authorization: Bearer {plan.meili_key}' "
         "http://127.0.0.1:7700/health | grep -q available"
-    )
-    qdrant_health = (
-        "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && "
-        'printf "GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\n'
-        'Connection: close\\r\\n\\r\\n" >&3 && grep -q "200 OK" <&3\''
     )
     return f"""services:
   postgres:
@@ -425,24 +347,9 @@ def render_restore_compose(plan: RestorePlan) -> str:
       retries: 30
     restart: "no"
 
-  qdrant:
-    image: qdrant/qdrant:v1.13.6
-    ports:
-      - "127.0.0.1:{plan.ports.qdrant_http}:6333"
-      - "127.0.0.1:{plan.ports.qdrant_grpc}:6334"
-    volumes:
-      - qdrant-restore-data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", {json.dumps(qdrant_health)}]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-    restart: "no"
-
 volumes:
   postgres-restore-data:
   meili-restore-data:
-  qdrant-restore-data:
 """
 
 
@@ -662,7 +569,6 @@ def run_restore_rehearsal(
             ),
             meili_url=f"http://127.0.0.1:{plan.ports.meilisearch}",
             meili_key=plan.meili_key,
-            qdrant_url=f"http://127.0.0.1:{plan.ports.qdrant_http}",
         )
         index_result = dict(index_rebuilder.rebuild(context))
         report["index_rebuild"] = index_result
@@ -711,21 +617,6 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _hashing_encode(texts: Sequence[str], *, dimension: int) -> list[list[float]]:
-    """Match the platform's deterministic offline embedding without model imports."""
-
-    vectors: list[list[float]] = []
-    for text in texts:
-        vector = [0.0] * dimension
-        for token in text.casefold().split():
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            index = int.from_bytes(digest[:4], "big") % dimension
-            vector[index] += -1.0 if digest[4] & 1 else 1.0
-        norm = math.sqrt(sum(value * value for value in vector)) or 1.0
-        vectors.append([value / norm for value in vector])
-    return vectors
 
 
 def _compose(plan: RestorePlan, arguments: Sequence[str]) -> str:

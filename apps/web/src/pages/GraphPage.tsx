@@ -1,16 +1,40 @@
 import { useQuery } from "@tanstack/react-query";
 import cytoscape from "cytoscape";
-import { ArrowRight, Network, Route } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  ArrowRight,
+  GitCompareArrows,
+  Network,
+  Route,
+  X,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { GraphEdge, GraphNode, GraphResponse } from "../api/types";
+import type {
+  Asset,
+  GraphEdge,
+  GraphNode,
+  GraphResponse,
+} from "../api/types";
+import { GraphNodeDrawer } from "../components/GraphNodeDrawer";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
+import { useCompare } from "../state/CompareContext";
 
 function graphParts(data?: GraphResponse) {
   const flexible = data as
-    | (GraphResponse & { assets?: GraphNode[]; relations?: GraphEdge[]; path?: GraphNode[] })
+    | (GraphResponse & {
+        assets?: GraphNode[];
+        relations?: GraphEdge[];
+        path?: GraphNode[];
+      })
     | undefined;
   return {
     nodes: flexible?.nodes ?? flexible?.assets ?? flexible?.path ?? [],
@@ -25,10 +49,36 @@ function edgeEnds(edge: GraphEdge) {
   };
 }
 
-function GraphCanvas({ data }: { data: GraphResponse }) {
+function assetFromNode(node: GraphNode): Asset {
+  return {
+    id: node.id,
+    asset_type: node.asset_type,
+    title: node.title ?? node.label ?? node.id,
+    year: node.year,
+    domain_slugs: node.domain_slugs,
+    reading_status: node.reading_status,
+  };
+}
+
+function GraphCanvas({
+  data,
+  compareIds,
+  onSelectNode,
+  onToggleCompare,
+}: {
+  data: GraphResponse;
+  compareIds: readonly string[];
+  onSelectNode: (id: string) => void;
+  onToggleCompare: (id: string) => void;
+}) {
   const { nodes, edges } = graphParts(data);
   const containerRef = useRef<HTMLDivElement>(null);
-  const navigate = useNavigate();
+  const instanceRef = useRef<cytoscape.Core | null>(null);
+  const selectedSetRef = useRef(new Set(compareIds));
+
+  useEffect(() => {
+    selectedSetRef.current = new Set(compareIds);
+  }, [compareIds]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -43,6 +93,7 @@ function GraphCanvas({ data }: { data: GraphResponse }) {
             type: node.asset_type ?? "asset",
             status: node.reading_status ?? "unread",
             root: index === 0 ? "true" : "false",
+            compare: selectedSetRef.current.has(node.id) ? "true" : "false",
           },
         })),
         ...edges.flatMap((edge, index) => {
@@ -98,6 +149,16 @@ function GraphCanvas({ data }: { data: GraphResponse }) {
           style: { "background-color": "#fff0c9" },
         },
         {
+          selector: 'node[compare = "true"]',
+          style: {
+            "background-color": "#d7e6f8",
+            "border-color": "#2d7ed3",
+            "border-width": 3,
+            width: 44,
+            height: 44,
+          },
+        },
+        {
           selector: "edge",
           style: {
             width: 1.5,
@@ -134,25 +195,45 @@ function GraphCanvas({ data }: { data: GraphResponse }) {
       maxZoom: 3,
       wheelSensitivity: 0.22,
     });
+    instanceRef.current = instance;
     instance.on("tap", "node", (event) => {
       const id = String(event.target.id());
-      navigate(`/assets/${encodeURIComponent(id)}`);
+      const original = event.originalEvent;
+      if (original && (original.ctrlKey || original.metaKey)) {
+        onToggleCompare(id);
+      } else {
+        onSelectNode(id);
+      }
     });
-    return () => instance.destroy();
-  }, [edges, navigate, nodes]);
+    return () => {
+      instanceRef.current = null;
+      instance.destroy();
+    };
+  }, [edges, nodes, onSelectNode, onToggleCompare]);
+
+  useEffect(() => {
+    instanceRef.current?.elements().forEach((element) => {
+      element.data(
+        "compare",
+        selectedSetRef.current.has(element.id()) ? "true" : "false",
+      );
+    });
+  }, [compareIds]);
 
   return (
     <div
       className="graph-canvas cytoscape-canvas"
       ref={containerRef}
       role="img"
-      aria-label={`资产关系图，包含 ${nodes.length} 个节点和 ${edges.length} 条关系。可拖动、缩放并点击节点打开资产。`}
+      aria-label={`资产关系图，包含 ${nodes.length} 个节点和 ${edges.length} 条关系。单击查看详情，Ctrl/Cmd 点击多选对比。`}
     />
   );
 }
 
 export function GraphPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const compare = useCompare();
   const assetId = searchParams.get("asset_id") ?? "";
   const from = searchParams.get("from") ?? "";
   const to = searchParams.get("to") ?? "";
@@ -161,6 +242,8 @@ export function GraphPage() {
   const [fromInput, setFromInput] = useState(from);
   const [toInput, setToInput] = useState(to);
   const [pathMode, setPathMode] = useState(Boolean(from || to));
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [compareNotice, setCompareNotice] = useState<string | null>(null);
 
   useEffect(() => setIdInput(assetId), [assetId]);
 
@@ -176,6 +259,30 @@ export function GraphPage() {
   });
   const active = pathMode ? path : neighbors;
   const parts = graphParts(active.data);
+  const selectedNode =
+    parts.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const compareIds = useMemo(
+    () => compare.assets.map((item) => item.id),
+    [compare.assets],
+  );
+
+  const handleSelectNode = useCallback((id: string) => {
+    setSelectedNodeId(id);
+  }, []);
+
+  const toggleCompare = useCallback(
+    (id: string) => {
+      const node = parts.nodes.find((item) => item.id === id);
+      if (!node) return;
+      if (!compare.has(id) && compare.assets.length >= 4) {
+        setCompareNotice("最多同时对比 4 篇论文");
+        window.setTimeout(() => setCompareNotice(null), 2500);
+        return;
+      }
+      compare.toggle(assetFromNode(node));
+    },
+    [compare, parts.nodes],
+  );
 
   const submitNeighbors = (event: FormEvent) => {
     event.preventDefault();
@@ -199,10 +306,16 @@ export function GraphPage() {
       <PageHeader
         eyebrow="知识网络"
         title="关系图谱"
-        description="查看资产邻域，或寻找两篇论文之间的关系路径。"
+        description="查看资产邻域、节点详情，或寻找两篇论文之间的关系路径。"
       />
 
       <div className="graph-controls section-block">
+        <div className="graph-toolbar">
+          <p className="muted">
+            单击节点查看详情，Ctrl/Cmd 点击可多选对比。
+          </p>
+        </div>
+
         <div className="tab-list" role="tablist" aria-label="图谱查询方式">
           <button
             role="tab"
@@ -285,9 +398,52 @@ export function GraphPage() {
       ) : active.isError ? (
         <ErrorState error={active.error} retry={() => void active.refetch()} />
       ) : active.data && parts.nodes.length ? (
-        <div className="graph-layout">
-          <GraphCanvas data={active.data} />
+        <div className={`graph-layout ${selectedNode ? "has-drawer" : ""}`}>
+          <GraphCanvas
+            data={active.data}
+            compareIds={compareIds}
+            onSelectNode={handleSelectNode}
+            onToggleCompare={toggleCompare}
+          />
+          {selectedNode && (
+            <GraphNodeDrawer
+              node={selectedNode}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          )}
           <aside className="section-block graph-list">
+            {compare.assets.length > 0 && (
+              <div className="graph-compare-selection">
+                <div className="section-heading">
+                  <h2>已选对比</h2>
+                  <span className="count-badge">{compare.assets.length}/4</span>
+                </div>
+                {compareNotice && <p className="muted">{compareNotice}</p>}
+                <div className="graph-selected-list">
+                  {compare.assets.map((item) => (
+                    <div key={item.id}>
+                      <span>{item.title_zh || item.title}</span>
+                      <button
+                        className="icon-button"
+                        type="button"
+                        aria-label={`移除 ${item.title_zh || item.title}`}
+                        onClick={() => compare.remove(item.id)}
+                      >
+                        <X size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  className="button primary compact"
+                  type="button"
+                  disabled={compare.assets.length < 2}
+                  onClick={() => navigate("/compare")}
+                >
+                  <GitCompareArrows size={14} aria-hidden="true" /> 并排对比
+                </button>
+              </div>
+            )}
             <div className="section-heading">
               <h2>节点</h2>
               <span className="count-badge">{parts.nodes.length}</span>

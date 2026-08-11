@@ -231,7 +231,6 @@ def build_preflight_report(sources: list[LoadedSource]) -> dict[str, Any]:
             "api_8767_available": port_available("127.0.0.1", 8767),
             "postgres_5432_available": port_available("127.0.0.1", 5432),
             "meilisearch_7700_available": port_available("127.0.0.1", 7700),
-            "qdrant_6333_available": port_available("127.0.0.1", 6333),
         },
         "disk": {
             "total_bytes": usage.total,

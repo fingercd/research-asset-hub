@@ -313,8 +313,8 @@ cd "D:\ResearchLibrary\research-asset-hub"
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/build_indexes.py `
-  --version 20260726-domain-expansion `
-  --report work/validation/index-build-bge-m3.json
+  --version v1 `
+  --report work/validation/index-build.json
 ```
 
 有 HTML 时再执行：
@@ -378,9 +378,8 @@ Zotero 包仍需你在 Zotero/Better BibTeX 界面中确认导入。
 | `path_outside_root` | manifest 使用绝对路径或 `..`；改为相对于已声明 asset root 的路径 |
 | `asset_path_missing` | 路径拼写错误、文件尚未完成写入或盘符未挂载 |
 | 未批准弱合并 | 先核对是否同一论文，再由 Agent/用户显式更新审批清单 |
-| 搜索不到新内容 | 等抽取任务完成，并重建 Meilisearch/Qdrant 索引 |
+| 搜索不到新内容 | 等抽取任务完成，并重建 Meilisearch 索引 |
 | PDF/HTML 无法打开 | 检查表示 availability、网关健康和 HTML 审计报告 |
-| RAG 显示“资料库证据不足” | 当前召回没有足够可引用片段；先确认抽取和索引完成 |
 | Zotero 没有新条目 | CLI 只生成导入包，还需要在 Zotero 界面确认 |
 
 如果你只想日常阅读、搜索和批注，不需要执行这些命令；直接使用网站即可。网站操作详见 [完整使用手册](USER_MANUAL.md)。

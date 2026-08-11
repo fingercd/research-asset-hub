@@ -11,7 +11,7 @@ from typing import Literal
 
 import httpx
 import psycopg as psycopg
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from apps.api.config import ApiSettings
 
@@ -26,26 +26,11 @@ class ComponentHealth(BaseModel):
     latency_ms: float | None = None
 
 
-class SearchModelHealth(BaseModel):
-    state: Literal["cold", "warm"]
-    device: str | None = None
-
-
-class SearchModelsHealth(BaseModel):
-    state: Literal["cold", "warm"]
-    device: str | None = None
-    idle_seconds: float = Field(ge=0)
-    idle_for_seconds: float = Field(ge=0)
-    embedder: SearchModelHealth
-    reranker: SearchModelHealth
-
-
 class HealthResponse(BaseModel):
     service: Literal["research-asset-hub-api"] = "research-asset-hub-api"
     status: Literal["healthy", "degraded"]
     checked_at: datetime
     components: dict[str, ComponentHealth]
-    search_models: SearchModelsHealth
 
 
 def _safe_error(error: Exception) -> str:
@@ -56,12 +41,7 @@ def _safe_error(error: Exception) -> str:
 
 
 def _probe_database_sync(database_url: str, timeout_seconds: float) -> None:
-    """Execute the blocking psycopg probe outside the event-loop thread.
-
-    psycopg's async connection is incompatible with the default Windows
-    ProactorEventLoop. The synchronous driver is portable, while the outer
-    coroutine keeps the health API non-blocking.
-    """
+    """Execute the blocking psycopg probe outside the event-loop thread."""
 
     connect_timeout = max(1, math.ceil(timeout_seconds))
     with psycopg.connect(database_url, connect_timeout=connect_timeout) as connection:
@@ -88,7 +68,7 @@ async def probe_database(settings: ApiSettings) -> ComponentHealth:
             detail="PostgreSQL accepted a query.",
             latency_ms=round((perf_counter() - started) * 1000, 1),
         )
-    except Exception as error:  # A health endpoint must report failures, not raise them.
+    except Exception as error:
         return ComponentHealth(
             status="unavailable",
             detail=_safe_error(error),
@@ -113,7 +93,7 @@ async def probe_http(
             detail=f"{name} health endpoint returned HTTP {response.status_code}.",
             latency_ms=round((perf_counter() - started) * 1000, 1),
         )
-    except Exception as error:  # A health endpoint must report failures, not raise them.
+    except Exception as error:
         return ComponentHealth(
             status="unavailable",
             detail=_safe_error(error),
@@ -153,18 +133,13 @@ def probe_worker(path: Path, stale_after_seconds: float) -> ComponentHealth:
 
 
 async def collect_health(settings: ApiSettings) -> HealthResponse:
-    database, full_text, vector = await asyncio.gather(
+    database, full_text = await asyncio.gather(
         probe_database(settings),
         probe_http(
             name="Meilisearch",
             url=f"{settings.meilisearch_url.rstrip('/')}/health",
             timeout_seconds=settings.health_timeout_seconds,
             headers={"Authorization": f"Bearer {settings.meilisearch_api_key}"},
-        ),
-        probe_http(
-            name="Qdrant",
-            url=f"{settings.qdrant_url.rstrip('/')}/readyz",
-            timeout_seconds=settings.health_timeout_seconds,
         ),
     )
     worker = await asyncio.to_thread(
@@ -175,7 +150,6 @@ async def collect_health(settings: ApiSettings) -> HealthResponse:
     components = {
         "database": database,
         "full_text_index": full_text,
-        "vector_index": vector,
         "worker": worker,
     }
     overall: Literal["healthy", "degraded"] = (
@@ -187,11 +161,4 @@ async def collect_health(settings: ApiSettings) -> HealthResponse:
         status=overall,
         checked_at=datetime.now(UTC),
         components=components,
-        search_models=SearchModelsHealth(
-            state="cold",
-            idle_seconds=settings.search_model_idle_seconds,
-            idle_for_seconds=0,
-            embedder=SearchModelHealth(state="cold"),
-            reranker=SearchModelHealth(state="cold"),
-        ),
     )

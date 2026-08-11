@@ -79,13 +79,13 @@ describe("search API", () => {
 
     await api.search({
       q: "",
-      mode: "hybrid",
+      mode: "keyword",
       group_by: "paper",
       domain: "robotics",
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/search?mode=hybrid&group_by=paper&domain=robotics",
+      "/api/v1/search?mode=keyword&group_by=paper&domain=robotics",
       expect.any(Object),
     );
   });

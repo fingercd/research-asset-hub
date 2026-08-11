@@ -91,12 +91,10 @@ services:
       HUB_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
       HUB_MEILISEARCH_API_KEY_FILE: /run/secrets/meilisearch_master_key
       HUB_MEILISEARCH_URL: http://meilisearch:7700
-      HUB_QDRANT_URL: http://qdrant:6333
       HUB_SOURCES_CONFIG_PATH: /etc/research-asset-hub/sources.yaml
       HUB_WEB_HOST: 0.0.0.0
       HUB_WEB_ORIGIN: https://${HUB_DOMAIN:?set HUB_DOMAIN}
       HUB_WORKER_HEARTBEAT_PATH: /var/lib/research-asset-hub/worker-heartbeat.json
-      HF_HOME: /var/lib/research-asset-hub/models
     secrets:
       - gateway_secret
       - meilisearch_master_key
@@ -115,8 +113,6 @@ services:
       postgres:
         condition: service_healthy
       meilisearch:
-        condition: service_healthy
-      qdrant:
         condition: service_healthy
     healthcheck:
       test:
@@ -202,32 +198,6 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  qdrant:
-    image: qdrant/qdrant:v1.13.6
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-    volumes:
-      - qdrant-data:/qdrant/storage
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 15s
-    networks:
-      - data
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-
 networks:
   edge:
     ipam:
@@ -243,7 +213,6 @@ volumes:
   hub-state:
   meilisearch-data:
   postgres-data:
-  qdrant-data:
 
 secrets:
   gateway_secret:
