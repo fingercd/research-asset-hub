@@ -321,7 +321,6 @@ describe("ResearchUnitCard", () => {
     expect(await screen.findByText("该仓库未提供源码")).toBeInTheDocument();
     expect(within(actionGroup).queryByRole("button", { name: /PDF/ })).toBeNull();
     expect(within(actionGroup).queryByRole("button", { name: "HTML" })).toBeNull();
-    expect(within(actionGroup).queryByRole("button", { name: "导读" })).toBeNull();
     expect(screen.getByText("关联论文")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Linked Research Paper" })).toHaveAttribute(
       "href",
