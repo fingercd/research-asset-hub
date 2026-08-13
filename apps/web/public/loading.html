@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>研究资产库</title>
+    <style>
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      .card { width: 360px; text-align: center; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .sub { font-size: 12px; color: #94a3b8; margin-bottom: 24px; }
+      .step { font-size: 14px; margin-bottom: 16px; color: #cbd5e1; }
+      .bar { height: 4px; background: #1e293b; border-radius: 2px; overflow: hidden; }
+      .bar > div { height: 100%; width: 0; background: #38bdf8; transition: width 0.4s ease; }
+      .error { color: #f87171; font-size: 12px; margin-top: 16px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>研究资产库</h1>
+      <div class="sub">正在启动本地服务…</div>
+      <div class="step" id="step">准备中</div>
+      <div class="bar"><div id="bar"></div></div>
+      <div class="error" id="error"></div>
+    </div>
+    <script>
+      const STEPS = ["预检环境", "启动数据库", "启动搜索引擎", "数据迁移", "启动应用服务"];
+      window.__hubProgress = function (payload) {
+        const idx = STEPS.indexOf(payload.step);
+        const step = idx >= 0 ? STEPS[idx] : payload.step;
+        document.getElementById("step").textContent = step;
+        const done = STEPS.filter((s, i) => i < (idx >= 0 ? idx + 1 : 0)).length;
+        document.getElementById("bar").style.width =
+          (idx >= 0 ? Math.round(((idx + 1) / (STEPS.length + 1)) * 100) : 5) + "%";
+        const errorEl = document.getElementById("error");
+        if (payload.status === "failed") {
+          errorEl.textContent = (payload.detail || "启动失败") + "\n可点击右下角托盘重试。";
+        }
+      };
+      // 兜底:若壳在加载页初始化前已发出事件
+      window.__hubProgress && window.__hubProgress({ step: "预检环境", status: "pending" });
+    </script>
+  </body>
+</html>

@@ -1,4 +1,5 @@
-use tauri::{Manager, WindowEvent};
+use serde::Serialize;
+use tauri::{Emitter, Manager, WindowEvent};
 
 pub struct AppState {
     pub force_exit: std::sync::atomic::AtomicBool,
@@ -24,6 +25,15 @@ pub fn run() {
             force_exit: std::sync::atomic::AtomicBool::new(false),
         })
         .setup(|app| {
+            // 静态测试事件:验证 Rust→加载页进度桥(编排器在 Task 9 接入后替换为真实进度)
+            emit_startup_progress(
+                app.handle(),
+                &StartupProgress {
+                    step: "预检环境".into(),
+                    status: "pending".into(),
+                    detail: None,
+                },
+            )?;
             let window = app
                 .get_webview_window("main")
                 .expect("main window must exist");
@@ -45,4 +55,29 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running the desktop shell");
+}
+
+#[derive(Clone, Serialize)]
+pub struct StartupProgress {
+    pub step: String,
+    pub status: String, // "pending" | "done" | "failed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// 把 Rust 侧 startup-progress 事件桥接到加载页的 window.__hubProgress。
+/// 通过 evaluate_script 调用而非让加载页引 @tauri-apps/api,保持前端零依赖。
+pub fn emit_startup_progress(
+    app: &tauri::AppHandle,
+    progress: &StartupProgress,
+) -> tauri::Result<()> {
+    let json = serde_json::to_string(progress)
+        .map_err(|e| tauri::Error::Anyhow(e.into()))?;
+    let script = format!(
+        "window.__hubProgress && window.__hubProgress({json});"
+    );
+    if let Some(window) = app.get_webview_window("main") {
+        window.eval(&script)?;
+    }
+    Ok(())
 }
