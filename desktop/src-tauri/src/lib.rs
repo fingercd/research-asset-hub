@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 use orchestrator::{Orchestrator, StartupError, StepStatus, CANCEL_DETAIL};
 
@@ -199,6 +199,84 @@ pub fn run() {
                 while let Ok(signal) = rx.recv() {
                     match signal {
                         tray::TraySignal::Show => {}
+                        tray::TraySignal::CheckUpdate => {
+                            let current = handle.package_info().version.to_string();
+                            let dir = updater::default_updates_dir();
+                            // 更新源目录不存在时先建好,首次点「检查更新」即可直接放入
+                            // manifest.json 与安装包再重试;创建失败由下方 NoManifest 文案兜底。
+                            let _ = std::fs::create_dir_all(&dir);
+                            match updater::check(&current, &dir) {
+                                Ok(result) => {
+                                    if !result.update_available {
+                                        handle
+                                            .dialog()
+                                            .message(format!("当前版本 {current} 已是最新。"))
+                                            .title("检查更新")
+                                            .blocking_show();
+                                        continue;
+                                    }
+                                    let manifest =
+                                        result.manifest.expect("available implies manifest");
+                                    let notes = manifest.notes.clone().unwrap_or_default();
+                                    let ok = handle
+                                        .dialog()
+                                        .message(format!(
+                                            "发现新版本 {}{}\n\n立即下载并安装?",
+                                            manifest.version,
+                                            if notes.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!("\n\n更新说明:{notes}")
+                                            }
+                                        ))
+                                        .title("检查更新")
+                                        .buttons(MessageDialogButtons::OkCancelCustom(
+                                            "立即安装".into(),
+                                            "取消".into(),
+                                        ))
+                                        .blocking_show();
+                                    if !ok {
+                                        continue;
+                                    }
+                                    match updater::launch_installer(&dir, &manifest) {
+                                        Ok(()) => {
+                                            handle
+                                                .dialog()
+                                                .message("安装包已启动,安装完成后请重启软件。")
+                                                .title("检查更新")
+                                                .blocking_show();
+                                        }
+                                        Err(e) => {
+                                            handle
+                                                .dialog()
+                                                .message(format!("更新失败:{e}"))
+                                                .title("检查更新")
+                                                .blocking_show();
+                                        }
+                                    }
+                                }
+                                Err(updater::UpdateError::NoManifest) => {
+                                    handle
+                                        .dialog()
+                                        .message(format!(
+                                            "尚未配置更新源。将新版安装包与 manifest.json 一起放入更新目录后重试:\n{}",
+                                            dir.display()
+                                        ))
+                                        .title("检查更新")
+                                        .blocking_show();
+                                }
+                                Err(e) => {
+                                    handle
+                                        .dialog()
+                                        .message(format!(
+                                            "更新源不可用:{e}\n\n默认更新源:{}\n(将新版安装包与 manifest.json 放入该目录即可)",
+                                            dir.display()
+                                        ))
+                                        .title("检查更新")
+                                        .blocking_show();
+                                }
+                            }
+                        }
                         tray::TraySignal::Retry => run_startup(handle.clone()),
                         tray::TraySignal::Quit => {
                             let state = handle.state::<AppState>();

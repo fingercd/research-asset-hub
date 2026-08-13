@@ -1,4 +1,4 @@
-//! 系统托盘:显示/隐藏窗口、重试、退出。退出前调用编排器 shutdown 停全部后台。
+//! 系统托盘:显示/隐藏窗口、重试、检查更新、退出。退出前调用编排器 shutdown 停全部后台。
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -12,6 +12,7 @@ pub enum TraySignal {
     Show,
     Quit,
     Retry,
+    CheckUpdate,
 }
 
 /// 创建托盘;返回信号通道接收端,由 run() 主循环处理(窗口线程与编排器互斥)。
@@ -22,8 +23,9 @@ pub fn create_tray(
     let (tx, rx) = std::sync::mpsc::channel();
     let show = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
     let retry = MenuItem::with_id(app, "retry", "重试启动", retry_available, None::<&str>)?;
+    let update = MenuItem::with_id(app, "check-update", "检查更新…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &retry, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &retry, &update, &quit])?;
 
     let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
@@ -38,6 +40,9 @@ pub fn create_tray(
             }
             "retry" => {
                 let _ = tx.send(TraySignal::Retry);
+            }
+            "check-update" => {
+                let _ = tx.send(TraySignal::CheckUpdate);
             }
             "quit" => {
                 let _ = tx.send(TraySignal::Quit);
