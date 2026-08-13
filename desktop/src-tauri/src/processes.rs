@@ -92,9 +92,44 @@ pub fn kill_pid(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// 查询端口当前监听进程的 (PID, 命令行):PowerShell Get-NetTCPConnection
+/// -LocalPort <port> -State Listen 取 OwningProcess(PID),再经 list_processes
+/// 查该 PID 的命令行。供 Preflight 按端口归属识别残留进程——只有实际持有
+/// 冲突端口的进程且命令行匹配自有特征时才允许清理,避免误杀同栈但非壳启动
+/// 的无关进程。查询失败(无监听归属/权限/解析失败)返回 None,调用方按
+/// "端口无 PID 归属"处理:不清理,报错提示用户,宁可不杀不误杀。
+pub fn port_owner(port: u16) -> Option<(u32, String)> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "ConvertTo-Json -Compress @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess)"
+            ),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    // 同端口 IPv4/IPv6 双监听时返回数组,取首个 OwningProcess(通常同一进程)
+    let pid = match value.as_array().and_then(|items| items.first()) {
+        Some(item) => item.as_u64()?,
+        None => value.as_u64()?,
+    };
+    let pid = u32::try_from(pid).ok()?;
+    let cmd = list_processes()
+        .into_iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, cmd)| cmd)
+        .unwrap_or_default();
+    Some((pid, cmd))
+}
+
 /// 查询本机全部进程 (pid, 命令行),Windows 经 PowerShell Get-CimInstance。
-/// 供 Preflight 识别壳异常退出后残留的自有应用进程(命令行特征匹配)。
-/// 查询失败返回空列表:调用方按"无非自有进程可清理"处理,不影响报错路径。
+/// 供 port_owner 按 PID 取命令行。查询失败返回空列表:调用方按
+/// "无非自有进程可清理"处理,不影响报错路径。
 pub fn list_processes() -> Vec<(u32, String)> {
     let output = match Command::new("powershell")
         .args([

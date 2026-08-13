@@ -95,12 +95,14 @@ impl std::fmt::Display for StartupError {
 impl std::error::Error for StartupError {}
 
 type Probe = Box<dyn Fn(u16) -> bool + Send + Sync>;
-/// 全量进程 (pid, 命令行) 查询:生产实现经 PowerShell 查询,测试注入假数据。
-type CmdlineQuery = Box<dyn Fn() -> Vec<(u32, String)> + Send + Sync>;
+/// 端口持有者 (PID, 命令行) 查询:生产实现经 PowerShell 查询,测试注入假数据。
+type PortOwnerQuery = Box<dyn Fn(u16) -> Option<(u32, String)> + Send + Sync>;
 
 /// 自有应用进程的命令行特征:壳异常退出残留的 api/worker/gateway 经
 /// `python -m apps.{api,worker,asset_gateway}.main` 启动,gitnexus 经
-/// `powershell -File ...gitnexus.ps1 serve` 启动。匹配即视为本应用残留进程。
+/// `powershell -File ...gitnexus.ps1 serve` 启动。仅当进程同时实际持有冲突
+/// 端口(经 port_owner 按端口归属确认)时才视为本应用残留进程并清理,
+/// 同栈但非壳启动、未占用冲突端口的无关进程不会被误杀。
 const OWNED_PROCESS_PATTERNS: [&str; 4] = [
     "apps.api.main",
     "apps.worker.main",
@@ -108,12 +110,34 @@ const OWNED_PROCESS_PATTERNS: [&str; 4] = [
     "gitnexus",
 ];
 
+/// 命令行摘要:去首尾空白,超过 max 字符截断并以 "..." 结尾(按字符边界截取,
+/// 避免切开多字节字符)。报错提示用,帮助用户判断占用进程来源;空命令行返回
+/// 空串,调用方省略摘要部分。
+fn cmdline_summary(cmd: &str, max: usize) -> String {
+    let trimmed = cmd.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(max - 3).collect();
+    format!("{cut}...")
+}
+
+/// 端口占用者报错描述:含 PID 与命令行摘要,用户据此判断进程来源。
+fn occupied_summary(port: u16, pid: u32, cmd: &str) -> String {
+    let summary = cmdline_summary(cmd, 120);
+    if summary.is_empty() {
+        format!("端口 {port} 被进程 PID {pid} 占用")
+    } else {
+        format!("端口 {port} 被进程 PID {pid}({summary})占用")
+    }
+}
+
 pub struct Orchestrator {
     paths: RuntimePaths,
     data: DataPaths,
     ports: Ports,
     probe: Probe,
-    list_processes: CmdlineQuery,
+    port_owner: PortOwnerQuery,
     on_event: Box<dyn Fn(&StartupEvent) + Send + Sync>,
     children: Vec<ChildHandle>,
     shutting_down: Arc<AtomicBool>,
@@ -134,7 +158,7 @@ impl Orchestrator {
             data: data_paths(),
             ports,
             probe: Box::new(crate::processes::tcp_probe),
-            list_processes: Box::new(crate::processes::list_processes),
+            port_owner: Box::new(crate::processes::port_owner),
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -208,25 +232,44 @@ impl Orchestrator {
         self.children.clear();
     }
 
-    /// Preflight 端口冲突恢复:查询本机进程命令行,识别占位进程是否为自有
-    /// 应用进程(OWNED_PROCESS_PATTERNS 特征),是则 taskkill 清理后重探;
-    /// 非自有进程一律不动(可能是其他程序占用,交给报错路径提示用户)。
+    /// Preflight 端口冲突恢复:按端口归属识别占用进程——对每个 busy 端口查询
+    /// 实际持有者(port_owner: PID + 命令行),仅当命令行匹配自有特征
+    /// (OWNED_PROCESS_PATTERNS)才 taskkill 清理;非自有进程一律不动,
+    /// 记录「端口 X 被进程 PID Y(命令行摘要)占用」供报错提示。端口查询不到
+    /// 归属同样不杀(无法确认是本应用残留),宁可不杀不误杀。
     /// kill 失败(进程已退出/权限不足)不终止启动流程,由重探结果判定端口是否释放。
-    fn recover_stale_owned_processes(&self, busy: &mut Vec<u16>) {
-        let owned: Vec<u32> = (self.list_processes)()
-            .into_iter()
-            .filter(|(_, cmd)| OWNED_PROCESS_PATTERNS.iter().any(|p| cmd.contains(p)))
-            .map(|(pid, _)| pid)
-            .collect();
-        if owned.is_empty() {
-            return;
+    /// 返回仍占用端口的描述列表(含 PID 与命令行摘要),供 start 报错。
+    fn recover_stale_owned_processes(&self, busy: &mut Vec<u16>) -> Vec<String> {
+        let mut occupants: Vec<String> = Vec::new();
+        let mut killed_any = false;
+        for port in busy.iter().copied() {
+            match (self.port_owner)(port) {
+                Some((pid, cmd)) if OWNED_PROCESS_PATTERNS.iter().any(|p| cmd.contains(p)) => {
+                    let _ = crate::processes::kill_pid(pid);
+                    killed_any = true;
+                }
+                Some((pid, cmd)) => occupants.push(occupied_summary(port, pid, &cmd)),
+                None => occupants.push(format!("端口 {port} 被占用(无法查询占用进程)")),
+            }
         }
-        for pid in owned {
-            let _ = crate::processes::kill_pid(pid);
+        if killed_any {
+            // 给 OS 释放端口留时间,再重探一次
+            std::thread::sleep(Duration::from_millis(800));
+            busy.retain(|p| (self.probe)(*p));
+            if !busy.is_empty() {
+                // 清理后仍占用:持有者可能已更换,重新查询以给出准确提示
+                occupants.clear();
+                for port in busy.iter().copied() {
+                    match (self.port_owner)(port) {
+                        Some((pid, cmd)) => occupants.push(occupied_summary(port, pid, &cmd)),
+                        None => {
+                            occupants.push(format!("端口 {port} 被占用(无法查询占用进程)"))
+                        }
+                    }
+                }
+            }
         }
-        // 给 OS 释放端口留时间,再重探一次
-        std::thread::sleep(Duration::from_millis(800));
-        busy.retain(|p| (self.probe)(*p));
+        occupants
     }
 
     /// 运行可能耗时较长的同步命令(compose up --wait、alembic 迁移可达分钟级):
@@ -293,17 +336,22 @@ impl Orchestrator {
             .collect();
         if !busy.is_empty() {
             // 壳进程异常退出(如断电/强杀)会残留自有应用进程占端口:
-            // 识别命令行特征后 taskkill 清理并重探,避免用户必须手动处理。
-            self.recover_stale_owned_processes(&mut busy);
-        }
-        if !busy.is_empty() {
-            // fail 内部会先发出 (Preflight, Failed) 事件,此处不再手动 emit
-            return Err(self.fail(
-                Step::Preflight,
-                format!(
-                    "端口被占用: {busy:?}。可能是上次异常退出残留,可重启电脑或手动结束该进程"
-                ),
-            ));
+            // 按端口归属识别占用进程(实际持有该端口的 PID 且命令行匹配
+            // 自有特征)才 taskkill 清理并重探,避免误杀同栈但非壳启动的
+            // 无关进程;非自有占用者的 PID 与命令行摘要随报错提示用户。
+            let occupants = self.recover_stale_owned_processes(&mut busy);
+            if !busy.is_empty() {
+                // fail 内部会先发出 (Preflight, Failed) 事件,此处不再手动 emit
+                let detail = if occupants.is_empty() {
+                    format!("端口被占用: {busy:?}")
+                } else {
+                    format!("端口被占用: {}", occupants.join("; "))
+                };
+                return Err(self.fail(
+                    Step::Preflight,
+                    format!("{detail}。可能是上次异常退出残留,可重启电脑或手动结束该进程"),
+                ));
+            }
         }
         self.emit(Step::Preflight, StepStatus::Done, None);
 
@@ -569,7 +617,7 @@ impl Orchestrator {
     }
 }
 
-/// 仅测试可见:注入端口探测/命令行查询闭包与数据目录(tempdir),不触碰真实 Documents 数据区。
+/// 仅测试可见:注入端口探测/端口持有者查询闭包与数据目录(tempdir),不触碰真实 Documents 数据区。
 #[cfg(test)]
 impl Orchestrator {
     fn with_probe(
@@ -577,7 +625,7 @@ impl Orchestrator {
         data: DataPaths,
         ports: Ports,
         probe: impl Fn(u16) -> bool + Send + Sync + 'static,
-        list_processes: impl Fn() -> Vec<(u32, String)> + Send + Sync + 'static,
+        port_owner: impl Fn(u16) -> Option<(u32, String)> + Send + Sync + 'static,
         on_event: impl Fn(&StartupEvent) + Send + Sync + 'static,
     ) -> Self {
         Orchestrator {
@@ -585,7 +633,7 @@ impl Orchestrator {
             data,
             ports,
             probe: Box::new(probe),
-            list_processes: Box::new(list_processes),
+            port_owner: Box::new(port_owner),
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -600,7 +648,7 @@ impl Orchestrator {
         data: DataPaths,
         ports: Ports,
         probe: impl Fn(u16) -> bool + Send + Sync + 'static,
-        list_processes: impl Fn() -> Vec<(u32, String)> + Send + Sync + 'static,
+        port_owner: impl Fn(u16) -> Option<(u32, String)> + Send + Sync + 'static,
         on_event: impl Fn(&StartupEvent) + Send + Sync + 'static,
     ) -> Self {
         Orchestrator {
@@ -608,7 +656,7 @@ impl Orchestrator {
             data,
             ports,
             probe: Box::new(probe),
-            list_processes: Box::new(list_processes),
+            port_owner: Box::new(port_owner),
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
@@ -699,10 +747,11 @@ mod tests {
     fn events_fire_in_order_and_failure_stops() {
         let (root, paths, data) = fake_world();
         let (events, sink) = record();
-        // 注入恒 true 探测:Preflight 视关键端口为"被占用",命令行查询为空
-        // (无非自有进程可清理),启动在探测阶段即失败,假 exe 路径不会被真正执行。
+        // 注入恒 true 探测:Preflight 视关键端口为"被占用",端口持有者查询返回
+        // None(无归属 → 不清理,宁可不杀不误杀),启动在探测阶段即失败,
+        // 假 exe 路径不会被真正执行。
         let mut orch =
-            Orchestrator::with_probe(paths, data, test_ports(), |_| true, Vec::new, sink);
+            Orchestrator::with_probe(paths, data, test_ports(), |_| true, |_| None, sink);
         let result = orch.start();
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
@@ -740,11 +789,15 @@ mod tests {
         let (root, paths, data) = fake_world();
         let (events, sink) = record();
         // 探测:api 端口首次占用(残留进程),清理重探后释放;其余端口恒空闲。
-        // 命令行查询注入自有进程(特征 apps.api.main)→ 应被识别并清理(真实
-        // taskkill 对假 pid 失败被忽略,由重探结果判定)。重探通过后 Preflight Done,
-        // 流程进入 Postgres,假 initdb.exe 不存在 → Postgres Failed,序列结束。
+        // 端口持有者查询注入:api 端口归属自有进程(特征 apps.api.main)→ 应被
+        // 识别并清理(真实 taskkill 对假 pid 失败被忽略,由重探结果判定)。
+        // 重探通过后 Preflight Done,流程进入 Postgres,假 initdb.exe 不存在 →
+        // Postgres Failed,序列结束。仅 busy 的 api 端口被查询持有者且仅一次:
+        // 清理重探后端口已释放,不再二次查询,未占用端口的自有进程不会被误杀。
         let probes = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let probe_counter = probes.clone();
+        let owner_calls: Arc<Mutex<Vec<u16>>> = Arc::new(Mutex::new(Vec::new()));
+        let owner_record = owner_calls.clone();
         let ports = test_ports();
         let mut orch = Orchestrator::with_probe(
             paths,
@@ -757,7 +810,11 @@ mod tests {
                     false
                 }
             },
-            || vec![(4242, "python.exe -m apps.api.main".to_string())],
+            move |port| {
+                owner_record.lock().unwrap().push(port);
+                (port == ports.api)
+                    .then_some((4242, "python.exe -m apps.api.main".to_string()))
+            },
             sink,
         );
         let result = orch.start();
@@ -771,6 +828,11 @@ mod tests {
             probes.load(Ordering::SeqCst),
             2,
             "api 端口应被探测两次:初始 busy 检测 + 清理后重探"
+        );
+        assert_eq!(
+            *owner_calls.lock().unwrap(),
+            vec![ports.api],
+            "仅 busy 的 api 端口被查询持有者一次(清理重探通过后不再查询)"
         );
         let seq = events.lock().unwrap();
         assert!(
@@ -792,13 +854,22 @@ mod tests {
     fn preflight_reports_foreign_process_with_hint() {
         let (root, paths, data) = fake_world();
         let (events, sink) = record();
-        // 端口被占但命令行不匹配任何自有特征 → 不清理,报错并提示用户。
+        // 端口被占且实际持有者命令行不匹配任何自有特征 → 不清理,报错含
+        // 「端口 X 被进程 PID Y(命令行摘要)占用」;超长命令行截断为 120 字符摘要。
+        let ports = test_ports();
+        let long_cmd = format!("foreign-app.exe {}", "z".repeat(200));
         let mut orch = Orchestrator::with_probe(
             paths,
             data,
-            test_ports(),
+            ports,
             |_| true,
-            || vec![(999, "some-other-app.exe --serve".to_string())],
+            move |port| {
+                Some(if port == ports.gitnexus {
+                    (7777, long_cmd.clone())
+                } else {
+                    (999, "some-other-app.exe --serve".to_string())
+                })
+            },
             sink,
         );
         match orch.start() {
@@ -806,8 +877,55 @@ mod tests {
                 assert_eq!(step, Step::Preflight);
                 assert!(detail.contains("端口被占用"), "detail 应说明占用端口: {detail}");
                 assert!(
+                    detail.contains("端口 8767 被进程 PID 999(some-other-app.exe --serve)占用"),
+                    "非自有占用者应含 PID 与命令行摘要: {detail}"
+                );
+                assert!(
+                    detail.contains("端口 4747 被进程 PID 7777("),
+                    "超长命令行占用者同样应含 PID: {detail}"
+                );
+                assert!(
+                    !detail.contains(&"z".repeat(120)),
+                    "命令行摘要应截断到 120 字符以内: {detail}"
+                );
+                assert!(
+                    detail.contains("..."),
+                    "截断的摘要应以 ... 结尾: {detail}"
+                );
+                assert!(
                     detail.contains("重启电脑"),
                     "非自有进程占用时应提示重启电脑/手动结束: {detail}"
+                );
+            }
+            other => panic!("期望 Preflight 失败,得到: {other:?}"),
+        }
+        let seq = events.lock().unwrap();
+        assert_eq!(
+            *seq,
+            vec![
+                (Step::Preflight, StepStatus::Pending),
+                (Step::Preflight, StepStatus::Failed),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preflight_unresolvable_port_owner_reports_without_pid() {
+        let (root, paths, data) = fake_world();
+        let (events, sink) = record();
+        // 端口 busy 但查询不到持有者(如 Get-NetTCPConnection 失败/端口无监听
+        // 归属):无法确认归属 → 不清理(宁可不杀不误杀),报错提示端口占用且
+        // 注明无法查询占用进程。
+        let mut orch =
+            Orchestrator::with_probe(paths, data, test_ports(), |_| true, |_| None, sink);
+        match orch.start() {
+            Err(StartupError::StepFailed { step, detail }) => {
+                assert_eq!(step, Step::Preflight);
+                assert!(detail.contains("端口被占用"), "detail 应说明占用端口: {detail}");
+                assert!(
+                    detail.contains("端口 8767 被占用(无法查询占用进程)"),
+                    "查询不到持有者时应明确说明无法查询,而非猜测 PID: {detail}"
                 );
             }
             other => panic!("期望 Preflight 失败,得到: {other:?}"),
@@ -833,7 +951,7 @@ mod tests {
         // 执行报 NotFound → fail 发出 (Postgres, Failed) 事件后 start() 返回 Err,
         // 序列以 (Postgres, Pending) 后跟 (Postgres, Failed) 结束,无 Meili 及之后事件。
         let mut orch =
-            Orchestrator::with_probe(paths, data, test_ports(), |_| false, Vec::new, sink);
+            Orchestrator::with_probe(paths, data, test_ports(), |_| false, |_| None, sink);
         let result = orch.start();
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
@@ -895,7 +1013,7 @@ mod tests {
             data,
             test_ports(),
             |_| true,
-            Vec::new,
+            |_| None,
             sink,
         );
         match orch.start() {
@@ -936,7 +1054,7 @@ mod tests {
             data,
             ports,
             move |p| p == ports.postgres,
-            Vec::new,
+            |_| None,
             sink,
         )));
         // 与壳层一致:start 前取出取消令牌,打断时经令牌无锁置位——
@@ -1006,7 +1124,7 @@ mod tests {
             data,
             test_ports(),
             |_| false,
-            Vec::new,
+            |_| None,
             sink,
         )));
         let cancel = orch.lock().unwrap().cancel_token();
