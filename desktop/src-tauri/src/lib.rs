@@ -1,6 +1,9 @@
 use serde::Serialize;
 use tauri::{Emitter, Manager, WindowEvent};
 
+mod data_dir;
+mod runtime;
+
 pub struct AppState {
     pub force_exit: std::sync::atomic::AtomicBool,
 }
