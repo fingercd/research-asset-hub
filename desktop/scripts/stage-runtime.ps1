@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$PostgresZip,      # EDB PostgreSQL 16 Windows zip binaries 路径(必填,一次性下载)
     [string]$MeiliExe,         # meilisearch-windows-amd64.exe 路径(必填,一次性下载)
@@ -6,6 +6,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not (Test-Path $PostgresZip)) { throw "PostgresZip 路径不存在: $PostgresZip" }
+if (-not (Test-Path $MeiliExe)) { throw "MeiliExe 路径不存在: $MeiliExe" }
+if (-not (Test-Path $NodeZip)) { throw "NodeZip 路径不存在: $NodeZip" }
 $desktopRoot = Split-Path -Parent $PSScriptRoot          # desktop/
 $projectRoot = Split-Path -Parent $desktopRoot
 $stage = Join-Path $desktopRoot 'stage'
@@ -19,11 +22,16 @@ New-Item -ItemType Directory -Force -Path $runtimeDir, $appDir | Out-Null
 Write-Host '[2/5] 组装便携 Python + 项目依赖(拷 .venv)'
 $venvSource = Join-Path $projectRoot '.venv'
 if (-not (Test-Path $venvSource)) { throw '.venv 不存在,先在项目根跑 uv sync' }
-$pyHomeSource = Split-Path -Parent $venvSource   # 系统 python 根(如 anaconda3/envs/...)
+# 解析 .venv/pyvenv.cfg 的 home 行作为 Python 基环境目录(uv 创建的 .venv 位于项目根,
+# 其 home 指向 uv 托管的 CPython 安装目录,不能靠父目录推导)
+$pyvenvCfgSource = Join-Path $venvSource 'pyvenv.cfg'
+if (-not (Test-Path $pyvenvCfgSource)) { throw '项目 .venv 缺少 pyvenv.cfg,无法定位 Python 基环境' }
+$pyHomeSource = (Get-Content $pyvenvCfgSource | Where-Object { $_ -like 'home = *' } | Select-Object -First 1) -replace '^home = ', ''
+if (-not (Test-Path (Join-Path $pyHomeSource 'python.exe'))) { throw "Python 基环境不存在: $pyHomeSource" }
 $targetPy = Join-Path $runtimeDir 'python'
 New-Item -ItemType Directory -Force -Path $targetPy | Out-Null
-# 拷贝解释器:若项目 .venv 基于系统级 python,则拷贝其基环境核心文件
-# 简化路径:使用 python.org embeddable 不可行(缺依赖),改用完整基环境拷贝
+# 拷贝解释器:将 .venv 的基环境(uv 托管 CPython)整体拷入 runtime/python,
+# 便携包内 venv 的 pyvenv.cfg 将指向此目录,无需依赖开发机环境
 Copy-Item -Recurse -Force (Join-Path $pyHomeSource '*') (Join-Path $targetPy '')
 $targetVenv = Join-Path $runtimeDir 'venv'
 Copy-Item -Recurse -Force (Join-Path $venvSource '*') $targetVenv
@@ -38,8 +46,6 @@ if (Test-Path $pyvenvCfg) {
     $cfg | Set-Content $pyvenvCfg
     Write-Host '  已修正 venv pyvenv.cfg'
 }
-# 启动脚本:安装目录内的 python 需以其自身为解释器
-Copy-Item (Join-Path $targetPy 'python.exe') (Join-Path $runtimeDir 'python\python-real.exe') -ErrorAction SilentlyContinue
 
 Write-Host '[3/5] 组装便携 Node + gitnexus'
 New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'node') | Out-Null
@@ -50,10 +56,17 @@ if ($nodeRoot) {
     Remove-Item $nodeRoot.FullName -Force
 }
 # gitnexus 包整体拷贝(含其 node_modules 与 shim)
-$gitnexusGlobal = & (Join-Path $runtimeDir 'node\node.exe') (Join-Path $runtimeDir 'node\node_modules\npm\bin\npm-cli.js') root -g 2>$null | Out-Null
+# 必须用开发机 PATH 上的 npm 定位全局包:刚解压的便携 node 无全局安装记录
+$devNpm = Get-Command npm -ErrorAction SilentlyContinue
+if (-not $devNpm) { throw '开发机未找到 npm(需安装 Node.js 用于定位全局 gitnexus)' }
+$devNpmRoot = (& $devNpm.Source root -g).Trim()   # npm root -g 返回全局 node_modules 目录本身
 $gitnexusDir = Join-Path $runtimeDir 'gitnexus'
 New-Item -ItemType Directory -Force -Path $gitnexusDir | Out-Null
-$gitnexusPkg = Join-Path (Split-Path (& (Join-Path $runtimeDir 'node\node.exe') (Join-Path $runtimeDir 'node\node_modules\npm\bin\npm-cli.js') root -g)) 'node_modules\gitnexus'
+$gitnexusPkg = Join-Path $devNpmRoot 'gitnexus'
+if (-not (Test-Path $gitnexusPkg)) {
+    # 兜底:个别 npm 包装实现返回 prefix 而非 node_modules 目录
+    $gitnexusPkg = Join-Path (Split-Path $devNpmRoot) 'node_modules\gitnexus'
+}
 if (-not (Test-Path $gitnexusPkg)) {
     Write-Host '  未找到全局 gitnexus,请在开发机 `npm install -g gitnexus` 后重跑'
     throw 'gitnexus 全局包缺失'
@@ -65,14 +78,15 @@ $shim = @'
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
 $root = Split-Path -Parent $PSScriptRoot
 $node = Join-Path $root '..\node\node.exe'
-$entry = Join-Path $root 'pkg\bin\gitnexus.js'
+$entry = Join-Path $root 'pkg\dist\cli\index.js'
 if (-not (Test-Path $entry)) { $entry = Join-Path $root 'pkg\dist\cli.js' }
+if (-not (Test-Path $entry)) { $entry = Join-Path $root 'pkg\bin\gitnexus.js' }
 if (-not (Test-Path $entry)) { throw "gitnexus entry not found under $root" }
 & $node $entry @Args
 exit $LASTEXITCODE
 '@
 $shim | Set-Content (Join-Path $gitnexusDir 'gitnexus.ps1')
-Write-Host '  gitnexus shim 已生成(入口文件名按包实际结构核对)'
+Write-Host '  gitnexus shim 已生成(入口按 pkg\dist\cli\index.js 依序探测)'
 
 Write-Host '[4/5] 组装便携 PostgreSQL'
 New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'postgres') | Out-Null
