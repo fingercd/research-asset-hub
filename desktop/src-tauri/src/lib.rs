@@ -4,6 +4,7 @@ mod orchestrator;
 mod processes;
 mod runtime;
 mod tray;
+mod updater;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
