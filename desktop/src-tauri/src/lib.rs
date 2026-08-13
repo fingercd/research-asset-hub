@@ -2,6 +2,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, WindowEvent};
 
 mod data_dir;
+mod orchestrator;
 mod processes;
 mod runtime;
 
