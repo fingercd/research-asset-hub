@@ -38,7 +38,6 @@
         const idx = STEPS.indexOf(payload.step);
         const step = idx >= 0 ? STEPS[idx] : payload.step;
         document.getElementById("step").textContent = step;
-        const done = STEPS.filter((s, i) => i < (idx >= 0 ? idx + 1 : 0)).length;
         document.getElementById("bar").style.width =
           (idx >= 0 ? Math.round(((idx + 1) / (STEPS.length + 1)) * 100) : 5) + "%";
         const errorEl = document.getElementById("error");

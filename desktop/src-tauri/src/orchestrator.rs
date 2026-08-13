@@ -100,6 +100,8 @@ pub struct Orchestrator {
     on_event: Box<dyn Fn(&StartupEvent) + Send + Sync>,
     children: Vec<ChildHandle>,
     shutting_down: Arc<AtomicBool>,
+    /// 开发回退:postgres/meili 走 docker compose 容器而非便携二进制。
+    uses_containers: bool,
 }
 
 impl Orchestrator {
@@ -116,7 +118,14 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            uses_containers: false,
         }
+    }
+
+    /// 切到开发回退模式:postgres/meili 用 docker compose 容器,shutdown 时 compose stop。
+    pub fn with_containers(mut self) -> Self {
+        self.uses_containers = true;
+        self
     }
 
     fn emit(&self, step: Step, status: StepStatus, detail: Option<String>) {
@@ -174,6 +183,25 @@ impl Orchestrator {
     }
 
     fn start_postgres(&mut self) -> Result<(), StartupError> {
+        if self.uses_containers {
+            // 开发回退:compose 一并拉起 postgres 与 meilisearch,--wait 等待健康检查通过。
+            // workdir = 项目根(dev 下即 python_workdir),deploy/compose.yaml 相对其解析。
+            let status = StdCommand::new("docker")
+                .args(["compose", "-f", "deploy/compose.yaml", "up", "-d", "--wait"])
+                .current_dir(&self.paths.python_workdir)
+                .status()
+                .map_err(|e| self.fail(Step::Postgres, format!("docker compose 无法执行: {e}")))?;
+            if !status.success() {
+                return Err(self.fail(
+                    Step::Postgres,
+                    "docker compose up 失败,请确认 Docker Desktop 已启动",
+                ));
+            }
+            if !wait_for_port(self.ports.postgres, std::time::Duration::from_secs(60)) {
+                return Err(self.fail(Step::Postgres, "PostgreSQL 容器未在 60 秒内就绪"));
+            }
+            return Ok(());
+        }
         let bin = &self.paths.postgres_bin;
         let data = &self.data.postgres;
         if !postgres_initialized(data) {
@@ -226,6 +254,13 @@ impl Orchestrator {
     }
 
     fn start_meili(&mut self) -> Result<(), StartupError> {
+        if self.uses_containers {
+            // meili 容器已随 Postgres 步骤的 compose up 拉起,此处仅等端口就绪。
+            if !wait_for_port(self.ports.meili, std::time::Duration::from_secs(60)) {
+                return Err(self.fail(Step::Meili, "Meilisearch 容器未在 60 秒内就绪"));
+            }
+            return Ok(());
+        }
         if (self.probe)(self.ports.meili) {
             return Ok(());
         }
@@ -333,6 +368,14 @@ impl Orchestrator {
             let _ = kill_tree(handle);
         }
         self.children.clear();
+        if self.uses_containers {
+            // 只 stop 不下线:保留 compose 卷,下次启动复用数据。
+            let _ = StdCommand::new("docker")
+                .args(["compose", "-f", "deploy/compose.yaml", "stop"])
+                .current_dir(&self.paths.python_workdir)
+                .status();
+            return;
+        }
         // meili 由 kill_tree 已停;postgres 优雅停止
         if (self.probe)(self.ports.postgres) {
             let bin = &self.paths.postgres_bin;
@@ -365,6 +408,27 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            uses_containers: false,
+        }
+    }
+
+    /// 容器模式(开发回退)的测试构造:与 with_probe 相同,但 uses_containers = true。
+    fn with_probe_and_containers(
+        paths: RuntimePaths,
+        data: DataPaths,
+        ports: Ports,
+        probe: impl Fn(u16) -> bool + Send + Sync + 'static,
+        on_event: impl Fn(&StartupEvent) + Send + Sync + 'static,
+    ) -> Self {
+        Orchestrator {
+            paths,
+            data,
+            ports,
+            probe: Box::new(probe),
+            on_event: Box::new(on_event),
+            children: Vec::new(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            uses_containers: true,
         }
     }
 }
@@ -414,6 +478,7 @@ mod tests {
         (root, paths, data)
     }
 
+    #[allow(clippy::type_complexity)]
     fn record() -> (
         Arc<Mutex<Vec<(Step, StepStatus)>>>,
         impl Fn(&StartupEvent) + Send + Sync,
@@ -512,6 +577,43 @@ mod tests {
             !data_dir.join(".pwfile").exists(),
             "initdb 执行失败后不得残留密码文件"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn with_containers_flips_flag() {
+        // Orchestrator::new 只拼 data 路径,不触碰磁盘,可安全直用
+        let (root, paths, _data) = fake_world();
+        let (_, sink) = record();
+        let orch = Orchestrator::new(paths, test_ports(), sink);
+        assert!(!orch.uses_containers, "new 保持生产语义:不启用容器");
+        assert!(orch.with_containers().uses_containers, "with_containers 打开容器回退");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn container_mode_preflight_failure_and_shutdown_are_safe() {
+        let (root, paths, data) = fake_world();
+        let (events, sink) = record();
+        // 恒 true 探测:Preflight 视关键端口为占用,容器分支不会被执行到;
+        // 序列与生产模式一致,证明 uses_containers 不影响早期失败路径。
+        let mut orch =
+            Orchestrator::with_probe_and_containers(paths, data, test_ports(), |_| true, sink);
+        match orch.start() {
+            Err(StartupError::StepFailed { step, .. }) => assert_eq!(step, Step::Preflight),
+            other => panic!("期望 Preflight 失败,得到: {other:?}"),
+        }
+        let seq = events.lock().unwrap();
+        assert_eq!(
+            *seq,
+            vec![
+                (Step::Preflight, StepStatus::Pending),
+                (Step::Preflight, StepStatus::Failed),
+            ]
+        );
+        drop(seq);
+        // 容器模式 shutdown 执行 docker compose stop(fake root 下命令失败被忽略),不得 panic
+        orch.shutdown();
         let _ = std::fs::remove_dir_all(&root);
     }
 }

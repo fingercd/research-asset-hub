@@ -1,6 +1,5 @@
 //! 子进程管理:spawn(日志落盘)、taskkill 停进程树、TCP 端口探测。
 
-use std::io::Write;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -8,6 +7,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub struct ChildHandle {
+    /// 子进程语义标识(api/worker/…),供诊断日志使用
+    #[allow(dead_code)]
     pub name: String,
     child: Mutex<Child>,
     pub pid: u32,
@@ -20,7 +21,7 @@ pub fn spawn(
     cwd: &Path,
     log_file: &Path,
 ) -> std::io::Result<ChildHandle> {
-    let mut log = std::fs::OpenOptions::new()
+    let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_file)?;
