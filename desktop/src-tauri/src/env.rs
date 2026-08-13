@@ -40,6 +40,10 @@ fn load_or_create_meili_key(secrets_dir: &Path) -> io::Result<String> {
     Ok(key)
 }
 
+/// 业务库名:initdb 只建 postgres/template0/template1 模板库,业务库由壳的
+/// ensure_database 显式创建,alembic 迁移经 HUB_DATABASE_URL 连接它。
+pub const APP_DB_NAME: &str = "research_asset_hub";
+
 pub fn prepare(ports: &Ports, secrets_dir: &Path) -> io::Result<()> {
     if std::env::var("HUB_GATEWAY_SECRET").map(|v| v.trim().is_empty()).unwrap_or(true) {
         std::env::set_var("HUB_GATEWAY_SECRET", random_base64(48));
@@ -52,8 +56,8 @@ pub fn prepare(ports: &Ports, secrets_dir: &Path) -> io::Result<()> {
         let pw = std::env::var("HUB_POSTGRES_PASSWORD")
             .unwrap_or_else(|_| "research_hub_local".to_string());
         let url = format!(
-            "postgresql://research_hub:{pw}@127.0.0.1:{}/research_asset_hub",
-            ports.postgres
+            "postgresql://research_hub:{pw}@127.0.0.1:{}/{}",
+            ports.postgres, APP_DB_NAME
         );
         std::env::set_var("HUB_DATABASE_URL", &url);
         std::env::set_var("DATABASE_URL", url.replace("postgresql://", "postgresql+psycopg://"));

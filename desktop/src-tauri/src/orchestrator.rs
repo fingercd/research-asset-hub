@@ -145,6 +145,8 @@ pub struct Orchestrator {
     cancel: Arc<AtomicBool>,
     /// 开发回退:postgres/meili 走 docker compose 容器而非便携二进制。
     uses_containers: bool,
+    /// 业务库确保逻辑:生产为 None(走 ensure_database),测试可注入闭包。
+    ensure_db: Option<Box<dyn Fn(&Orchestrator) -> Result<(), StartupError> + Send + Sync>>,
 }
 
 impl Orchestrator {
@@ -164,6 +166,7 @@ impl Orchestrator {
             shutting_down: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: false,
+            ensure_db: None,
         }
     }
 
@@ -290,6 +293,9 @@ impl Orchestrator {
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
+        // 显式 null:壳是 GUI 程序无控制台 stdio,且避免子进程继承怪异句柄
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         let mut child = cmd
             .spawn()
             .map_err(|e| self.fail(step, format!("{} 无法执行: {e}", program.display())))?;
@@ -422,7 +428,14 @@ impl Orchestrator {
             let pwfile = self.data.root.join(".pwfile-initdb");
             std::fs::write(&pwfile, &pw)
                 .map_err(|e| self.fail(Step::Postgres, format!("无法写密码文件: {e}")))?;
-            let out = StdCommand::new(bin.join("initdb.exe"))
+            // initdb 的 stdio 走 null/文件而非管道:initdb 会启动短命 postgres --boot
+            // 子进程,子进程继承管道写端会让读端永远等不到 EOF 而挂起
+            let initdb_log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.log_file("postgres-initdb"))
+                .map_err(|e| self.fail(Step::Postgres, format!("无法打开 initdb 日志: {e}")))?;
+            let status = StdCommand::new(bin.join("initdb.exe"))
                 .args([
                     "-D",
                     data.to_str().unwrap_or_default(),
@@ -434,24 +447,32 @@ impl Orchestrator {
                     "UTF8",
                     "--locale=C",
                 ])
-                .output();
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(initdb_log))
+                .status();
             // 无论 initdb 执行成功、失败还是无法执行都清理密码文件:
             // spawn 失败路径同样不能残留明文密码,忽略删除错误
             let _ = std::fs::remove_file(&pwfile);
-            let out =
-                out.map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+            let status =
+                status.map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
+            if !status.success() {
                 return Err(self.fail(
                     Step::Postgres,
-                    format!("initdb 失败: {}", stderr.trim()),
+                    "initdb 失败,详见日志目录 postgres-initdb.log",
                 ));
             }
         }
         // 启动(已有实例则 pg_ctl 报错,按端口探测判断)
         if !(self.probe)(self.ports.postgres) {
             let log = self.log_file("postgres");
-            let out = StdCommand::new(bin.join("pg_ctl.exe"))
+            // pg_ctl 的 stdio 走 null/文件而非管道:pg_ctl start 启动的 postgres
+            // 长驻并继承管道写端,读端(.output)永远等不到 EOF 而挂起
+            let ctl_log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.log_file("postgres-ctl"))
+                .map_err(|e| self.fail(Step::Postgres, format!("无法打开 pg_ctl 日志: {e}")))?;
+            let status = StdCommand::new(bin.join("pg_ctl.exe"))
                 .args([
                     "-D",
                     data.to_str().unwrap_or_default(),
@@ -461,13 +482,14 @@ impl Orchestrator {
                     &format!("-p {} -c listen_addresses=127.0.0.1", self.ports.postgres),
                     "start",
                 ])
-                .output()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(ctl_log))
+                .status()
                 .map_err(|e| self.fail(Step::Postgres, format!("pg_ctl 无法执行: {e}")))?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+            if !status.success() {
                 return Err(self.fail(
                     Step::Postgres,
-                    format!("pg_ctl start 失败: {}", stderr.trim()),
+                    "pg_ctl start 失败,详见日志目录 postgres-ctl.log",
                 ));
             }
         }
@@ -475,7 +497,59 @@ impl Orchestrator {
             self.check_cancelled(Step::Postgres)?;
             return Err(self.fail(Step::Postgres, "PostgreSQL 未在 30 秒内就绪"));
         }
+        // initdb 只建 postgres 模板库,业务库(alembic 迁移连接它)需显式创建。
+        // 幂等:数据目录保留而库已存在时,createdb 报 already exists,psql 复查后视为成功。
+        self.run_ensure_db()?;
         Ok(())
+    }
+
+    /// 业务库确保入口:生产走 ensure_database,测试可经 with_ensure_db 注入。
+    fn run_ensure_db(&self) -> Result<(), StartupError> {
+        match &self.ensure_db {
+            Some(f) => f(self),
+            None => self.ensure_database(),
+        }
+    }
+
+    /// 确保业务库存在(见 start_postgres 注释)。createdb/psql 均为短命进程,
+    /// 无长命子进程继承管道问题,可用 .output() 捕获错误信息。
+    fn ensure_database(&self) -> Result<(), StartupError> {
+        let bin = &self.paths.postgres_bin;
+        let port = self.ports.postgres.to_string();
+        let db = crate::env::APP_DB_NAME;
+        let created = StdCommand::new(bin.join("createdb.exe"))
+            .args(["-h", "127.0.0.1", "-p", &port, "-U", "research_hub", db])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| self.fail(Step::Postgres, format!("createdb 无法执行: {e}")))?;
+        if created.status.success() {
+            return Ok(());
+        }
+        // createdb 失败最常见原因是库已存在:psql 复查,存在即视为成功
+        let check = StdCommand::new(bin.join("psql.exe"))
+            .args([
+                "-h",
+                "127.0.0.1",
+                "-p",
+                &port,
+                "-U",
+                "research_hub",
+                "-d",
+                "postgres",
+                "-tAc",
+                &format!("SELECT 1 FROM pg_database WHERE datname='{db}'"),
+            ])
+            .output()
+            .map_err(|e| self.fail(Step::Postgres, format!("psql 无法执行: {e}")))?;
+        if String::from_utf8_lossy(&check.stdout).contains('1') {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&created.stderr);
+        Err(self.fail(
+            Step::Postgres,
+            format!("创建数据库 {db} 失败: {}", stderr.trim()),
+        ))
     }
 
     fn start_meili(&mut self) -> Result<(), StartupError> {
@@ -649,7 +723,17 @@ impl Orchestrator {
             shutting_down: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: false,
+            ensure_db: None,
         }
+    }
+
+    /// 测试注入:替换 ensure_database 行为(生产为 None 走真实 createdb/psql)。
+    fn with_ensure_db(
+        mut self,
+        f: impl Fn(&Orchestrator) -> Result<(), StartupError> + Send + Sync + 'static,
+    ) -> Self {
+        self.ensure_db = Some(Box::new(f));
+        self
     }
 
     /// 容器模式(开发回退)的测试构造:与 with_probe 相同,但 uses_containers = true。
@@ -672,6 +756,7 @@ impl Orchestrator {
             shutting_down: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: true,
+            ensure_db: None,
         }
     }
 }
@@ -1191,7 +1276,8 @@ mod tests {
             move |p| p == ports.postgres,
             |_| None,
             sink,
-        )));
+        )
+        .with_ensure_db(|_| Ok(()))));
         // 与壳层一致:start 前取出取消令牌,打断时经令牌无锁置位——
         // start 全程持有编排锁,直接拿锁置位取消会被阻塞到 start 结束。
         let cancel = orch.lock().unwrap().cancel_token();
