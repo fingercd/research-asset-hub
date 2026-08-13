@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -48,6 +48,13 @@ class ApiSettings(BaseSettings):
 
     gateway_origin: str = "http://127.0.0.1:8766"
     web_origin: str = "http://127.0.0.1:8765"
+    desktop_origins: Annotated[list[str], NoDecode] = Field(
+        default=["http://tauri.localhost", "tauri://localhost"],
+        description=(
+            "桌面壳(Tauri WebView2)的浏览器 Origin,纳入 CORS 与写保护白名单。"
+            "环境变量 HUB_DESKTOP_ORIGINS 用逗号分隔覆盖。"
+        ),
+    )
     gitnexus_url: str = "http://127.0.0.1:4747"
     web_api_proxy_timeout_seconds: float = Field(default=180.0, gt=0, le=3600)
     gateway_secret: str = ""
@@ -66,6 +73,15 @@ class ApiSettings(BaseSettings):
     obsidian_hub_directory: str = "00_Home/Research Asset Hub"
     zotero_base_url: str = "http://127.0.0.1:23119"
     zotero_export_path: Path = PROJECT_ROOT / "outputs" / "zotero"
+
+    @field_validator("desktop_origins", mode="before")
+    @classmethod
+    def _split_desktop_origins(cls, value: object) -> object:
+        """把逗号分隔的环境变量串拆成列表;已是列表则原样返回。"""
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
 @lru_cache(maxsize=1)
 def get_settings() -> ApiSettings:
     return ApiSettings()

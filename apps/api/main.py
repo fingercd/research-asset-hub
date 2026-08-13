@@ -53,7 +53,11 @@ def create_app(
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
+        allow_origins=[
+            "http://127.0.0.1:8765",
+            "http://localhost:8765",
+            *app_settings.desktop_origins,
+        ],
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
@@ -77,6 +81,7 @@ def create_app(
                     app_settings.web_origin,
                     app_settings.web_origin.replace("127.0.0.1", "localhost"),
                     "http://testserver",
+                    *app_settings.desktop_origins,
                 }
                 csrf_token = request.headers.get("x-research-hub-csrf")
                 if origin not in allowed_origins or csrf_token != "1":
