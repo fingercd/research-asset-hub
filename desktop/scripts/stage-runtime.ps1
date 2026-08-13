@@ -26,7 +26,7 @@ if (-not (Test-Path $venvSource)) { throw '.venv 不存在,先在项目根跑 uv
 # 其 home 指向 uv 托管的 CPython 安装目录,不能靠父目录推导)
 $pyvenvCfgSource = Join-Path $venvSource 'pyvenv.cfg'
 if (-not (Test-Path $pyvenvCfgSource)) { throw '项目 .venv 缺少 pyvenv.cfg,无法定位 Python 基环境' }
-$pyHomeSource = (Get-Content $pyvenvCfgSource | Where-Object { $_ -like 'home = *' } | Select-Object -First 1) -replace '^home = ', ''
+$pyHomeSource = (Get-Content $pyvenvCfgSource -Encoding UTF8 | Where-Object { $_ -like 'home = *' } | Select-Object -First 1) -replace '^home = ', ''
 if (-not (Test-Path (Join-Path $pyHomeSource 'python.exe'))) { throw "Python 基环境不存在: $pyHomeSource" }
 $targetPy = Join-Path $runtimeDir 'python'
 New-Item -ItemType Directory -Force -Path $targetPy | Out-Null
@@ -64,8 +64,9 @@ $gitnexusDir = Join-Path $runtimeDir 'gitnexus'
 New-Item -ItemType Directory -Force -Path $gitnexusDir | Out-Null
 $gitnexusPkg = Join-Path $devNpmRoot 'gitnexus'
 if (-not (Test-Path $gitnexusPkg)) {
-    # 兜底:个别 npm 包装实现返回 prefix 而非 node_modules 目录
-    $gitnexusPkg = Join-Path (Split-Path $devNpmRoot) 'node_modules\gitnexus'
+    # 兜底:个别 npm 包装实现返回 prefix 而非 node_modules 目录,
+    # 此时直接在其下拼接 node_modules\gitnexus(prefix 本身不剥层)
+    $gitnexusPkg = Join-Path $devNpmRoot 'node_modules\gitnexus'
 }
 if (-not (Test-Path $gitnexusPkg)) {
     Write-Host '  未找到全局 gitnexus,请在开发机 `npm install -g gitnexus` 后重跑'
@@ -76,7 +77,7 @@ Copy-Item -Recurse -Force $gitnexusPkg (Join-Path $gitnexusDir 'pkg')
 $shim = @'
 # gitnexus shim (portable)
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
-$root = Split-Path -Parent $PSScriptRoot
+$root = $PSScriptRoot
 $node = Join-Path $root '..\node\node.exe'
 $entry = Join-Path $root 'pkg\dist\cli\index.js'
 if (-not (Test-Path $entry)) { $entry = Join-Path $root 'pkg\dist\cli.js' }
