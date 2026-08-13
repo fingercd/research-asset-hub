@@ -33,9 +33,12 @@ def repository_components(external_url: str | None) -> tuple[str, str] | None:
     except ValueError:
         return None
     parts = [part for part in parsed.path.split("/") if part]
-    if parsed.hostname and "huggingface.co" in parsed.hostname:
+    hostname = (parsed.hostname or "").casefold()
+    if hostname == "huggingface.co":
         if parts and parts[0] in _HUGGINGFACE_PREFIXES:
             parts = parts[1:]
+    elif hostname not in _CODE_HOSTS:
+        return None
     parts = [part[:-4] if part.endswith(".git") else part for part in parts]
     if len(parts) < 2:
         return None

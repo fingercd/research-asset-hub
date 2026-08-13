@@ -26,6 +26,8 @@ class ApiSettings(BaseSettings):
     database_url: str = (
         "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub"
     )
+    # 最低要求的数据库迁移修订（>= 语义：数据库修订是它本身或其后代即可）。
+    # tests/domain/test_migrations.py 断言该默认值与最新迁移 head 一致。
     database_required_revision: str = "0003_search_rag_integrations"
     database_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     database_require_migrations: bool = True
@@ -40,6 +42,7 @@ class ApiSettings(BaseSettings):
     worker_max_files_per_representation: int = Field(default=1000, ge=1, le=100_000)
     worker_max_chunks_per_representation: int = Field(default=20_000, ge=1, le=1_000_000)
     worker_max_file_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
+    # 代码符号索引默认关闭；置 true 启用 tree-sitter 符号抽取（依赖已随包安装）。
     worker_tree_sitter_enabled: bool = False
     health_timeout_seconds: float = Field(default=1.5, gt=0, le=30)
 
