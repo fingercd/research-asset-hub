@@ -1,6 +1,10 @@
 //! 检查更新:更新源目录(默认 Documents\ResearchAssetHub\updates)内的 manifest.json
 //! 格式: {"version": "0.2.0", "installer": "Hub-Setup-0.2.0.exe", "notes": "..."}
 //! installer 与 manifest 同目录;有新版则运行安装器(NSIS 静默)。
+//!
+//! 后续项:安装包 Authenticode 签名校验本期未实现(个人单机工具,更新源为
+//! 本地目录,确认框已提示用户核对文件名与来源可信);如更新源迁至网络,
+//! 须在 launch_installer 前校验签名链再执行。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

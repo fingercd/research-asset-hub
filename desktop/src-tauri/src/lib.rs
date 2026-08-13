@@ -227,16 +227,19 @@ pub fn run() {
                                     let manifest =
                                         result.manifest.expect("available implies manifest");
                                     let notes = manifest.notes.clone().unwrap_or_default();
+                                    // 确认框展示安装包文件名并提示来源信任边界:
+                                    // 更新源目录位于本机,任意本地程序均可放置文件。
                                     let ok = handle
                                         .dialog()
                                         .message(format!(
-                                            "发现新版本 {}{}\n\n立即下载并安装?",
+                                            "发现新版本 {}{}\n\n即将运行安装包:{}\n\n请确认该文件来源可信(更新源目录位于本机,任意本地程序可放置文件)。\n\n立即下载并安装?",
                                             manifest.version,
                                             if notes.is_empty() {
                                                 String::new()
                                             } else {
                                                 format!("\n\n更新说明:{notes}")
-                                            }
+                                            },
+                                            manifest.installer,
                                         ))
                                         .title("检查更新")
                                         .buttons(MessageDialogButtons::OkCancelCustom(
