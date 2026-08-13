@@ -84,9 +84,14 @@ fn first_line(bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// 全局计数器:rustc 测试默认并行执行,tmp_root 的 root 须逐实例唯一,
+    /// 避免并行的 remove_dir_all 删掉其他测试正在使用的目录。
+    static TMP_ROOT_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
     fn tmp_root() -> std::path::PathBuf {
+        let n = TMP_ROOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
-            "hub-runtime-test-{}",
+            "hub-runtime-test-{}-{n}",
             std::process::id()
         ));
         std::fs::create_dir_all(dir.join("runtime/postgres/bin")).unwrap();
