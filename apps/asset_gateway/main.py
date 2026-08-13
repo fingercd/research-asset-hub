@@ -29,23 +29,10 @@ from apps.asset_gateway.theme import (
     theme_etag,
 )
 from packages.domain.models import Representation, RepresentationMount, Source
+from packages.security.sensitive_names import SENSITIVE_FILE_NAMES
 
 COOKIE_NAME = "rah_gateway_session"
 PRESENTATION_COOKIE_NAME = "rah_gateway_presentation"
-_SENSITIVE_NAMES = frozenset(
-    {
-        ".npmrc",
-        ".pypirc",
-        ".sandbox-secrets",
-        "auth.json",
-        "credentials.json",
-        "id_dsa",
-        "id_ed25519",
-        "id_rsa",
-        "secrets.json",
-        "token.json",
-    }
-)
 _HTML_REPRESENTATION_TYPES = frozenset({"html", "guide", "analysis", "html_document"})
 
 
@@ -133,7 +120,7 @@ def _mount_match(mount_path: str, request_path: str) -> str | None:
 def _is_sensitive_path(path: Path) -> bool:
     for part in path.parts:
         normalized = part.casefold()
-        if normalized.startswith(".") or normalized in _SENSITIVE_NAMES:
+        if normalized.startswith(".") or normalized in SENSITIVE_FILE_NAMES:
             return True
     return False
 

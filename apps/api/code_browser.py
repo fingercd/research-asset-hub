@@ -8,24 +8,10 @@ from typing import Any
 from apps.api.editor import resolve_editor_path
 from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from packages.domain.models import Representation
+from packages.security.sensitive_names import SENSITIVE_FILE_NAMES
 
 MAX_PREVIEW_BYTES = 512 * 1024
 MAX_DIRECTORY_ENTRIES = 400
-
-_SENSITIVE_NAMES = frozenset(
-    {
-        ".npmrc",
-        ".pypirc",
-        ".sandbox-secrets",
-        "auth.json",
-        "credentials.json",
-        "id_dsa",
-        "id_ed25519",
-        "id_rsa",
-        "secrets.json",
-        "token.json",
-    }
-)
 _IGNORED_DIRECTORIES = frozenset(
     {
         ".git",
@@ -100,7 +86,7 @@ def _relative_path(value: str | None) -> str:
 
 def _is_hidden_or_sensitive(path: Path) -> bool:
     name = path.name.casefold()
-    return path.name.startswith(".") or name in _SENSITIVE_NAMES
+    return path.name.startswith(".") or name in SENSITIVE_FILE_NAMES
 
 
 def _is_ignored_directory(path: Path) -> bool:
@@ -254,5 +240,4 @@ def read_code_file(
         "content": content,
         "previewable": True,
         "truncated": truncated,
-            "reason": None,
     }

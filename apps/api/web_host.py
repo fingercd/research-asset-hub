@@ -28,6 +28,7 @@ _RESPONSE_HEADERS = {
     "retry-after",
     "x-request-id",
 }
+MAX_PROXY_BODY_BYTES = 10 * 1024 * 1024
 
 
 def create_app(settings: ApiSettings | None = None) -> FastAPI:
@@ -87,6 +88,28 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
     )
     async def api_proxy(api_path: str, request: Request) -> Response:
+        def payload_too_large() -> JSONResponse:
+            return JSONResponse(
+                {
+                    "type": "urn:research-asset-hub:problem:request-too-large",
+                    "title": "请求体过大",
+                    "status": 413,
+                    "detail": (
+                        f"Request body exceeds the {MAX_PROXY_BODY_BYTES} byte proxy limit."
+                    ),
+                    "instance": request.url.path,
+                },
+                status_code=413,
+                media_type="application/problem+json",
+            )
+
+        content_length = request.headers.get("content-length")
+        if content_length is not None and content_length.isdigit():
+            if int(content_length) > MAX_PROXY_BODY_BYTES:
+                return payload_too_large()
+        body = await request.body()
+        if len(body) > MAX_PROXY_BODY_BYTES:
+            return payload_too_large()
         try:
             upstream = await client.request(
                 request.method,
