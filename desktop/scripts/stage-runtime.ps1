@@ -39,6 +39,13 @@ $targetSitePackages = Join-Path $targetPy 'Lib\site-packages'
 if (-not (Test-Path $venvSitePackages)) { throw "未找到 .venv site-packages: $venvSitePackages" }
 New-Item -ItemType Directory -Force -Path $targetSitePackages | Out-Null
 Copy-Item -Recurse -Force (Join-Path $venvSitePackages '*') (Join-Path $targetSitePackages '')
+# 删减:ML/科研类死重包(apps/ 与 packages/ 零导入),否则 NSIS 32 位 makensis 因输入超 2GB 失败
+foreach ($pkg in @('torch', 'torchvision', 'torchaudio', 'torchdata', 'scipy', 'scipy.libs',
+                   'transformers', 'sympy', 'sklearn', 'numpy', 'numpy.libs', 'pandas', 'pandas.libs')) {
+    Remove-Item -Recurse -Force (Join-Path $targetSitePackages $pkg) -ErrorAction SilentlyContinue
+}
+Get-ChildItem -Recurse -Force -Directory $targetPy -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host '[3/5] 组装便携 Node + gitnexus'
 New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'node') | Out-Null
@@ -66,6 +73,12 @@ if (-not (Test-Path $gitnexusPkg)) {
     throw 'gitnexus 全局包缺失'
 }
 Copy-Item -Recurse -Force $gitnexusPkg (Join-Path $gitnexusDir 'pkg')
+# 删减:onnxruntime-node 非 Windows 预编译二进制(Windows 上运行只需 win32)
+foreach ($plat in @('darwin', 'linux')) {
+    Remove-Item -Recurse -Force (Join-Path $gitnexusDir "pkg\node_modules\onnxruntime-node\bin\napi-v6\$plat") -ErrorAction SilentlyContinue
+}
+Get-ChildItem -Recurse -Force -Directory (Join-Path $gitnexusDir 'pkg') -Filter '__pycache__' -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 # 生成 ps1 shim(镜像 npm 生成的 shim:node 执行包入口)
 $shim = @'
 # gitnexus shim (portable)
@@ -89,6 +102,10 @@ $pgRoot = Get-ChildItem (Join-Path $runtimeDir 'postgres') -Directory | Where-Ob
 if (-not $pgRoot) { throw 'PostgreSQL zip 中未找到 bin\pg_ctl.exe' }
 Get-ChildItem $pgRoot.FullName | Move-Item -Destination (Join-Path $runtimeDir 'postgres') -Force
 Remove-Item $pgRoot.FullName -Force
+# 删减:pgAdmin 4(图形管理工具,桌面版用不上)/ doc / StackBuilder
+foreach ($dead in @('pgAdmin 4', 'doc', 'StackBuilder')) {
+    Remove-Item -Recurse -Force (Join-Path $runtimeDir "postgres\$dead") -ErrorAction SilentlyContinue
+}
 
 Write-Host '[5/5] 组装 Meilisearch 与 app 源码'
 Copy-Item -Force $MeiliExe (Join-Path $runtimeDir 'meilisearch.exe')
