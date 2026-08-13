@@ -15,6 +15,7 @@ pub fn data_root() -> PathBuf {
 }
 
 pub struct DataPaths {
+    pub root: PathBuf,
     pub postgres: PathBuf,
     pub meili: PathBuf,
     pub logs: PathBuf,
@@ -30,6 +31,7 @@ pub fn data_paths() -> DataPaths {
         logs: root.join("logs"),
         backups: root.join("backups"),
         updates: root.join("updates"),
+        root,
     }
 }
 

@@ -409,14 +409,20 @@ impl Orchestrator {
         let data = &self.data.postgres;
         if !postgres_initialized(data) {
             // 首次初始化:initdb + 启动 + 建库。
-            // initdb 通常数秒完成,保持 .status() 同步等待(见 run_command_cancellable 注释:
+            // initdb 通常数秒完成,保持 .output() 同步等待(见 run_command_cancellable 注释:
             // 中途强杀会留下半初始化数据目录,取消收益小而代价大)。
+            // 数据目录必须为空才能 initdb:重试时上次残留的半初始化文件会导致
+            // "directory exists but is not empty",先整体清空(未初始化即无有价值数据)。
+            let _ = std::fs::remove_dir_all(data);
+            std::fs::create_dir_all(data)
+                .map_err(|e| self.fail(Step::Postgres, format!("无法创建数据目录: {e}")))?;
             let pw = std::env::var("HUB_POSTGRES_PASSWORD")
                 .unwrap_or_else(|_| "research_hub_local".to_string());
-            let pwfile = self.data.postgres.join(".pwfile");
+            // 密码文件写在数据目录外:initdb 要求 -D 目录为空,放在其内部会直接失败
+            let pwfile = self.data.root.join(".pwfile-initdb");
             std::fs::write(&pwfile, &pw)
                 .map_err(|e| self.fail(Step::Postgres, format!("无法写密码文件: {e}")))?;
-            let status = StdCommand::new(bin.join("initdb.exe"))
+            let out = StdCommand::new(bin.join("initdb.exe"))
                 .args([
                     "-D",
                     data.to_str().unwrap_or_default(),
@@ -428,14 +434,18 @@ impl Orchestrator {
                     "UTF8",
                     "--locale=C",
                 ])
-                .status();
+                .output();
             // 无论 initdb 执行成功、失败还是无法执行都清理密码文件:
             // spawn 失败路径同样不能残留明文密码,忽略删除错误
             let _ = std::fs::remove_file(&pwfile);
-            let status =
-                status.map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
-            if !status.success() {
-                return Err(self.fail(Step::Postgres, "initdb 失败,详见日志目录 postgres.log"));
+            let out =
+                out.map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                return Err(self.fail(
+                    Step::Postgres,
+                    format!("initdb 失败: {}", stderr.trim()),
+                ));
             }
         }
         // 启动(已有实例则 pg_ctl 报错,按端口探测判断)
@@ -707,6 +717,7 @@ mod tests {
             meilisearch: root.join("runtime/meilisearch.exe"),
         };
         let data = DataPaths {
+            root: root.join("data"),
             postgres: root.join("data/postgres-data"),
             meili: root.join("data/meili-data"),
             logs: root.join("data/logs"),
@@ -981,9 +992,41 @@ mod tests {
             "Postgres 失败后不得进入 Meili 及之后的步骤"
         );
         // initdb spawn 失败路径同样必须清理密码文件,不得残留明文密码
+        // (pwfile 位于数据根目录,与 postgres-data 数据目录分离——两者都不得残留)
         assert!(
             !data_dir.join(".pwfile").exists(),
+            "密码文件不得残留在数据目录内(initdb 要求目录为空)"
+        );
+        assert!(
+            !root.join("data/.pwfile-initdb").exists(),
             "initdb 执行失败后不得残留密码文件"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn postgres_clears_stale_uninitialized_data_dir_before_initdb() {
+        // 回归:半初始化残留(重试场景)必须被清空,否则 initdb 报
+        // "directory exists but is not empty" 直接失败。
+        let (root, paths, data) = fake_world();
+        let pg_dir = data.postgres.clone();
+        std::fs::create_dir_all(&pg_dir).unwrap();
+        std::fs::write(pg_dir.join("stale-file"), b"x").unwrap();
+        let (_, sink) = record();
+        let mut orch =
+            Orchestrator::with_probe(paths, data, test_ports(), |_| false, |_| None, sink);
+        let result = orch.start();
+        // 假 initdb.exe 不存在,失败发生在清空之后
+        assert!(matches!(
+            result,
+            Err(StartupError::StepFailed {
+                step: Step::Postgres,
+                ..
+            })
+        ));
+        assert!(
+            !pg_dir.join("stale-file").exists(),
+            "initdb 前应清空未初始化的数据目录"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
