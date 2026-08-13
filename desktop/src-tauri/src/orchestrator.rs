@@ -149,12 +149,6 @@ impl Orchestrator {
         self
     }
 
-    /// 请求正在进行的 start 尽快退出:置位取消标志,等待循环 ≤500ms 内察觉。
-    /// 不直接杀进程;子进程由 start 取消路径或 shutdown() 清理。
-    pub fn request_shutdown(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
-    }
-
     /// 克隆取消令牌:壳层在退出/重试时无需获取编排锁即可置位,
     /// 打断进行中的 start(其锁内等待循环会自行返回),避免与 start 争锁被阻塞。
     pub fn cancel_token(&self) -> Arc<AtomicBool> {
@@ -946,7 +940,7 @@ mod tests {
             sink,
         )));
         // 与壳层一致:start 前取出取消令牌,打断时经令牌无锁置位——
-        // start 全程持有编排锁,直接拿锁 request_shutdown 会被阻塞到 start 结束。
+        // start 全程持有编排锁,直接拿锁置位取消会被阻塞到 start 结束。
         let cancel = orch.lock().unwrap().cancel_token();
 
         // start 在独立线程执行(与壳层编排线程一致);主线程模拟退出/重试信号线程。
