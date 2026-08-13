@@ -39,4 +39,4 @@ cd desktop/src-tauri && cargo tauri build
 - [ ] 端口冲突(如 8767 被占)→ 加载页停在「预检环境」并弹窗说明
 - [ ] 卸载 → 重装 → 数据完好;`Documents\ResearchAssetHub` 未被动
 - [ ] updates 目录放新版 manifest+安装包 → 托盘「检查更新」→ 确认 → 安装 → 重启后版本号更新、数据无损
-- [ ] 更新源无 manifest → 提示「已是最新」
+- [ ] 更新源无 manifest → 提示「尚未配置更新源」并显示更新目录路径
