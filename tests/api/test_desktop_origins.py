@@ -31,6 +31,25 @@ def test_cors_preflight_allows_desktop_origin() -> None:
     assert "http://tauri.localhost" in response.headers["access-control-allow-origin"]
 
 
+def test_cors_preflight_allows_csrf_header_for_desktop_origin() -> None:
+    """写请求预检:ACRH 携带 content-type 与 x-research-hub-csrf 必须放行。"""
+    client = _client()
+    response = client.options(
+        "/api/v1/annotations",
+        headers={
+            "Origin": "http://tauri.localhost",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-research-hub-csrf",
+        },
+    )
+    assert response.status_code == 200
+    assert "http://tauri.localhost" in response.headers["access-control-allow-origin"]
+    assert (
+        "x-research-hub-csrf"
+        in response.headers["access-control-allow-headers"].lower()
+    )
+
+
 def test_write_guard_accepts_desktop_origin_with_csrf() -> None:
     client = _client()
     response = client.post(
@@ -57,8 +76,6 @@ def test_write_guard_still_rejects_unknown_origin() -> None:
 
 
 def test_desktop_origins_env_override() -> None:
-    from pydantic import SecretStr  # noqa: F401  # 保持导入区风格一致,实际不需要
-
     settings = ApiSettings(
         database_url="sqlite+pysqlite:///:memory:",
         database_require_migrations=False,

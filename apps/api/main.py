@@ -65,6 +65,9 @@ def create_app(
             "If-Match",
             "Idempotency-Key",
             "X-Request-ID",
+            # 桌面壳写请求预检(ACRH 含 content-type,x-research-hub-csrf)必须放行,
+            # 否则 tauri.localhost 起源的写操作全部被 400 拦截。
+            "X-Research-Hub-CSRF",
         ],
         expose_headers=["ETag", "X-Request-ID", "Idempotency-Replayed"],
     )
