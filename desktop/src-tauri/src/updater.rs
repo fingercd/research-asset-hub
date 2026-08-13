@@ -60,7 +60,8 @@ pub fn check(current: &str, updates_dir: &Path) -> Result<UpdateCheck, UpdateErr
         .map_err(|e| UpdateError::InvalidManifest(format!("当前版本号无效: {e}")))?;
     match load_manifest(updates_dir) {
         Ok(manifest) => {
-            let update_available = manifest.version > current;
+            let update_available = manifest.version > current
+                && updates_dir.join(&manifest.installer).is_file();
             Ok(UpdateCheck {
                 update_available,
                 manifest: Some(manifest),
@@ -104,6 +105,7 @@ mod tests {
             &dir,
             r#"{"version": "0.2.0", "installer": "Hub-Setup-0.2.0.exe", "notes": "新功能"}"#,
         );
+        std::fs::write(dir.join("Hub-Setup-0.2.0.exe"), "").unwrap();
         let result = check("0.1.0", &dir).unwrap();
         assert!(result.update_available);
         assert_eq!(result.manifest.unwrap().version.to_string(), "0.2.0");
