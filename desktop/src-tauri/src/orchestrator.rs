@@ -1,7 +1,7 @@
 //! 启动编排状态机:预检 → PostgreSQL → Meilisearch → 迁移 → 应用进程 → 就绪。
 //! 不依赖 Tauri;事件经 on_event 回调上报(Task 9 桥接到加载页)。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,7 +124,10 @@ impl Orchestrator {
     }
 
     fn fail(&self, step: Step, detail: impl Into<String>) -> StartupError {
-        StartupError::StepFailed { step, detail: detail.into() }
+        let detail = detail.into();
+        // 失败事件统一在此发出:所有 `?`/`return Err(self.fail(...))` 路径都自动获得 (step, Failed)
+        self.emit(step, StepStatus::Failed, Some(detail.clone()));
+        StartupError::StepFailed { step, detail }
     }
 
     pub fn start(&mut self) -> Result<(), StartupError> {
@@ -139,7 +142,7 @@ impl Orchestrator {
             .filter(|p| (self.probe)(*p))
             .collect();
         if !busy.is_empty() {
-            self.emit(Step::Preflight, StepStatus::Failed, Some(format!("端口被占用: {busy:?}")));
+            // fail 内部会先发出 (Preflight, Failed) 事件,此处不再手动 emit
             return Err(self.fail(Step::Preflight, format!("端口被占用: {busy:?}")));
         }
         self.emit(Step::Preflight, StepStatus::Done, None);
@@ -191,10 +194,11 @@ impl Orchestrator {
                 ])
                 .status()
                 .map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
+            // 无论 initdb 成功与否都清理密码文件:失败路径不能残留明文密码,忽略删除错误
+            let _ = std::fs::remove_file(&pwfile);
             if !status.success() {
                 return Err(self.fail(Step::Postgres, "initdb 失败,详见日志目录 postgres.log"));
             }
-            let _ = std::fs::remove_file(&pwfile);
         }
         // 启动(已有实例则 pg_ctl 报错,按端口探测判断)
         if !(self.probe)(self.ports.postgres) {
@@ -471,7 +475,8 @@ mod tests {
         let (root, paths, data) = fake_world();
         let (events, sink) = record();
         // 恒 false 探测:Preflight 通过;Postgres 阶段假 initdb.exe 不存在,
-        // 执行报 NotFound → start() 返回 Err,Postgres Pending 之后无任何事件。
+        // 执行报 NotFound → fail 发出 (Postgres, Failed) 事件后 start() 返回 Err,
+        // 序列以 (Postgres, Pending) 后跟 (Postgres, Failed) 结束,无 Meili 及之后事件。
         let mut orch = Orchestrator::with_probe(paths, data, test_ports(), |_| false, sink);
         let result = orch.start();
         match result {
@@ -488,8 +493,15 @@ mod tests {
                 (Step::Preflight, StepStatus::Pending),
                 (Step::Preflight, StepStatus::Done),
                 (Step::Postgres, StepStatus::Pending),
+                (Step::Postgres, StepStatus::Failed),
             ],
-            "Postgres Pending 之后不得再有任何事件(失败即停)"
+            "序列应以 (Postgres, Pending) 后跟 (Postgres, Failed) 结束"
+        );
+        // 失败即停:不得出现 Meili 及之后的任何事件。
+        assert!(
+            !seq.iter()
+                .any(|(s, _)| matches!(s, Step::Meili | Step::Migrate | Step::Services)),
+            "Postgres 失败后不得进入 Meili 及之后的步骤"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
