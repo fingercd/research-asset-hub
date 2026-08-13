@@ -18,7 +18,36 @@ pub struct RuntimePaths {
     pub meilisearch: PathBuf,
 }
 
+/// 剥掉 Windows verbatim 路径前缀(`\\?\`、`\\?\UNC\`、`//?/`、`//?/UNC/`)。
+///
+/// 壳进程若以 verbatim 路径被启动(current_exe 带 `\\?\`),其派生的运行时路径会
+/// 把前缀传入子进程 argv[0](Rust std 写为 `//?/C:/...`)。EDB 版 initdb 无法处理
+/// 该形态,同目录探测报 "no data was returned by command ..." 而失败。
+/// 所有交给子进程的路径必须经此函数规范化。
+#[cfg(windows)]
+pub fn plain(path: &Path) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    // UNC 变体剥前缀后须补回共享根的双反斜杠(\\?\UNC\server\share → \\server\share)
+    if let Some(rest) = s
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| s.strip_prefix("//?/UNC/"))
+    {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    let stripped = s
+        .strip_prefix(r"\\?\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(&s);
+    PathBuf::from(stripped.to_string())
+}
+
+#[cfg(not(windows))]
+pub fn plain(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 pub fn resolve(root: &Path) -> RuntimePaths {
+    let root = plain(root);
     let runtime = root.join("runtime");
     RuntimePaths {
         python: runtime.join("python").join("python.exe"),
@@ -34,11 +63,12 @@ pub fn resolve(root: &Path) -> RuntimePaths {
 /// python 用项目根 .venv;postgres/meili 由 docker compose 容器提供(见 orchestrator 的
 /// uses_containers 分支),此处指向不存在的假路径防止误用;gitnexus 用 PATH 上 npm shim。
 pub fn resolve_dev(root: &Path) -> RuntimePaths {
+    let root = plain(root);
     RuntimePaths {
         python: root.join(".venv").join("Scripts").join("python.exe"),
         python_workdir: root.to_path_buf(),
         node: root.join(".venv").join("Scripts").join("node.exe"),
-        gitnexus_script: gitnexus_shim(),
+        gitnexus_script: plain(&gitnexus_shim()),
         postgres_bin: root.join("runtime-unavailable").join("postgres").join("bin"),
         meilisearch: root.join("runtime-unavailable").join("meilisearch.exe"),
     }
@@ -137,6 +167,44 @@ mod tests {
         assert!(!paths.meilisearch.exists());
         // gitnexus shim 环境相关,只断言非空(找不到时回退到命令名)
         assert!(!paths.gitnexus_script.as_os_str().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_strips_verbatim_prefixes() {
+        use std::path::PathBuf;
+        let expect = PathBuf::from("C:/Program Files/ResearchAssetHub/runtime/postgres/bin");
+        assert_eq!(
+            plain(&PathBuf::from(r"\\?\C:\Program Files\ResearchAssetHub\runtime\postgres\bin")),
+            expect
+        );
+        assert_eq!(
+            plain(&PathBuf::from(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir"),
+        );
+        assert_eq!(
+            plain(&PathBuf::from("//?/C:/Program Files/ResearchAssetHub/runtime/postgres/bin")),
+            expect
+        );
+        assert_eq!(
+            plain(&PathBuf::from("//?/UNC/server/share/dir")),
+            PathBuf::from(r"\\server\share\dir"),
+        );
+        // 普通路径原样返回
+        assert_eq!(plain(&expect), expect);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_strips_verbatim_root() {
+        // 壳以 verbatim 路径启动时 root 带 \\?\,resolve 结果必须已剥前缀,
+        // 否则派生进程 argv[0] 带 //?/ 前缀(initdb 因此失败)。
+        let root = PathBuf::from(r"\\?\").join(tmp_root());
+        let paths = resolve(&root);
+        assert_eq!(paths.postgres_bin, plain(&root).join("runtime").join("postgres").join("bin"));
+        assert!(!paths.postgres_bin.to_string_lossy().contains(r"\\?\"));
+        assert!(!paths.postgres_bin.to_string_lossy().contains("//?/"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

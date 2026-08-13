@@ -85,7 +85,9 @@ fn run_startup(app: tauri::AppHandle) {
         old.orch.lock().unwrap().shutdown();
     }
 
-    let resource = app.path().resource_dir().unwrap_or_default();
+    // resource_dir 在 Windows 直接返回 exe 目录,可能带 verbatim 前缀(\\?\);
+    // resolve 内部会剥前缀,但开发回退分支同样须防:统一在此先规范化。
+    let resource = runtime::plain(&app.path().resource_dir().unwrap_or_default());
     let mut paths = runtime::resolve(&resource);
     let mut uses_containers = false;
     if !paths.python.exists() {

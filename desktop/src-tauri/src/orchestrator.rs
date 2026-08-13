@@ -1031,6 +1031,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 回归:壳现场 current_exe 为 verbatim 形态(\\?\ 前缀,Windows 对长路径/canonicalize
+    /// 的产物)时,Rust std spawn 会把程序路径以 //?/ 形式写入命令行,initdb 对同目录
+    /// postgres.exe 的检查(stat + popen)因此失败,报 "no data was returned by command"
+    /// 与 "was not found in the same directory"。对照:普通路径同一 initdb 成功 ——
+    /// 修复方向即 spawn 前规范化路径(去掉 \\?\ 前缀)。
+    /// 依赖本机安装目录真实 initdb.exe,不存在则跳过(CI/其他机器安全)。
+    #[test]
+    fn initdb_rejects_verbatim_prefixed_bin_path() {
+        let installed = std::path::PathBuf::from(
+            r"C:\Program Files\ResearchAssetHub\runtime\postgres\bin",
+        );
+        if !installed.join("initdb.exe").exists() {
+            eprintln!("跳过:本机未安装 ResearchAssetHub 便携 postgres");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("hub-verbatim-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mk = |name: &str| {
+            let d = root.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let pwfile = root.join("pw");
+        std::fs::write(&pwfile, "research_hub_local").unwrap();
+        let args = |data: &std::path::Path| {
+            [
+                "-D".to_string(),
+                data.display().to_string(),
+                "-U".to_string(),
+                "research_hub".to_string(),
+                "--pwfile".to_string(),
+                pwfile.display().to_string(),
+                "-E".to_string(),
+                "UTF8".to_string(),
+                "--locale=C".to_string(),
+            ]
+        };
+
+        // 1) 反斜杠 verbatim 前缀(\\?\ 形态,current_exe/canonicalize 的产物)且路径
+        //    含空格时,std spawn 直接失败(ERROR_PATH_NOT_FOUND);即便能启动,initdb 对
+        //    同目录 postgres.exe 的检查也会失败 —— 断言"未成功"即可。
+        let verbatim_backslash =
+            std::path::PathBuf::from(format!("\\\\?\\{}", installed.display()));
+        let data_bs = mk("data-bs");
+        let out_bs = StdCommand::new(verbatim_backslash.join("initdb.exe"))
+            .args(args(&data_bs))
+            .output();
+        if let Ok(o) = &out_bs {
+            assert!(
+                !o.status.success(),
+                "verbatim 前缀路径下 initdb 不得成功,stderr={}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        } // Err 分支同样视为"未成功"(std spawn 拒绝该路径)
+
+        // 2) 正斜杠 verbatim(//?/ 形态,std 把 verbatim 程序路径写入命令行时的格式,
+        //    即现场 argv[0])→ initdb 能启动但内部 postgres.exe 检查失败,
+        //    stderr 与现场逐字节一致。注:必须用 OsString 原样传递——PathBuf 会把
+        //    //?/ 前缀解析为 UNC 并规范化成反斜杠,掩盖现场形态。
+        let verbatim_fwd_exe = std::ffi::OsString::from(format!(
+            "//?/{}\\initdb.exe",
+            installed.display()
+        ));
+        let data_f = mk("data-f");
+        let out_f = StdCommand::new(&verbatim_fwd_exe)
+            .args(args(&data_f))
+            .output()
+            .expect("正斜杠 verbatim 路径应可启动 initdb");
+        let stderr_f = String::from_utf8_lossy(&out_f.stderr).to_string();
+        assert!(
+            !out_f.status.success() && stderr_f.contains("no data was returned"),
+            "正斜杠 verbatim 下 initdb 应失败并报 no data was returned,实际 status={:?} stderr={stderr_f}",
+            out_f.status
+        );
+
+        // 3) 普通路径对照 → 应成功
+        let data_p = mk("data-p");
+        let out_p = StdCommand::new(installed.join("initdb.exe"))
+            .args(args(&data_p))
+            .output()
+            .expect("initdb 应可执行");
+        assert!(
+            out_p.status.success(),
+            "普通路径同一 initdb 应成功,stderr={}",
+            String::from_utf8_lossy(&out_p.stderr)
+        );
+
+        let _ = std::fs::remove_file(&pwfile);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn with_containers_flips_flag() {
         // Orchestrator::new 只拼 data 路径,不触碰磁盘,可安全直用

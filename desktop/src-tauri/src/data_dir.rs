@@ -3,15 +3,24 @@
 use std::path::{Path, PathBuf};
 
 pub fn data_root() -> PathBuf {
-    if let Ok(override_dir) = std::env::var("HUB_DATA_DIR") {
+    let root = if let Ok(override_dir) = std::env::var("HUB_DATA_DIR") {
         if !override_dir.trim().is_empty() {
-            return PathBuf::from(override_dir);
+            PathBuf::from(override_dir)
+        } else {
+            data_root_default()
         }
-    }
-    let docs = std::env::var("USERPROFILE")
+    } else {
+        data_root_default()
+    };
+    // 剥 verbatim 前缀:数据目录路径会进入 initdb 的 -D 参数,带前缀同样会导致失败
+    crate::runtime::plain(&root)
+}
+
+fn data_root_default() -> PathBuf {
+    std::env::var("USERPROFILE")
         .map(|p| PathBuf::from(p).join("Documents"))
-        .unwrap_or_else(|_| PathBuf::from("."));
-    docs.join("ResearchAssetHub")
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("ResearchAssetHub")
 }
 
 pub struct DataPaths {
