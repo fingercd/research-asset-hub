@@ -6,13 +6,17 @@ from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
 
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
+from alembic.script.revision import RevisionError
+from alembic.util.exc import CommandError
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.api.config import ApiSettings
+from apps.api.config import PROJECT_ROOT, ApiSettings
 
 REQUIRED_TABLES = frozenset(
     {
@@ -88,6 +92,36 @@ class DatabaseManager:
         self._readiness: DatabaseReadiness | None = None
         self._checked_at = 0.0
         self._lock = Lock()
+        self._script_directory_cached: ScriptDirectory | None = None
+
+    def _script_directory(self) -> ScriptDirectory:
+        if self._script_directory_cached is None:
+            config = AlembicConfig(str(PROJECT_ROOT / "migrations" / "alembic.ini"))
+            self._script_directory_cached = ScriptDirectory.from_config(config)
+        return self._script_directory_cached
+
+    def _revision_satisfies_requirement(self, revision: str | None) -> bool:
+        """数据库修订必须是 required 修订本身或其迁移链上的后代。"""
+        if revision is None:
+            return False
+        required = self.settings.database_required_revision
+        if revision == required:
+            return True
+        try:
+            scripts = self._script_directory()
+        except (CommandError, OSError):
+            return False
+        try:
+            chain = [
+                script.revision
+                for script in scripts.revision_map.iterate_revisions(
+                    revision, required, inclusive=True
+                )
+            ]
+        except RevisionError:
+            # 未知修订，或 required 不在 DB 修订的祖先链上（即 DB 落后）。
+            return False
+        return required in chain
 
     def check(self, *, force: bool = False) -> DatabaseReadiness:
         with self._lock:
@@ -109,9 +143,8 @@ class DatabaseManager:
                             revision = connection.execute(
                                 text("SELECT version_num FROM alembic_version")
                             ).scalar_one_or_none()
-                        if (
-                            self.require_migrations
-                            and revision != self.settings.database_required_revision
+                        if self.require_migrations and not self._revision_satisfies_requirement(
+                            revision
                         ):
                             readiness = DatabaseReadiness(
                                 "unmigrated",

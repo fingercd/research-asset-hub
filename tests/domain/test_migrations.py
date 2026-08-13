@@ -5,7 +5,10 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
+from apps.api.config import ApiSettings
+from apps.api.database import DatabaseManager
 from packages.domain.identifiers import new_uuid7
 from packages.domain.models import Base
 
@@ -127,3 +130,46 @@ def test_0002_backfills_legacy_source_mapping_and_0003_matches_metadata(
         assert "source_record_assets" not in tables
         assert connection.scalar(sa.text("SELECT COUNT(*) FROM source_records")) == 1
     engine.dispose()
+
+
+def test_required_revision_default_matches_migration_head() -> None:
+    """新增迁移时若忘记更新默认值，本测试直接失败。"""
+    script_dir = ScriptDirectory.from_config(_config("sqlite://"))
+    head = script_dir.get_current_head()
+    default = ApiSettings.model_fields["database_required_revision"].default
+    assert default == head
+
+
+def test_readiness_accepts_revision_at_or_after_required(tmp_path: Path) -> None:
+    """数据库修订超前于 required 时应 ready；落后时应 unmigrated。"""
+    database_path = (tmp_path / "readiness.sqlite").resolve()
+    database_url = f"sqlite:///{database_path.as_posix()}"
+    config = _config(database_url)
+    command.upgrade(config, "head")
+    engine = sa.create_engine(database_url)
+    try:
+        ahead = DatabaseManager(
+            ApiSettings(
+                database_url=database_url,
+                database_required_revision="0002_platform_core",
+            ),
+            engine=engine,
+        )
+        assert ahead.check(force=True).status == "ready"
+
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text("UPDATE alembic_version SET version_num = '0002_platform_core'")
+            )
+        behind = DatabaseManager(
+            ApiSettings(
+                database_url=database_url,
+                database_required_revision="0003_search_rag_integrations",
+            ),
+            engine=engine,
+        )
+        readiness = behind.check(force=True)
+        assert readiness.status == "unmigrated"
+        assert "expected" in readiness.detail
+    finally:
+        engine.dispose()
