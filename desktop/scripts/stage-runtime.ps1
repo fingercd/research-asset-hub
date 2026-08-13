@@ -19,7 +19,7 @@ Write-Host '[1/5] 清理并创建 stage 目录'
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $runtimeDir, $appDir | Out-Null
 
-Write-Host '[2/5] 组装便携 Python + 项目依赖(拷 .venv)'
+Write-Host '[2/5] 组装便携 Python(基环境 + 项目依赖合并)'
 $venvSource = Join-Path $projectRoot '.venv'
 if (-not (Test-Path $venvSource)) { throw '.venv 不存在,先在项目根跑 uv sync' }
 # 解析 .venv/pyvenv.cfg 的 home 行作为 Python 基环境目录(uv 创建的 .venv 位于项目根,
@@ -30,22 +30,15 @@ $pyHomeSource = (Get-Content $pyvenvCfgSource -Encoding UTF8 | Where-Object { $_
 if (-not (Test-Path (Join-Path $pyHomeSource 'python.exe'))) { throw "Python 基环境不存在: $pyHomeSource" }
 $targetPy = Join-Path $runtimeDir 'python'
 New-Item -ItemType Directory -Force -Path $targetPy | Out-Null
-# 拷贝解释器:将 .venv 的基环境(uv 托管 CPython)整体拷入 runtime/python,
-# 便携包内 venv 的 pyvenv.cfg 将指向此目录,无需依赖开发机环境
+# 拷贝基环境(uv 托管 CPython)作为便携解释器
 Copy-Item -Recurse -Force (Join-Path $pyHomeSource '*') (Join-Path $targetPy '')
-$targetVenv = Join-Path $runtimeDir 'venv'
-Copy-Item -Recurse -Force (Join-Path $venvSource '*') $targetVenv
-# 修 pyvenv.cfg 指向安装目录内的解释器
-$pyvenvCfg = Join-Path $targetVenv 'pyvenv.cfg'
-if (Test-Path $pyvenvCfg) {
-    $cfg = Get-Content $pyvenvCfg
-    $cfg = $cfg | ForEach-Object {
-        if ($_ -like 'home = *') { 'home = C:\Program Files\ResearchAssetHub\runtime\python' }
-        else { $_ }
-    }
-    $cfg | Set-Content $pyvenvCfg
-    Write-Host '  已修正 venv pyvenv.cfg'
-}
+# 把 .venv 的 site-packages 合并进便携解释器,使其自带全部项目依赖:
+# 壳直接用 runtime\python\python.exe 运行 -m apps.*,无 venv 概念
+$venvSitePackages = Join-Path $venvSource 'Lib\site-packages'
+$targetSitePackages = Join-Path $targetPy 'Lib\site-packages'
+if (-not (Test-Path $venvSitePackages)) { throw "未找到 .venv site-packages: $venvSitePackages" }
+New-Item -ItemType Directory -Force -Path $targetSitePackages | Out-Null
+Copy-Item -Recurse -Force (Join-Path $venvSitePackages '*') (Join-Path $targetSitePackages '')
 
 Write-Host '[3/5] 组装便携 Node + gitnexus'
 New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'node') | Out-Null
