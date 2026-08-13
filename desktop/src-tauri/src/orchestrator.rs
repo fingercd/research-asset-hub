@@ -235,6 +235,57 @@ impl Orchestrator {
         busy.retain(|p| (self.probe)(*p));
     }
 
+    /// 运行可能耗时较长的同步命令(compose up --wait、alembic 迁移可达分钟级):
+    /// spawn 后轮询 try_wait(间隔 500ms),期间取消标志置位则 taskkill 命令子进程
+    /// 并返回"已取消"错误,退出/重试不再挂起数分钟。
+    /// 其余同步命令(initdb、pg_ctl stop)耗时秒级,保持 .status() 同步等待:
+    /// 取消收益小,且 initdb 中途强杀会留下半初始化数据目录,同步等待更安全。
+    fn run_command_cancellable(
+        &mut self,
+        step: Step,
+        program: &std::path::Path,
+        args: &[&str],
+        cwd: Option<&std::path::Path>,
+        fail_msg: &str,
+    ) -> Result<(), StartupError> {
+        let mut cmd = StdCommand::new(program);
+        cmd.args(args);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| self.fail(step, format!("{} 无法执行: {e}", program.display())))?;
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                // 取消:杀整棵进程树并回收,再复用取消语义(清理已 spawn 子进程、
+                // 返回"已取消"、不发 Failed 事件)。注:docker compose 被杀的是
+                // 客户端,容器若仍在后台启动,由下次启动的 --wait/端口探测收敛。
+                let _ = crate::processes::kill_pid(child.id());
+                let _ = child.wait();
+                return self.check_cancelled(step);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return Ok(());
+                    }
+                    return Err(self.fail(step, fail_msg));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(self.fail(
+                        step,
+                        format!("{} 状态检查失败: {e}", program.display()),
+                    ));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     pub fn start(&mut self) -> Result<(), StartupError> {
         ensure_dirs(&self.data)
             .map_err(|e| self.fail(Step::Preflight, format!("无法创建数据目录: {e}")))?;
@@ -296,17 +347,16 @@ impl Orchestrator {
         if self.uses_containers {
             // 开发回退:compose 一并拉起 postgres 与 meilisearch,--wait 等待健康检查通过。
             // workdir = 项目根(dev 下即 python_workdir),deploy/compose.yaml 相对其解析。
-            let status = StdCommand::new("docker")
-                .args(["compose", "-f", "deploy/compose.yaml", "up", "-d", "--wait"])
-                .current_dir(&self.paths.python_workdir)
-                .status()
-                .map_err(|e| self.fail(Step::Postgres, format!("docker compose 无法执行: {e}")))?;
-            if !status.success() {
-                return Err(self.fail(
-                    Step::Postgres,
-                    "docker compose up 失败,请确认 Docker Desktop 已启动",
-                ));
-            }
+            // --wait 可达分钟级,走可取消轮询(取消时杀掉 compose 客户端,容器若仍在
+            // 后台继续启动,由下次启动的 --wait/端口探测收敛)。
+            let workdir = self.paths.python_workdir.clone();
+            self.run_command_cancellable(
+                Step::Postgres,
+                std::path::Path::new("docker"),
+                &["compose", "-f", "deploy/compose.yaml", "up", "-d", "--wait"],
+                Some(&workdir),
+                "docker compose up 失败,请确认 Docker Desktop 已启动",
+            )?;
             if !self.wait_for_port_cancellable(self.ports.postgres, Duration::from_secs(60)) {
                 self.check_cancelled(Step::Postgres)?;
                 return Err(self.fail(Step::Postgres, "PostgreSQL 容器未在 60 秒内就绪"));
@@ -316,7 +366,9 @@ impl Orchestrator {
         let bin = &self.paths.postgres_bin;
         let data = &self.data.postgres;
         if !postgres_initialized(data) {
-            // 首次初始化:initdb + 启动 + 建库
+            // 首次初始化:initdb + 启动 + 建库。
+            // initdb 通常数秒完成,保持 .status() 同步等待(见 run_command_cancellable 注释:
+            // 中途强杀会留下半初始化数据目录,取消收益小而代价大)。
             let pw = std::env::var("HUB_POSTGRES_PASSWORD")
                 .unwrap_or_else(|_| "research_hub_local".to_string());
             let pwfile = self.data.postgres.join(".pwfile");
@@ -414,23 +466,18 @@ impl Orchestrator {
         Ok(())
     }
 
-    fn run_migrations(&self) -> Result<(), StartupError> {
-        let status = StdCommand::new(&self.paths.python)
-            .args([
-                "-m",
-                "alembic",
-                "-c",
-                "migrations/alembic.ini",
-                "upgrade",
-                "head",
-            ])
-            .current_dir(&self.paths.python_workdir)
-            .status()
-            .map_err(|e| self.fail(Step::Migrate, format!("alembic 无法执行: {e}")))?;
-        if !status.success() {
-            return Err(self.fail(Step::Migrate, "数据库迁移失败,详见日志"));
-        }
-        Ok(())
+    fn run_migrations(&mut self) -> Result<(), StartupError> {
+        // 迁移可达分钟级(首启建表+索引),走可取消轮询;取消时 taskkill 迁移子进程。
+        // 路径先克隆,避免 &mut self 与 &self.paths 的借用冲突。
+        let python = self.paths.python.clone();
+        let workdir = self.paths.python_workdir.clone();
+        self.run_command_cancellable(
+            Step::Migrate,
+            &python,
+            &["-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            Some(&workdir),
+            "数据库迁移失败,详见日志",
+        )
     }
 
     fn start_services(&mut self) -> Result<(), StartupError> {
@@ -511,7 +558,8 @@ impl Orchestrator {
                 .status();
             return;
         }
-        // meili 由 kill_tree 已停;postgres 优雅停止
+        // meili 由 kill_tree 已停;postgres 优雅停止。
+        // pg_ctl stop 秒级完成,保持 .status() 同步等待(见 run_command_cancellable 注释)。
         if (self.probe)(self.ports.postgres) {
             let bin = &self.paths.postgres_bin;
             let _ = StdCommand::new(bin.join("pg_ctl.exe"))
@@ -950,6 +998,53 @@ mod tests {
             !seq.iter().any(|(_, st)| *st == StepStatus::Failed),
             "取消路径不应发 Failed 事件: {seq:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancellable_command_kills_child_and_returns_cancel() {
+        // 直接驱动 run_command_cancellable:长跑命令(ping 300 秒量级)期间置位取消,
+        // 应快速返回 CANCEL_DETAIL 错误而非等命令自然结束(否则退出会挂起数分钟)。
+        let (root, paths, data) = fake_world();
+        let (_, sink) = record();
+        let orch = Arc::new(Mutex::new(Orchestrator::with_probe(
+            paths,
+            data,
+            test_ports(),
+            |_| false,
+            || vec![],
+            sink,
+        )));
+        let cancel = orch.lock().unwrap().cancel_token();
+        let start_handle = {
+            let orch = orch.clone();
+            std::thread::spawn(move || {
+                let begin = std::time::Instant::now();
+                let result = orch.lock().unwrap().run_command_cancellable(
+                    Step::Migrate,
+                    std::path::Path::new("cmd"),
+                    &["/C", "ping -n 300 127.0.0.1"],
+                    None,
+                    "不应走到失败分支",
+                );
+                (result, begin.elapsed())
+            })
+        };
+        // 等子进程真正启动(留足余量),再经取消令牌无锁置位(与壳层退出路径一致)
+        std::thread::sleep(Duration::from_millis(800));
+        cancel.store(true, Ordering::SeqCst);
+        let (result, elapsed) = start_handle.join().expect("命令线程应正常结束");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "取消后长命令应在远小于命令时长前返回,实际 {elapsed:?}"
+        );
+        match result {
+            Err(StartupError::StepFailed { step, detail }) => {
+                assert_eq!(step, Step::Migrate, "取消错误应归属当前步骤");
+                assert_eq!(detail, CANCEL_DETAIL);
+            }
+            other => panic!("期望取消错误,得到: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
