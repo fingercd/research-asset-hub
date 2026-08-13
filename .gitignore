@@ -24,7 +24,7 @@ work/
 state/backups/
 state/catalog-export/
 outputs/reports/
-outputs/releases/
+# outputs/release/ 有意入库（交付报告），不忽略
 outputs/open-catalog/
 outputs/zotero/
 
