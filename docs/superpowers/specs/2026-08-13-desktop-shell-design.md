@@ -93,7 +93,7 @@ Program Files\ResearchAssetHub\
 2. 窗口立即显示 loading.html
 3. 编排器按状态机推进,每步向 WebView 发 `startup://progress` 事件(步骤名 + 状态)
 4. 失败任一步:弹错误对话框(步骤、原因、「查看日志」按钮打开数据目录 logs),窗口停在失败步骤;「重试」可用
-5. 全部就绪 → WebView 导航到壳内前端 → 进入登录后的主界面(界面与现状一致)
+5. 全部就绪 → WebView 导航到壳内前端 → 主界面(界面与现状一致)
 6. 点 X → 窗口隐藏,后台保持(秒开);托盘「退出」→ 逆序停应用进程 → 停 postgres(pg_ctl stop)→ 退出
 7. 更新:菜单「检查更新」→ 读 `Documents\ResearchAssetHub\updates\manifest.json`(或 HUB_UPDATE_URL 配置的远程地址)→ 版本高于当前 → 下载/复制安装包到临时目录 → 运行 NSIS 安装器 → 安装器完成后提示重启
 
