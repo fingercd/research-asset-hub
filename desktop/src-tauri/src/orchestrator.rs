@@ -702,7 +702,7 @@ mod tests {
         // 注入恒 true 探测:Preflight 视关键端口为"被占用",命令行查询为空
         // (无非自有进程可清理),启动在探测阶段即失败,假 exe 路径不会被真正执行。
         let mut orch =
-            Orchestrator::with_probe(paths, data, test_ports(), |_| true, || vec![], sink);
+            Orchestrator::with_probe(paths, data, test_ports(), |_| true, Vec::new, sink);
         let result = orch.start();
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
@@ -833,7 +833,7 @@ mod tests {
         // 执行报 NotFound → fail 发出 (Postgres, Failed) 事件后 start() 返回 Err,
         // 序列以 (Postgres, Pending) 后跟 (Postgres, Failed) 结束,无 Meili 及之后事件。
         let mut orch =
-            Orchestrator::with_probe(paths, data, test_ports(), |_| false, || vec![], sink);
+            Orchestrator::with_probe(paths, data, test_ports(), |_| false, Vec::new, sink);
         let result = orch.start();
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
@@ -895,7 +895,7 @@ mod tests {
             data,
             test_ports(),
             |_| true,
-            || vec![],
+            Vec::new,
             sink,
         );
         match orch.start() {
@@ -936,7 +936,7 @@ mod tests {
             data,
             ports,
             move |p| p == ports.postgres,
-            || vec![],
+            Vec::new,
             sink,
         )));
         // 与壳层一致:start 前取出取消令牌,打断时经令牌无锁置位——
@@ -1006,7 +1006,7 @@ mod tests {
             data,
             test_ports(),
             |_| false,
-            || vec![],
+            Vec::new,
             sink,
         )));
         let cancel = orch.lock().unwrap().cancel_token();

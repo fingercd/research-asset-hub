@@ -86,10 +86,9 @@ pub fn kill_pid(pid: u32) -> std::io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("taskkill /PID {pid} 返回失败"),
-        ))
+        Err(std::io::Error::other(format!(
+            "taskkill /PID {pid} 返回失败"
+        )))
     }
 }
 
