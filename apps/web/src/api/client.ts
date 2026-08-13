@@ -23,7 +23,21 @@ import type {
   SyncConflict,
 } from "./types";
 
-const API_BASE = "/api/v1";
+declare global {
+  interface Window {
+    __HUB_API_BASE__?: string;
+  }
+}
+
+export function resolveApiBase(): string {
+  if (typeof window !== "undefined" && window.__HUB_API_BASE__) {
+    return window.__HUB_API_BASE__;
+  }
+  const fromEnv = import.meta.env.VITE_API_BASE;
+  return typeof fromEnv === "string" && fromEnv ? fromEnv : "/api/v1";
+}
+
+const API_BASE = resolveApiBase();
 const DEFAULT_TIMEOUT = 12_000;
 const SEARCH_TIMEOUT = 120_000;
 

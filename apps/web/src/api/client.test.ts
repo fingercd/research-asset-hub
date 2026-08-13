@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "./client";
+import { api, resolveApiBase } from "./client";
+
+type HubWindow = Window & { __HUB_API_BASE__?: string };
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -144,5 +146,23 @@ describe("search API", () => {
       status: 0,
       title: "请求超时",
     });
+  });
+});
+
+describe("resolveApiBase", () => {
+  it("prefers the shell-injected value on Tauri", () => {
+    vi.stubGlobal("window", { __HUB_API_BASE__: "http://127.0.0.1:8767/api/v1" } as HubWindow);
+    expect(resolveApiBase()).toBe("http://127.0.0.1:8767/api/v1");
+    vi.unstubAllGlobals();
+  });
+
+  it("falls back to the build-time env value", () => {
+    vi.stubEnv("VITE_API_BASE", "http://127.0.0.1:9000/api/v1");
+    expect(resolveApiBase()).toBe("http://127.0.0.1:9000/api/v1");
+    vi.unstubAllEnvs();
+  });
+
+  it("defaults to the dev-proxied relative path", () => {
+    expect(resolveApiBase()).toBe("/api/v1");
   });
 });
