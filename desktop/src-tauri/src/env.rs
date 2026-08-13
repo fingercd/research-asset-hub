@@ -1,6 +1,7 @@
 //! 启动前环境变量准备(镜像 scripts/hub.ps1 的 env 块;变量名与各 app config 对齐)。
 
 use std::io;
+use std::path::Path;
 
 use crate::orchestrator::Ports;
 
@@ -17,12 +18,35 @@ fn random_hex(bytes: usize) -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn prepare(ports: &Ports) -> io::Result<()> {
+/// Meilisearch master key 持久化:首启生成后写入 `secrets_dir/meili-master-key`,
+/// 后续启动复用;文件缺失、为空或内容非法(非 16 字节 hex)时重新生成覆盖。
+/// 否则每次启动都换随机 key,meili 数据目录(dumps/索引密钥)与旧 key 绑定而不可读。
+///
+/// 权限说明:Windows 上不强制 0600(密钥文件位于用户数据目录,继承用户级 ACL,
+/// 个人单机工具可接受);Unix 上如需收紧可加 `#[cfg(unix)]` 的 set_permissions,本期不实现。
+fn load_or_create_meili_key(secrets_dir: &Path) -> io::Result<String> {
+    std::fs::create_dir_all(secrets_dir)?;
+    let key_file = secrets_dir.join("meili-master-key");
+    if let Ok(content) = std::fs::read_to_string(&key_file) {
+        let trimmed = content.trim();
+        let is_valid_hex = trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit());
+        if is_valid_hex {
+            return Ok(trimmed.to_string());
+        }
+        // 损坏/为空:落入重新生成路径,写新 key 覆盖旧文件
+    }
+    let key = random_hex(16);
+    std::fs::write(&key_file, &key)?;
+    Ok(key)
+}
+
+pub fn prepare(ports: &Ports, secrets_dir: &Path) -> io::Result<()> {
     if std::env::var("HUB_GATEWAY_SECRET").map(|v| v.trim().is_empty()).unwrap_or(true) {
         std::env::set_var("HUB_GATEWAY_SECRET", random_base64(48));
     }
     if std::env::var("HUB_MEILISEARCH_API_KEY").map(|v| v.trim().is_empty()).unwrap_or(true) {
-        std::env::set_var("HUB_MEILISEARCH_API_KEY", random_hex(16));
+        // 用户显式设置时尊重用户值,不落盘;仅自动生成路径做持久化复用
+        std::env::set_var("HUB_MEILISEARCH_API_KEY", load_or_create_meili_key(secrets_dir)?);
     }
     if std::env::var("HUB_DATABASE_URL").map(|v| v.trim().is_empty()).unwrap_or(true) {
         let pw = std::env::var("HUB_POSTGRES_PASSWORD")
@@ -54,23 +78,126 @@ pub fn prepare(ports: &Ports) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// prepare 读写进程级 env var,rustc 测试默认并行执行会互相干扰;
+    /// 本模块全部测试用同一把锁串行化。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 逐实例唯一的临时 secrets 目录,避免并行 remove_dir_all 冲突。
+    static SECRETS_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    fn temp_secrets() -> std::path::PathBuf {
+        let n = SECRETS_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::env::temp_dir().join(format!("hub-env-test-{}-{n}", std::process::id()))
+    }
+
+    fn test_ports() -> Ports {
+        Ports { api: 8767, gateway: 8766, gitnexus: 4747, postgres: 5432, meili: 7700 }
+    }
+
+    fn cleanup_env() {
+        for key in [
+            "HUB_GATEWAY_SECRET",
+            "HUB_MEILISEARCH_API_KEY",
+            "HUB_DATABASE_URL",
+            "DATABASE_URL",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
 
     #[test]
     fn prepare_sets_database_urls_and_keeps_secrets_stable() {
-        std::env::remove_var("HUB_GATEWAY_SECRET");
-        std::env::remove_var("HUB_DATABASE_URL");
-        let ports = Ports { api: 8767, gateway: 8766, gitnexus: 4747, postgres: 5432, meili: 7700 };
-        prepare(&ports).unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let secrets = temp_secrets();
+        cleanup_env();
+        let ports = test_ports();
+        prepare(&ports, &secrets).unwrap();
         let secret = std::env::var("HUB_GATEWAY_SECRET").unwrap();
         assert!(secret.len() >= 32);
         let db = std::env::var("HUB_DATABASE_URL").unwrap();
         assert!(db.contains("127.0.0.1:5432"));
         assert!(db.contains("research_asset_hub"));
-        // 幂等:再次 prepare 不换 secret
-        prepare(&ports).unwrap();
+        // 幂等:再次 prepare 不换 gateway secret
+        prepare(&ports, &secrets).unwrap();
         assert_eq!(std::env::var("HUB_GATEWAY_SECRET").unwrap(), secret);
-        for key in ["HUB_GATEWAY_SECRET", "HUB_DATABASE_URL"] {
-            std::env::remove_var(key);
-        }
+        cleanup_env();
+        let _ = std::fs::remove_dir_all(&secrets);
+    }
+
+    #[test]
+    fn meili_key_persists_across_prepares() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let secrets = temp_secrets();
+        cleanup_env();
+        let ports = test_ports();
+        prepare(&ports, &secrets).unwrap();
+        let first = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
+        // 二次 prepare:env 已被置位走不到生成路径,清掉后重走持久化路径
+        std::env::remove_var("HUB_MEILISEARCH_API_KEY");
+        prepare(&ports, &secrets).unwrap();
+        let second = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
+        assert_eq!(first, second, "二次 prepare 应复用落盘的 meili key");
+        // 落盘内容与 env 一致
+        let on_disk = std::fs::read_to_string(secrets.join("meili-master-key")).unwrap();
+        assert_eq!(on_disk.trim(), first);
+        cleanup_env();
+        let _ = std::fs::remove_dir_all(&secrets);
+    }
+
+    #[test]
+    fn meili_key_reuses_preexisting_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let secrets = temp_secrets();
+        std::fs::create_dir_all(&secrets).unwrap();
+        let preloaded = "0123456789abcdef0123456789abcdef";
+        std::fs::write(secrets.join("meili-master-key"), preloaded).unwrap();
+        cleanup_env();
+        prepare(&test_ports(), &secrets).unwrap();
+        assert_eq!(std::env::var("HUB_MEILISEARCH_API_KEY").unwrap(), preloaded);
+        // 文件保持原内容(未被覆盖)
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("meili-master-key")).unwrap(),
+            preloaded
+        );
+        cleanup_env();
+        let _ = std::fs::remove_dir_all(&secrets);
+    }
+
+    #[test]
+    fn meili_key_regenerates_on_corrupt_or_empty_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let ports = test_ports();
+        // 损坏内容:非 hex
+        let secrets = temp_secrets();
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("meili-master-key"), "garbage!!\n").unwrap();
+        cleanup_env();
+        prepare(&ports, &secrets).unwrap();
+        let regenerated = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
+        assert_ne!(regenerated, "garbage!!");
+        assert_eq!(regenerated.len(), 32, "重新生成的 key 应为 16 字节 hex: {regenerated}");
+        assert!(
+            regenerated.chars().all(|c| c.is_ascii_hexdigit()),
+            "重新生成的 key 应为合法 hex: {regenerated}"
+        );
+        let _ = std::fs::remove_dir_all(&secrets);
+
+        // 空文件
+        let secrets = temp_secrets();
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(secrets.join("meili-master-key"), "\n").unwrap();
+        cleanup_env();
+        prepare(&ports, &secrets).unwrap();
+        let key = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
+        assert_eq!(key.len(), 32);
+        assert_eq!(
+            std::fs::read_to_string(secrets.join("meili-master-key")).unwrap().trim(),
+            key,
+            "空文件应被覆盖为新 key"
+        );
+        cleanup_env();
+        let _ = std::fs::remove_dir_all(&secrets);
     }
 }

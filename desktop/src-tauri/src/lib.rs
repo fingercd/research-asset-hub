@@ -101,7 +101,9 @@ fn run_startup(app: tauri::AppHandle) {
     }
 
     let ports = orchestrator::Ports::from_env();
-    let _ = env::prepare(&ports);
+    // meili master key 落盘目录:数据根下 secrets/(与 logs/postgres-data 同级)
+    let secrets_dir = data_dir::data_root().join("secrets");
+    let _ = env::prepare(&ports, &secrets_dir);
 
     let app_for_events = app.clone();
     let orchestrator = Orchestrator::new(paths, ports, move |event| {
