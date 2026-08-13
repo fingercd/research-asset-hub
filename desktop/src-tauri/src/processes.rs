@@ -76,6 +76,65 @@ pub fn tcp_probe(port: u16) -> bool {
     .is_ok()
 }
 
+/// taskkill 单个进程(连同其进程树)。
+pub fn kill_pid(pid: u32) -> std::io::Result<()> {
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("taskkill /PID {pid} 返回失败"),
+        ))
+    }
+}
+
+/// 查询本机全部进程 (pid, 命令行),Windows 经 PowerShell Get-CimInstance。
+/// 供 Preflight 识别壳异常退出后残留的自有应用进程(命令行特征匹配)。
+/// 查询失败返回空列表:调用方按"无非自有进程可清理"处理,不影响报错路径。
+pub fn list_processes() -> Vec<(u32, String)> {
+    let output = match Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "ConvertTo-Json -Compress @(Get-CimInstance Win32_Process | Select-Object ProcessId, CommandLine)",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let pid = item
+                .get("ProcessId")
+                .and_then(|v| v.as_u64())
+                .or_else(|| {
+                    item.get("ProcessId")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                })?;
+            let cmd = item
+                .get("CommandLine")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Some((pid as u32, cmd))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
