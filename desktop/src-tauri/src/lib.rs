@@ -180,14 +180,21 @@ pub fn run() {
             orchestrator: Mutex::new(None),
         })
         .setup(|app| {
-            // 桌面壳注入 API 基址;前端 resolveApiBase 优先读它(Task 2)
-            let api_port = orchestrator::Ports::from_env().api;
-            let window = app
-                .get_webview_window("main")
-                .expect("main window must exist");
-            let _ = window.eval(format!(
-                "window.__HUB_API_BASE__ = 'http://127.0.0.1:{api_port}/api/v1';"
-            ));
+            // 桌面壳注入 API 基址;前端 resolveApiBase 优先读它(Task 2)。
+            // 用 initialization script 而非 setup 内一次性 eval:初始化脚本在每次
+            // 文档加载(包括 location.replace('index.html') 导航)时重新执行,
+            // 一次性 eval 注入的值会随导航被清空,导致主界面 API 全部打向
+            // tauri://localhost 404。窗口改为 create: false + from_config 手动创建,
+            // 以便在构建时附加初始化脚本(conf 的 WindowConfig 无 initializationScript 字段)。
+            // 端口固定 8767;后续动态化时改由 Ports 拼脚本字符串再传入。
+            const API_BASE_INIT_SCRIPT: &str =
+                "window.__HUB_API_BASE__ = 'http://127.0.0.1:8767/api/v1';";
+            let window_config = app.config().app.windows.first().expect("main window config");
+            let _main_window = tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)
+                .expect("main window config must be valid")
+                .initialization_script(API_BASE_INIT_SCRIPT)
+                .build()
+                .expect("main window must build");
 
             let rx = tray::create_tray(app.handle(), true)
                 .expect("tray creation must succeed")
