@@ -192,10 +192,12 @@ impl Orchestrator {
                     "-E", "UTF8",
                     "--locale=C",
                 ])
-                .status()
-                .map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
-            // 无论 initdb 成功与否都清理密码文件:失败路径不能残留明文密码,忽略删除错误
+                .status();
+            // 无论 initdb 执行成功、失败还是无法执行都清理密码文件:
+            // spawn 失败路径同样不能残留明文密码,忽略删除错误
             let _ = std::fs::remove_file(&pwfile);
+            let status = status
+                .map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
             if !status.success() {
                 return Err(self.fail(Step::Postgres, "initdb 失败,详见日志目录 postgres.log"));
             }
@@ -473,6 +475,8 @@ mod tests {
     #[test]
     fn postgres_failure_stops_without_later_events() {
         let (root, paths, data) = fake_world();
+        // data 将被 with_probe 按值消费,提前克隆数据目录路径用于断言密码文件清理
+        let data_dir = data.postgres.clone();
         let (events, sink) = record();
         // 恒 false 探测:Preflight 通过;Postgres 阶段假 initdb.exe 不存在,
         // 执行报 NotFound → fail 发出 (Postgres, Failed) 事件后 start() 返回 Err,
@@ -502,6 +506,11 @@ mod tests {
             !seq.iter()
                 .any(|(s, _)| matches!(s, Step::Meili | Step::Migrate | Step::Services)),
             "Postgres 失败后不得进入 Meili 及之后的步骤"
+        );
+        // initdb spawn 失败路径同样必须清理密码文件,不得残留明文密码
+        assert!(
+            !data_dir.join(".pwfile").exists(),
+            "initdb 执行失败后不得残留密码文件"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
