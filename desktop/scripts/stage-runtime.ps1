@@ -39,11 +39,12 @@ $targetSitePackages = Join-Path $targetPy 'Lib\site-packages'
 if (-not (Test-Path $venvSitePackages)) { throw "未找到 .venv site-packages: $venvSitePackages" }
 New-Item -ItemType Directory -Force -Path $targetSitePackages | Out-Null
 Copy-Item -Recurse -Force (Join-Path $venvSitePackages '*') (Join-Path $targetSitePackages '')
-# 删减:ML/科研类死重包(apps/ 与 packages/ 零导入),否则 NSIS 32 位 makensis 因输入超 2GB 失败
-foreach ($pkg in @('torch', 'torchvision', 'torchaudio', 'torchdata', 'scipy', 'scipy.libs',
-                   'transformers', 'sympy', 'sklearn', 'numpy', 'numpy.libs', 'pandas', 'pandas.libs')) {
-    Remove-Item -Recurse -Force (Join-Path $targetSitePackages $pkg) -ErrorAction SilentlyContinue
-}
+# 删减:ML/科研类死重包(apps/ 与 packages/ 零导入),否则 NSIS 32 位 makensis 因输入超 2GB 失败。
+# 前缀匹配一并带走 dist-info / 生态残留(functorch/torchgen/sentence_transformers/scikit_learn 等)
+Get-ChildItem $targetSitePackages -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^(torch|torchvision|torchaudio|torchdata|scipy|scikit_learn|numpy|pandas|sklearn|sympy|transformers|sentence_transformers|functorch|torchgen)' } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Force (Join-Path $targetSitePackages 'isympy.py') -ErrorAction SilentlyContinue
 Get-ChildItem -Recurse -Force -Directory $targetPy -Filter '__pycache__' -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
