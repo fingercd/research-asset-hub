@@ -76,17 +76,6 @@ pub fn tcp_probe(port: u16) -> bool {
     .is_ok()
 }
 
-pub fn wait_for_port(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if tcp_probe(port) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,11 +3,12 @@
 
 use std::path::PathBuf;
 use std::process::Command as StdCommand;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::data_dir::{data_paths, ensure_dirs, postgres_initialized, DataPaths};
-use crate::processes::{kill_tree, spawn, wait_for_port, ChildHandle};
+use crate::processes::{kill_tree, spawn, ChildHandle};
 use crate::runtime::RuntimePaths;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +79,9 @@ pub enum StartupError {
     StepFailed { step: Step, detail: String },
 }
 
+/// 取消路径的 detail 值:壳层以此区分"用户主动取消"与真实失败,不弹错误框。
+pub const CANCEL_DETAIL: &str = "已取消";
+
 impl std::fmt::Display for StartupError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -100,6 +104,8 @@ pub struct Orchestrator {
     on_event: Box<dyn Fn(&StartupEvent) + Send + Sync>,
     children: Vec<ChildHandle>,
     shutting_down: Arc<AtomicBool>,
+    /// 取消标志:退出/重试置位后,start 的步骤检查点与端口等待循环尽快自行清理退出。
+    cancel: Arc<AtomicBool>,
     /// 开发回退:postgres/meili 走 docker compose 容器而非便携二进制。
     uses_containers: bool,
 }
@@ -118,6 +124,7 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: false,
         }
     }
@@ -128,8 +135,24 @@ impl Orchestrator {
         self
     }
 
+    /// 请求正在进行的 start 尽快退出:置位取消标志,等待循环 ≤500ms 内察觉。
+    /// 不直接杀进程;子进程由 start 取消路径或 shutdown() 清理。
+    pub fn request_shutdown(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// 克隆取消令牌:壳层在退出/重试时无需获取编排锁即可置位,
+    /// 打断进行中的 start(其锁内等待循环会自行返回),避免与 start 争锁被阻塞。
+    pub fn cancel_token(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
     fn emit(&self, step: Step, status: StepStatus, detail: Option<String>) {
-        (self.on_event)(&StartupEvent { step, status, detail });
+        (self.on_event)(&StartupEvent {
+            step,
+            status,
+            detail,
+        });
     }
 
     fn fail(&self, step: Step, detail: impl Into<String>) -> StartupError {
@@ -139,12 +162,50 @@ impl Orchestrator {
         StartupError::StepFailed { step, detail }
     }
 
+    /// 步骤间取消检查:已取消则清理子进程并返回"已取消"错误。
+    /// 与 fail 不同,不发 Failed 事件——用户主动取消不是启动失败。
+    fn check_cancelled(&mut self, step: Step) -> Result<(), StartupError> {
+        if self.cancel.load(Ordering::SeqCst) {
+            self.cleanup_children();
+            return Err(StartupError::StepFailed {
+                step,
+                detail: CANCEL_DETAIL.into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 与 processes 的 wait_for_port 同语义的轮询等待,每轮检查取消标志;
+    /// 被取消返回 false,调用处随后经 check_cancelled 返回"已取消"错误。
+    /// 探测沿用 self.probe(生产即 tcp_probe,测试可注入确定性探测)。
+    fn wait_for_port_cancellable(&self, port: u16, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.cancel.load(Ordering::SeqCst) {
+                return false;
+            }
+            if (self.probe)(port) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        false
+    }
+
+    /// 停止并清空全部已 spawn 子进程(逆序)。start 取消路径与 shutdown 共用。
+    fn cleanup_children(&mut self) {
+        for handle in self.children.iter().rev() {
+            let _ = kill_tree(handle);
+        }
+        self.children.clear();
+    }
+
     pub fn start(&mut self) -> Result<(), StartupError> {
-        ensure_dirs(&self.data).map_err(|e| {
-            self.fail(Step::Preflight, format!("无法创建数据目录: {e}"))
-        })?;
+        ensure_dirs(&self.data)
+            .map_err(|e| self.fail(Step::Preflight, format!("无法创建数据目录: {e}")))?;
 
         // 1. 预检:关键端口冲突检测(应用端口)
+        self.check_cancelled(Step::Preflight)?;
         self.emit(Step::Preflight, StepStatus::Pending, None);
         let busy: Vec<u16> = [self.ports.api, self.ports.gateway, self.ports.gitnexus]
             .into_iter()
@@ -157,21 +218,25 @@ impl Orchestrator {
         self.emit(Step::Preflight, StepStatus::Done, None);
 
         // 2. PostgreSQL
+        self.check_cancelled(Step::Postgres)?;
         self.emit(Step::Postgres, StepStatus::Pending, None);
         self.start_postgres()?;
         self.emit(Step::Postgres, StepStatus::Done, None);
 
         // 3. Meilisearch
+        self.check_cancelled(Step::Meili)?;
         self.emit(Step::Meili, StepStatus::Pending, None);
         self.start_meili()?;
         self.emit(Step::Meili, StepStatus::Done, None);
 
         // 4. 迁移
+        self.check_cancelled(Step::Migrate)?;
         self.emit(Step::Migrate, StepStatus::Pending, None);
         self.run_migrations()?;
         self.emit(Step::Migrate, StepStatus::Done, None);
 
         // 5. 应用进程
+        self.check_cancelled(Step::Services)?;
         self.emit(Step::Services, StepStatus::Pending, None);
         self.start_services()?;
         self.emit(Step::Services, StepStatus::Done, None);
@@ -197,7 +262,8 @@ impl Orchestrator {
                     "docker compose up 失败,请确认 Docker Desktop 已启动",
                 ));
             }
-            if !wait_for_port(self.ports.postgres, std::time::Duration::from_secs(60)) {
+            if !self.wait_for_port_cancellable(self.ports.postgres, Duration::from_secs(60)) {
+                self.check_cancelled(Step::Postgres)?;
                 return Err(self.fail(Step::Postgres, "PostgreSQL 容器未在 60 秒内就绪"));
             }
             return Ok(());
@@ -209,23 +275,26 @@ impl Orchestrator {
             let pw = std::env::var("HUB_POSTGRES_PASSWORD")
                 .unwrap_or_else(|_| "research_hub_local".to_string());
             let pwfile = self.data.postgres.join(".pwfile");
-            std::fs::write(&pwfile, &pw).map_err(|e| {
-                self.fail(Step::Postgres, format!("无法写密码文件: {e}"))
-            })?;
+            std::fs::write(&pwfile, &pw)
+                .map_err(|e| self.fail(Step::Postgres, format!("无法写密码文件: {e}")))?;
             let status = StdCommand::new(bin.join("initdb.exe"))
                 .args([
-                    "-D", data.to_str().unwrap_or_default(),
-                    "-U", "research_hub",
-                    "--pwfile", pwfile.to_str().unwrap_or_default(),
-                    "-E", "UTF8",
+                    "-D",
+                    data.to_str().unwrap_or_default(),
+                    "-U",
+                    "research_hub",
+                    "--pwfile",
+                    pwfile.to_str().unwrap_or_default(),
+                    "-E",
+                    "UTF8",
                     "--locale=C",
                 ])
                 .status();
             // 无论 initdb 执行成功、失败还是无法执行都清理密码文件:
             // spawn 失败路径同样不能残留明文密码,忽略删除错误
             let _ = std::fs::remove_file(&pwfile);
-            let status = status
-                .map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
+            let status =
+                status.map_err(|e| self.fail(Step::Postgres, format!("initdb 无法执行: {e}")))?;
             if !status.success() {
                 return Err(self.fail(Step::Postgres, "initdb 失败,详见日志目录 postgres.log"));
             }
@@ -235,19 +304,26 @@ impl Orchestrator {
             let log = self.log_file("postgres");
             let out = StdCommand::new(bin.join("pg_ctl.exe"))
                 .args([
-                    "-D", data.to_str().unwrap_or_default(),
-                    "-l", log.to_str().unwrap_or_default(),
-                    "-o", &format!("-p {} -c listen_addresses=127.0.0.1", self.ports.postgres),
+                    "-D",
+                    data.to_str().unwrap_or_default(),
+                    "-l",
+                    log.to_str().unwrap_or_default(),
+                    "-o",
+                    &format!("-p {} -c listen_addresses=127.0.0.1", self.ports.postgres),
                     "start",
                 ])
                 .output()
                 .map_err(|e| self.fail(Step::Postgres, format!("pg_ctl 无法执行: {e}")))?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                return Err(self.fail(Step::Postgres, format!("pg_ctl start 失败: {}", stderr.trim())));
+                return Err(self.fail(
+                    Step::Postgres,
+                    format!("pg_ctl start 失败: {}", stderr.trim()),
+                ));
             }
         }
-        if !wait_for_port(self.ports.postgres, std::time::Duration::from_secs(30)) {
+        if !self.wait_for_port_cancellable(self.ports.postgres, Duration::from_secs(30)) {
+            self.check_cancelled(Step::Postgres)?;
             return Err(self.fail(Step::Postgres, "PostgreSQL 未在 30 秒内就绪"));
         }
         Ok(())
@@ -256,7 +332,8 @@ impl Orchestrator {
     fn start_meili(&mut self) -> Result<(), StartupError> {
         if self.uses_containers {
             // meili 容器已随 Postgres 步骤的 compose up 拉起,此处仅等端口就绪。
-            if !wait_for_port(self.ports.meili, std::time::Duration::from_secs(60)) {
+            if !self.wait_for_port_cancellable(self.ports.meili, Duration::from_secs(60)) {
+                self.check_cancelled(Step::Meili)?;
                 return Err(self.fail(Step::Meili, "Meilisearch 容器未在 60 秒内就绪"));
             }
             return Ok(());
@@ -270,10 +347,14 @@ impl Orchestrator {
             "meilisearch",
             &self.paths.meilisearch,
             &[
-                "--db-path", self.data.meili.to_str().unwrap_or_default(),
-                "--http-addr", &format!("127.0.0.1:{}", self.ports.meili),
-                "--master-key", &key,
-                "--env", "production",
+                "--db-path",
+                self.data.meili.to_str().unwrap_or_default(),
+                "--http-addr",
+                &format!("127.0.0.1:{}", self.ports.meili),
+                "--master-key",
+                &key,
+                "--env",
+                "production",
                 "--no-analytics",
             ],
             &self.data.logs,
@@ -281,7 +362,8 @@ impl Orchestrator {
         )
         .map_err(|e| self.fail(Step::Meili, format!("无法启动 Meilisearch: {e}")))?;
         self.children.push(handle);
-        if !wait_for_port(self.ports.meili, std::time::Duration::from_secs(60)) {
+        if !self.wait_for_port_cancellable(self.ports.meili, Duration::from_secs(60)) {
+            self.check_cancelled(Step::Meili)?;
             return Err(self.fail(Step::Meili, "Meilisearch 未在 60 秒内就绪"));
         }
         Ok(())
@@ -289,7 +371,14 @@ impl Orchestrator {
 
     fn run_migrations(&self) -> Result<(), StartupError> {
         let status = StdCommand::new(&self.paths.python)
-            .args(["-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"])
+            .args([
+                "-m",
+                "alembic",
+                "-c",
+                "migrations/alembic.ini",
+                "upgrade",
+                "head",
+            ])
             .current_dir(&self.paths.python_workdir)
             .status()
             .map_err(|e| self.fail(Step::Migrate, format!("alembic 无法执行: {e}")))?;
@@ -350,24 +439,25 @@ impl Orchestrator {
         .map_err(|e| self.fail(Step::Services, format!("gitnexus 无法启动: {e}")))?;
         self.children.push(gitnexus);
 
-        if !wait_for_port(self.ports.api, std::time::Duration::from_secs(120)) {
+        if !self.wait_for_port_cancellable(self.ports.api, Duration::from_secs(120)) {
+            self.check_cancelled(Step::Services)?;
             return Err(self.fail(Step::Services, "API 未在 120 秒内就绪"));
         }
-        if !wait_for_port(self.ports.gateway, std::time::Duration::from_secs(60)) {
+        if !self.wait_for_port_cancellable(self.ports.gateway, Duration::from_secs(60)) {
+            self.check_cancelled(Step::Services)?;
             return Err(self.fail(Step::Services, "资产网关未在 60 秒内就绪"));
         }
         Ok(())
     }
 
     /// 逆序停止:应用进程 → meili → postgres。幂等,可重复调用。
+    /// 先置位取消标志(打断可能仍在进行的 start 端口等待),再清子进程与容器/postgres。
     pub fn shutdown(&mut self) {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
         }
-        for handle in self.children.iter().rev() {
-            let _ = kill_tree(handle);
-        }
-        self.children.clear();
+        self.cancel.store(true, Ordering::SeqCst);
+        self.cleanup_children();
         if self.uses_containers {
             // 只 stop 不下线:保留 compose 卷,下次启动复用数据。
             let _ = StdCommand::new("docker")
@@ -381,8 +471,10 @@ impl Orchestrator {
             let bin = &self.paths.postgres_bin;
             let _ = StdCommand::new(bin.join("pg_ctl.exe"))
                 .args([
-                    "-D", self.data.postgres.to_str().unwrap_or_default(),
-                    "-m", "fast",
+                    "-D",
+                    self.data.postgres.to_str().unwrap_or_default(),
+                    "-m",
+                    "fast",
                     "stop",
                 ])
                 .status();
@@ -408,6 +500,7 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: false,
         }
     }
@@ -428,6 +521,7 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             uses_containers: true,
         }
     }
@@ -456,10 +550,15 @@ mod tests {
         }
     }
 
+    /// 全局计数器:rustc 测试默认并行执行,fake_world 的 root 须逐实例唯一,
+    /// 避免并行的 remove_dir_all 删掉其他测试正在使用的目录。
+    static FAKE_WORLD_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
     /// tempdir 下的假运行时路径与数据目录:任何真实命令都不会执行。
     /// 失败要么发生在 Preflight 探测阶段,要么发生在执行不存在的假 exe(报 NotFound)。
     fn fake_world() -> (std::path::PathBuf, RuntimePaths, DataPaths) {
-        let root = std::env::temp_dir().join(format!("hub-orch-test-{}", std::process::id()));
+        let n = FAKE_WORLD_SEQ.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("hub-orch-test-{}-{n}", std::process::id()));
         let paths = RuntimePaths {
             python: root.join("runtime/python/python.exe"),
             python_workdir: root.join("app"),
@@ -516,7 +615,10 @@ mod tests {
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
                 assert_eq!(step, Step::Preflight);
-                assert!(detail.contains("端口被占用"), "detail 应说明占用端口: {detail}");
+                assert!(
+                    detail.contains("端口被占用"),
+                    "detail 应说明占用端口: {detail}"
+                );
             }
             other => panic!("期望 Preflight 失败,得到: {other:?}"),
         }
@@ -551,7 +653,10 @@ mod tests {
         match result {
             Err(StartupError::StepFailed { step, detail }) => {
                 assert_eq!(step, Step::Postgres);
-                assert!(detail.contains("initdb"), "detail 应说明 initdb 失败: {detail}");
+                assert!(
+                    detail.contains("initdb"),
+                    "detail 应说明 initdb 失败: {detail}"
+                );
             }
             other => panic!("期望 Postgres 失败,得到: {other:?}"),
         }
@@ -587,7 +692,10 @@ mod tests {
         let (_, sink) = record();
         let orch = Orchestrator::new(paths, test_ports(), sink);
         assert!(!orch.uses_containers, "new 保持生产语义:不启用容器");
-        assert!(orch.with_containers().uses_containers, "with_containers 打开容器回退");
+        assert!(
+            orch.with_containers().uses_containers,
+            "with_containers 打开容器回退"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -614,6 +722,84 @@ mod tests {
         drop(seq);
         // 容器模式 shutdown 执行 docker compose stop(fake root 下命令失败被忽略),不得 panic
         orch.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn start_is_cancellable_while_waiting_for_port() {
+        let (root, paths, data) = fake_world();
+        // postgres 视为已初始化:跳过 initdb;注入探测对 postgres 端口返回 true,
+        // 使 pg_ctl 与 postgres 端口等待都被跳过,start 直达 meili 端口等待循环。
+        std::fs::create_dir_all(&data.postgres).unwrap();
+        std::fs::write(data.postgres.join("PG_VERSION"), "16\n").unwrap();
+        // meilisearch 假可执行文件:用真实存在的 cmd.exe 副本让 spawn 成功
+        // (spawn 只要求进程能启动),此时 children 已含 meili 进程,等待循环开始。
+        let cmd =
+            std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        std::fs::create_dir_all(paths.meilisearch.parent().unwrap()).unwrap();
+        std::fs::copy(&cmd, &paths.meilisearch).unwrap();
+        let (events, sink) = record();
+        let ports = test_ports();
+        let orch = Arc::new(Mutex::new(Orchestrator::with_probe(
+            paths,
+            data,
+            ports,
+            move |p| p == ports.postgres,
+            sink,
+        )));
+        // 与壳层一致:start 前取出取消令牌,打断时经令牌无锁置位——
+        // start 全程持有编排锁,直接拿锁 request_shutdown 会被阻塞到 start 结束。
+        let cancel = orch.lock().unwrap().cancel_token();
+
+        // start 在独立线程执行(与壳层编排线程一致);主线程模拟退出/重试信号线程。
+        let start_handle = {
+            let orch = orch.clone();
+            std::thread::spawn(move || {
+                let begin = std::time::Instant::now();
+                let result = orch.lock().unwrap().start();
+                (result, begin.elapsed())
+            })
+        };
+        // 等 start 进入 meili 端口等待(Meili Pending 事件已发出),留少量余量后打断
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(s, st)| *s == Step::Meili && *st == StepStatus::Pending)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        cancel.store(true, Ordering::SeqCst);
+
+        let (result, elapsed) = start_handle.join().expect("start 线程应正常结束");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "取消后 start 应在远小于端口超时前返回,实际 {elapsed:?}"
+        );
+        match result {
+            Err(StartupError::StepFailed { step, detail }) => {
+                assert_eq!(step, Step::Meili, "应在 meili 端口等待处被取消");
+                assert_eq!(detail, CANCEL_DETAIL);
+            }
+            other => panic!("期望取消错误,得到: {other:?}"),
+        }
+        assert!(
+            orch.lock().unwrap().children.is_empty(),
+            "取消后已 spawn 的子进程应被清理"
+        );
+        let seq = events.lock().unwrap();
+        assert!(
+            seq.iter()
+                .any(|(s, st)| *s == Step::Meili && *st == StepStatus::Pending),
+            "start 应已进入 Meili 等待: {seq:?}"
+        );
+        assert!(
+            !seq.iter().any(|(_, st)| *st == StepStatus::Failed),
+            "取消路径不应发 Failed 事件: {seq:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -6,17 +6,26 @@ mod runtime;
 mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
-use orchestrator::{Orchestrator, StartupError, StepStatus};
+use orchestrator::{Orchestrator, StartupError, StepStatus, CANCEL_DETAIL};
+
+/// 当前编排实例与它的取消令牌:start 在 orch 的锁内执行;
+/// 退出/重试先经 cancel 无锁置位打断(等待循环 ≤500ms 察觉),再取 orch 锁清理,
+/// 避免与进行中的 start 争锁被阻塞(此前最长 120s)。
+#[derive(Clone)]
+pub struct OrchestratorEntry {
+    pub orch: Arc<Mutex<Orchestrator>>,
+    pub cancel: Arc<AtomicBool>,
+}
 
 pub struct AppState {
     pub force_exit: AtomicBool,
-    pub orchestrator: Mutex<Option<Orchestrator>>,
+    pub orchestrator: Mutex<Option<OrchestratorEntry>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -33,27 +42,46 @@ pub fn emit_startup_progress(
     app: &tauri::AppHandle,
     progress: &StartupProgress,
 ) -> tauri::Result<()> {
-    let json = serde_json::to_string(progress)
-        .map_err(|e| tauri::Error::Anyhow(e.into()))?;
-    let script = format!(
-        "window.__hubProgress && window.__hubProgress({json});"
-    );
+    let json = serde_json::to_string(progress).map_err(|e| tauri::Error::Anyhow(e.into()))?;
+    let script = format!("window.__hubProgress && window.__hubProgress({json});");
     if let Some(window) = app.get_webview_window("main") {
         window.eval(&script)?;
     }
     Ok(())
 }
 
+/// 退出前清理:先经取消令牌无锁置位(打断进行中的 start,等待循环 ≤500ms 察觉),
+/// 再取编排锁 shutdown 停掉全部后台进程。Option 保留不动,RunEvent::Exit 兜底
+/// 可再次调用,shutdown 幂等。
+fn shutdown_orchestrator(state: &AppState) {
+    let entry = {
+        let guard = state.orchestrator.lock().unwrap();
+        if let Some(e) = guard.as_ref() {
+            e.cancel.store(true, Ordering::SeqCst);
+        }
+        guard.clone()
+    };
+    if let Some(e) = entry {
+        e.orch.lock().unwrap().shutdown();
+    }
+}
+
 /// 在编排线程执行一次完整启动;成功则导航到主界面,失败则弹窗。
-/// 重试路径:开头先 shutdown 掉上一次半启动的子进程,避免端口占用误报。
+/// 重试路径:开头取走上一个实例——先经令牌无锁置位取消(打断进行中的 start),
+/// 再取锁 shutdown 收尾(已结束的实例立即清理残留,进行中的 ≤~1s 自行返回后清理),
+/// 避免端口占用误报。
 fn run_startup(app: tauri::AppHandle) {
-    {
+    let old = {
         let state = app.state::<AppState>();
         let mut guard = state.orchestrator.lock().unwrap();
-        if let Some(orch) = guard.as_mut() {
-            orch.shutdown();
-        }
-        *guard = None;
+        guard.take()
+    };
+    if let Some(old) = old {
+        // 先经令牌无锁置位取消(打断进行中的 start),再取锁 shutdown 收尾
+        // (已结束的实例立即清理残留,进行中的 ≤~1s 自行返回后清理)。
+        // shutdown 在 state 锁外执行,不阻塞退出路径。
+        old.cancel.store(true, Ordering::SeqCst);
+        old.orch.lock().unwrap().shutdown();
     }
 
     let resource = app.path().resource_dir().unwrap_or_default();
@@ -96,14 +124,24 @@ fn run_startup(app: tauri::AppHandle) {
         orchestrator
     };
 
-    let state = app.state::<AppState>();
-    *state.orchestrator.lock().unwrap() = Some(orchestrator);
+    let arc = Arc::new(Mutex::new(orchestrator));
+    {
+        // 换入新实例;cancel 令牌与 orch 锁并排存储,退出/重试可无锁打断 start。
+        // 此时 start 尚未开始,拿 orch 锁取令牌立即可得。
+        let state = app.state::<AppState>();
+        let cancel = arc.lock().unwrap().cancel_token();
+        *state.orchestrator.lock().unwrap() = Some(OrchestratorEntry {
+            orch: arc.clone(),
+            cancel,
+        });
+    }
 
-    let result = {
-        let mut guard = state.orchestrator.lock().unwrap();
-        guard.as_mut().expect("just inserted").start()
-    };
+    // start 在编排锁内、AppState 锁外执行:退出路径不再被其全程阻塞。
+    let result = arc.lock().unwrap().start();
 
+    // start 结束(成功/失败/取消)后保留 Option 不动:成功实例持后台进程句柄、
+    // 失败实例可能残留半启动子进程,退出路径依赖 Option 完成 shutdown 才能无残留;
+    // 不写回 Option 也就不会覆盖重试换入的更新实例。
     match result {
         Ok(()) => {
             // 编排完成即就绪,导航到主界面
@@ -112,6 +150,10 @@ fn run_startup(app: tauri::AppHandle) {
             }
         }
         Err(StartupError::StepFailed { step, detail }) => {
+            // 用户主动取消(退出/重试打断)不是失败,不弹错误框
+            if detail == CANCEL_DETAIL {
+                return;
+            }
             let message = format!("{}失败\n\n{}", step.as_str(), detail);
             app.dialog()
                 .message(message)
@@ -160,6 +202,9 @@ pub fn run() {
                         tray::TraySignal::Quit => {
                             let state = handle.state::<AppState>();
                             state.force_exit.store(true, Ordering::SeqCst);
+                            // 显式清理:先无锁取消(打断进行中的 start,≤~1s 自行返回),
+                            // 再 shutdown 停全部后台;RunEvent::Exit 兜底再幂等执行一次。
+                            shutdown_orchestrator(&state);
                             if let Some(w) = handle.get_webview_window("main") {
                                 let _ = w.destroy();
                             }
@@ -177,10 +222,8 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
                 if state.force_exit.load(Ordering::SeqCst) {
-                    let mut guard = state.orchestrator.lock().unwrap();
-                    if let Some(orch) = guard.as_mut() {
-                        orch.shutdown();
-                    }
+                    // 先无锁取消再 shutdown,不阻塞 UI 线程等待进行中的 start
+                    shutdown_orchestrator(&state);
                     // 允许窗口真正关闭,进程随之退出
                     return;
                 }
@@ -192,13 +235,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // RunEvent::Exit 兜底:任何退出路径都保证后台进程被清理
+            // RunEvent::Exit 兜底:任何退出路径都保证后台进程被清理(shutdown 幂等)
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
-                let mut guard = state.orchestrator.lock().unwrap();
-                if let Some(orch) = guard.as_mut() {
-                    orch.shutdown();
-                }
+                shutdown_orchestrator(&state);
             }
         });
 }
