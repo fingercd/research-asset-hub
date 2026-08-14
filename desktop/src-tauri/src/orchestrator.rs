@@ -686,6 +686,8 @@ impl Orchestrator {
         }
         // meili 由 kill_tree 已停;postgres 优雅停止。
         // pg_ctl stop 秒级完成,保持 .status() 同步等待(见 run_command_cancellable 注释)。
+        // 与 start_postgres 一致显式 Stdio::null():壳是 GUI 子系统进程,避免
+        // pg_ctl 输出写入无效句柄(防御性,与管道 EOF 坑同源的 stdio 纪律)。
         if (self.probe)(self.ports.postgres) {
             let bin = &self.paths.postgres_bin;
             let _ = StdCommand::new(bin.join("pg_ctl.exe"))
@@ -696,6 +698,8 @@ impl Orchestrator {
                     "fast",
                     "stop",
                 ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
         }
     }
