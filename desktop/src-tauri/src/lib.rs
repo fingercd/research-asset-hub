@@ -3,6 +3,7 @@ mod env;
 mod orchestrator;
 mod processes;
 mod runtime;
+mod single_instance;
 mod tray;
 mod updater;
 
@@ -170,6 +171,13 @@ fn run_startup(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 单实例保护必须在任何 Builder/setup 之前:第二个实例若进入 setup,
+    // 编排器预检会把已有实例的后台服务当作"残留"清理并弹报错(实测)。
+    // 此处互斥体拦截:已有实例则唤起其窗口后立即退出。
+    #[cfg(windows)]
+    if !single_instance::acquire() {
+        std::process::exit(0);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
