@@ -132,6 +132,16 @@ def create_app(
             result.status = "degraded"
         return result
 
+    # 桌面壳前端按 API_BASE(/api/v1)拼接 health 路径,与裸 /api/health 并存,
+    # 消除桌面模式健康检查 404(浏览器托管模式下 web_host 代理 /api/health)。
+    application.add_api_route(
+        "/api/v1/health",
+        health,
+        methods=["GET"],
+        response_model=HealthResponse,
+        tags=["system"],
+    )
+
     @application.get("/api", tags=["system"])
     def api_root() -> dict[str, str]:
         readiness = database_manager.check()
