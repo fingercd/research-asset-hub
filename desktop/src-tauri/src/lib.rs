@@ -150,9 +150,14 @@ fn run_startup(app: tauri::AppHandle) {
     // 不写回 Option 也就不会覆盖重试换入的更新实例。
     match result {
         Ok(()) => {
-            // 编排完成即就绪,导航到主界面
+            // 编排完成即就绪,导航到主界面并显示窗口。
+            // 窗口以 create: false 构建(就绪前不露空窗),首次启动的正常路径
+            // 此前从不调用 show(),窗口永远隐藏——用户看到的只有闪现的终端与
+            // 托盘图标,表现为"完全无法打开"。就绪后必须显式 show + 聚焦。
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.eval("location.replace('index.html');");
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         }
         Err(StartupError::StepFailed { step, detail }) => {

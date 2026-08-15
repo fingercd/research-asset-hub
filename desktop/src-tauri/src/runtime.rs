@@ -77,7 +77,9 @@ pub fn resolve_dev(root: &Path) -> RuntimePaths {
 /// 解析 PATH 上 gitnexus 命令的 shim 路径(镜像 scripts/hub.ps1:Get-Command gitnexus
 /// 得到 shim 后以 powershell -File 启动)。找不到时回退到命令名(启动阶段会报错)。
 fn gitnexus_shim() -> PathBuf {
-    let get_command = Command::new("powershell")
+    let mut get_command = Command::new("powershell");
+    crate::processes::no_console(&mut get_command);
+    let get_command = get_command
         .args([
             "-NoProfile",
             "-Command",
@@ -91,7 +93,9 @@ fn gitnexus_shim() -> PathBuf {
             }
         }
     }
-    let where_cmd = Command::new("where").arg("gitnexus").output();
+    let mut where_cmd = Command::new("where");
+    crate::processes::no_console(&mut where_cmd);
+    let where_cmd = where_cmd.arg("gitnexus").output();
     if let Ok(out) = where_cmd {
         if out.status.success() {
             if let Some(path) = first_line(&out.stdout) {

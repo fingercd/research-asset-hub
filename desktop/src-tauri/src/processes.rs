@@ -6,6 +6,20 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Windows 下阻止子进程创建控制台窗口。壳是 GUI 子系统进程,自身无控制台;
+/// 若不加 CREATE_NO_WINDOW,Windows 会为每个控制台子系统的子进程
+/// (python.exe、pg_ctl.exe、initdb.exe、taskkill、powershell 等)各自新建一个
+/// 独立控制台窗口,表现为启动时"闪现大量终端"。重定向 stdio 无法阻止窗口
+/// 创建,必须设置该标志。非 Windows 为空实现,方便跨平台编译。
+#[cfg(windows)]
+pub fn no_console(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+}
+
+#[cfg(not(windows))]
+pub fn no_console(_cmd: &mut Command) {}
+
 pub struct ChildHandle {
     /// 子进程语义标识(api/worker/…),供诊断日志使用
     #[allow(dead_code)]
@@ -26,6 +40,7 @@ pub fn spawn(
         .append(true)
         .open(log_file)?;
     let mut command = Command::new(exe);
+    no_console(&mut command);
     command
         .args(args)
         .current_dir(cwd)
@@ -55,7 +70,9 @@ pub fn wait_exit(handle: &ChildHandle, timeout: Duration) -> bool {
 
 /// 停止整个进程树(taskkill /T /F);随后等待进程退出。
 pub fn kill_tree(handle: &ChildHandle) -> std::io::Result<()> {
-    let _ = Command::new("taskkill")
+    let mut taskkill = Command::new("taskkill");
+    no_console(&mut taskkill);
+    let _ = taskkill
         .args(["/PID", &handle.pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -78,7 +95,9 @@ pub fn tcp_probe(port: u16) -> bool {
 
 /// taskkill 单个进程(连同其进程树)。
 pub fn kill_pid(pid: u32) -> std::io::Result<()> {
-    let status = Command::new("taskkill")
+    let mut taskkill = Command::new("taskkill");
+    no_console(&mut taskkill);
+    let status = taskkill
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -99,7 +118,9 @@ pub fn kill_pid(pid: u32) -> std::io::Result<()> {
 /// 的无关进程。查询失败(无监听归属/权限/解析失败)返回 None,调用方按
 /// "端口无 PID 归属"处理:不清理,报错提示用户,宁可不杀不误杀。
 pub fn port_owner(port: u16) -> Option<(u32, String)> {
-    let output = Command::new("powershell")
+    let mut ps = Command::new("powershell");
+    no_console(&mut ps);
+    let output = ps
         .args([
             "-NoProfile",
             "-Command",
@@ -131,7 +152,9 @@ pub fn port_owner(port: u16) -> Option<(u32, String)> {
 /// 供 port_owner 按 PID 取命令行。查询失败返回空列表:调用方按
 /// "无非自有进程可清理"处理,不影响报错路径。
 pub fn list_processes() -> Vec<(u32, String)> {
-    let output = match Command::new("powershell")
+    let mut ps = Command::new("powershell");
+    no_console(&mut ps);
+    let output = match ps
         .args([
             "-NoProfile",
             "-Command",

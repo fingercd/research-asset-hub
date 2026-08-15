@@ -76,6 +76,24 @@ pub fn prepare(ports: &Ports, secrets_dir: &Path) -> io::Result<()> {
     std::env::set_var("HUB_WEB_PORT", &web_port);
     std::env::set_var("HUB_WEB_ORIGIN", format!("http://127.0.0.1:{web_port}"));
     std::env::set_var("HUB_MEILISEARCH_URL", format!("http://127.0.0.1:{}", ports.meili));
+    // worker 心跳路径:配置默认值是相对路径 work/state/worker-heartbeat.json,
+    // 桌面壳内 api/worker 的 cwd 是安装目录(C:\Program Files\...\app,无写权限),
+    // worker 启动即 PermissionError 崩溃。壳注入数据根下的绝对路径,api 与
+    // worker 经同一 env(HUB_WORKER_HEARTBEAT_PATH,ApiSettings env_prefix=HUB_)
+    // 读到一致路径,健康检查的 worker stale 判断才有效。
+    if std::env::var("HUB_WORKER_HEARTBEAT_PATH")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        let heartbeat = crate::data_dir::data_root()
+            .join("work")
+            .join("state")
+            .join("worker-heartbeat.json");
+        std::env::set_var(
+            "HUB_WORKER_HEARTBEAT_PATH",
+            heartbeat.to_string_lossy().to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -106,6 +124,7 @@ mod tests {
             "HUB_MEILISEARCH_API_KEY",
             "HUB_DATABASE_URL",
             "DATABASE_URL",
+            "HUB_WORKER_HEARTBEAT_PATH",
         ] {
             std::env::remove_var(key);
         }
@@ -123,6 +142,16 @@ mod tests {
         let db = std::env::var("HUB_DATABASE_URL").unwrap();
         assert!(db.contains("127.0.0.1:5432"));
         assert!(db.contains("research_asset_hub"));
+        // worker 心跳路径注入数据根(避免安装目录无写权限导致 worker 崩溃)
+        let heartbeat = std::env::var("HUB_WORKER_HEARTBEAT_PATH").unwrap();
+        assert!(
+            heartbeat.ends_with("worker-heartbeat.json"),
+            "心跳路径应指向 worker-heartbeat.json: {heartbeat}"
+        );
+        assert!(
+            !heartbeat.contains("Program Files"),
+            "心跳路径不得落在安装目录: {heartbeat}"
+        );
         // 幂等:再次 prepare 不换 gateway secret
         prepare(&ports, &secrets).unwrap();
         assert_eq!(std::env::var("HUB_GATEWAY_SECRET").unwrap(), secret);

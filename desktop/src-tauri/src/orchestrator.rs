@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::data_dir::{data_paths, ensure_dirs, postgres_initialized, DataPaths};
-use crate::processes::{kill_tree, spawn, ChildHandle};
+use crate::processes::{kill_tree, no_console, spawn, ChildHandle};
 use crate::runtime::RuntimePaths;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +280,8 @@ impl Orchestrator {
     /// 并返回"已取消"错误,退出/重试不再挂起数分钟。
     /// 其余同步命令(initdb、pg_ctl stop)耗时秒级,保持 .status() 同步等待:
     /// 取消收益小,且 initdb 中途强杀会留下半初始化数据目录,同步等待更安全。
+    /// log_file 非 None 时 stdout/stderr 落盘(append),否则保持 null——
+    /// 迁移/容器启动失败时必须有可读日志,不能"详见日志"却无日志可看。
     fn run_command_cancellable(
         &mut self,
         step: Step,
@@ -287,15 +289,37 @@ impl Orchestrator {
         args: &[&str],
         cwd: Option<&std::path::Path>,
         fail_msg: &str,
+        log_file: Option<&std::path::Path>,
     ) -> Result<(), StartupError> {
         let mut cmd = StdCommand::new(program);
+        no_console(&mut cmd);
         cmd.args(args);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
-        // 显式 null:壳是 GUI 程序无控制台 stdio,且避免子进程继承怪异句柄
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+        match log_file {
+            Some(path) => {
+                // 走文件而非管道:长命子进程(容器启动的 docker)继承管道写端
+                // 会让读端等不到 EOF 而挂起(与 spawn/initdb 同源的 stdio 纪律)
+                let log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| {
+                        self.fail(
+                            step,
+                            format!("无法打开日志文件 {}: {e}", path.display()),
+                        )
+                    })?;
+                cmd.stdout(std::process::Stdio::from(log.try_clone().unwrap()))
+                    .stderr(std::process::Stdio::from(log));
+            }
+            None => {
+                // 显式 null:壳是 GUI 程序无控制台 stdio,且避免子进程继承怪异句柄
+                cmd.stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+            }
+        }
         let mut child = cmd
             .spawn()
             .map_err(|e| self.fail(step, format!("{} 无法执行: {e}", program.display())))?;
@@ -398,12 +422,14 @@ impl Orchestrator {
             // --wait 可达分钟级,走可取消轮询(取消时杀掉 compose 客户端,容器若仍在
             // 后台继续启动,由下次启动的 --wait/端口探测收敛)。
             let workdir = self.paths.python_workdir.clone();
+            let compose_log = self.log_file("postgres-compose");
             self.run_command_cancellable(
                 Step::Postgres,
                 std::path::Path::new("docker"),
                 &["compose", "-f", "deploy/compose.yaml", "up", "-d", "--wait"],
                 Some(&workdir),
                 "docker compose up 失败,请确认 Docker Desktop 已启动",
+                Some(&compose_log),
             )?;
             if !self.wait_for_port_cancellable(self.ports.postgres, Duration::from_secs(60)) {
                 self.check_cancelled(Step::Postgres)?;
@@ -435,7 +461,9 @@ impl Orchestrator {
                 .append(true)
                 .open(self.log_file("postgres-initdb"))
                 .map_err(|e| self.fail(Step::Postgres, format!("无法打开 initdb 日志: {e}")))?;
-            let status = StdCommand::new(bin.join("initdb.exe"))
+            let mut initdb = StdCommand::new(bin.join("initdb.exe"));
+            no_console(&mut initdb);
+            let status = initdb
                 .args([
                     "-D",
                     data.to_str().unwrap_or_default(),
@@ -472,7 +500,9 @@ impl Orchestrator {
                 .append(true)
                 .open(self.log_file("postgres-ctl"))
                 .map_err(|e| self.fail(Step::Postgres, format!("无法打开 pg_ctl 日志: {e}")))?;
-            let status = StdCommand::new(bin.join("pg_ctl.exe"))
+            let mut pgctl_start = StdCommand::new(bin.join("pg_ctl.exe"));
+            no_console(&mut pgctl_start);
+            let status = pgctl_start
                 .args([
                     "-D",
                     data.to_str().unwrap_or_default(),
@@ -517,7 +547,9 @@ impl Orchestrator {
         let bin = &self.paths.postgres_bin;
         let port = self.ports.postgres.to_string();
         let db = crate::env::APP_DB_NAME;
-        let created = StdCommand::new(bin.join("createdb.exe"))
+        let mut created = StdCommand::new(bin.join("createdb.exe"));
+        no_console(&mut created);
+        let created = created
             .args(["-h", "127.0.0.1", "-p", &port, "-U", "research_hub", db])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -527,7 +559,9 @@ impl Orchestrator {
             return Ok(());
         }
         // createdb 失败最常见原因是库已存在:psql 复查,存在即视为成功
-        let check = StdCommand::new(bin.join("psql.exe"))
+        let mut check = StdCommand::new(bin.join("psql.exe"));
+        no_console(&mut check);
+        let check = check
             .args([
                 "-h",
                 "127.0.0.1",
@@ -597,12 +631,14 @@ impl Orchestrator {
         // 路径先克隆,避免 &mut self 与 &self.paths 的借用冲突。
         let python = self.paths.python.clone();
         let workdir = self.paths.python_workdir.clone();
+        let migrate_log = self.log_file("migrate");
         self.run_command_cancellable(
             Step::Migrate,
             &python,
             &["-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
             Some(&workdir),
             "数据库迁移失败,详见日志",
+            Some(&migrate_log),
         )
     }
 
@@ -678,7 +714,9 @@ impl Orchestrator {
         self.cleanup_children();
         if self.uses_containers {
             // 只 stop 不下线:保留 compose 卷,下次启动复用数据。
-            let _ = StdCommand::new("docker")
+            let mut compose_stop = StdCommand::new("docker");
+            no_console(&mut compose_stop);
+            let _ = compose_stop
                 .args(["compose", "-f", "deploy/compose.yaml", "stop"])
                 .current_dir(&self.paths.python_workdir)
                 .status();
@@ -690,7 +728,9 @@ impl Orchestrator {
         // pg_ctl 输出写入无效句柄(防御性,与管道 EOF 坑同源的 stdio 纪律)。
         if (self.probe)(self.ports.postgres) {
             let bin = &self.paths.postgres_bin;
-            let _ = StdCommand::new(bin.join("pg_ctl.exe"))
+            let mut pgctl_stop = StdCommand::new(bin.join("pg_ctl.exe"));
+            no_console(&mut pgctl_stop);
+            let _ = pgctl_stop
                 .args([
                     "-D",
                     self.data.postgres.to_str().unwrap_or_default(),
@@ -1363,6 +1403,7 @@ mod tests {
                     &["/C", "ping -n 300 127.0.0.1"],
                     None,
                     "不应走到失败分支",
+                    None,
                 );
                 (result, begin.elapsed())
             })
