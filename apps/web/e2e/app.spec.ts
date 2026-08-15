@@ -205,7 +205,9 @@ async function installApiMock(page: Page) {
     const url = new URL(route.request().url());
     const path = url.pathname;
 
-    if (path === "/api/health") {
+    // 前端 health 请求经 API_BASE 拼接:桌面壳为 /api/v1/health,
+    // 浏览器托管模式(本 e2e 场景)默认 API_BASE=/api/v1 同样命中此路径。
+    if (path === "/api/health" || path === "/api/v1/health") {
       return json(route, {
         service: "research-asset-hub",
         status: "healthy",

@@ -263,7 +263,11 @@ async function search(
 
 export const api = {
   health: (signal?: AbortSignal) =>
-    request<HealthResponse>("/api/health", { signal, timeout: 5_000 }),
+    // 必须经 API_BASE 拼接:裸相对路径 /api/health 在桌面壳(origin 为
+    // tauri://localhost)下会被 SPA fallback 返回 index.html,status 解析为
+    // undefined,健康徽章误报"部分服务不可用"。桌面壳走 /api/v1/health,
+    // 浏览器托管模式经 web_host /api/* 代理到同一后端路由。
+    request<HealthResponse>(`${API_BASE}/health`, { signal, timeout: 5_000 }),
 
   dashboard: (signal?: AbortSignal) =>
     request<Dashboard>(`${API_BASE}/dashboard`, { signal }),
