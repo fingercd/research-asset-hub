@@ -167,4 +167,5 @@ GitHub 私有仓库用于代码与配置版本恢复，**不能恢复实际数�
 - [来源边界](docs/architecture/source-boundaries.md)
 - [桌面版开发与打包](desktop/README.md)
 - [MCP 使用说明](docs/MCP_USER_GUIDE.md)
+- [关键词知识工具与 AI for Math 增量交付](docs/reports/2026-10-02-keyword-knowledge-delivery.md)
 - [全部文档索引](docs/README.md)
