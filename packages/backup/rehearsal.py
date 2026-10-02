@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import socket
@@ -13,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import psycopg
@@ -26,6 +27,7 @@ from .workflow import wsl_path
 ACTIVE_PROJECT_NAME = "research-asset-hub"
 ACTIVE_PORTS = frozenset({5432, 7700, 8765, 8766, 8767})
 CORE_TABLES = (
+    "sources",
     "assets",
     "representations",
     "source_records",
@@ -39,7 +41,27 @@ CORE_TABLES = (
     "reading_states",
     "sync_conflicts",
     "audit_events",
+    "backup_runs",
+    "source_retirements",
+    "source_retirement_record_maps",
+    "source_retirement_representation_maps",
+    "source_retirement_mount_maps",
+    "source_retirement_successors",
+    "source_retirement_rollbacks",
 )
+ServingScope = Literal["serving_active", "all"]
+
+
+def _normalize_scope(value: str) -> ServingScope:
+    if value == "serving_active":
+        return "serving_active"
+    if value == "all":
+        return "all"
+    raise ValueError("scope must be 'serving_active' or 'all'")
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 PROJECT_NAME_PATTERN = re.compile(r"^rah-restore-[a-z0-9][a-z0-9-]{2,50}$")
 
 
@@ -138,8 +160,14 @@ class IndexRebuilder(Protocol):
 class MetadataIndexRebuilder:
     """Rebuild the keyword asset index in the isolated services."""
 
-    def __init__(self, *, batch_size: int = 64) -> None:
+    def __init__(
+        self,
+        *,
+        batch_size: int = 64,
+        scope: ServingScope = "serving_active",
+    ) -> None:
         self.batch_size = batch_size
+        self.scope = _normalize_scope(scope)
 
     def rebuild(self, context: IndexRebuildContext) -> Mapping[str, Any]:
         rows = self._load_assets(context.database_dsn)
@@ -186,10 +214,38 @@ class MetadataIndexRebuilder:
             "production_note": (
                 "Meilisearch keyword indexes are rebuildable state and are not restored."
             ),
+            "scope": self.scope,
         }
 
     def _load_assets(self, database_dsn: str) -> list[dict[str, Any]]:
-        sql = """
+        serving_clause = (
+            "" if self.scope == "all" else """
+            AND (
+                NOT EXISTS (
+                    SELECT 1 FROM representations any_rep
+                    WHERE any_rep.asset_id = assets.id
+                      AND any_rep.deleted_at IS NULL
+                )
+                OR EXISTS (
+                    SELECT 1 FROM representations active_rep
+                    WHERE active_rep.asset_id = assets.id
+                      AND active_rep.deleted_at IS NULL
+                      AND (
+                          active_rep.source_id IS NULL
+                          OR NOT EXISTS (
+                              SELECT 1 FROM source_retirements retirement
+                              WHERE retirement.source_id = active_rep.source_id
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM source_retirement_rollbacks rollback
+                                    WHERE rollback.retirement_id = retirement.id
+                                )
+                          )
+                      )
+                )
+            )
+            """
+        )
+        sql = f"""
             SELECT
                 id::text,
                 title,
@@ -203,6 +259,7 @@ class MetadataIndexRebuilder:
                 tags
             FROM assets
             WHERE deleted_at IS NULL
+            {serving_clause}
             ORDER BY id
         """
         with psycopg.connect(database_dsn) as connection:
@@ -315,6 +372,9 @@ def render_restore_compose(plan: RestorePlan) -> str:
     return f"""services:
   postgres:
     image: postgres:16-alpine
+    # Keep the isolated rehearsal bounded just like the serving environment.
+    mem_limit: 768m
+    mem_reservation: 384m
     environment:
       POSTGRES_DB: {plan.database_name}
       POSTGRES_USER: {plan.database_user}
@@ -332,6 +392,8 @@ def render_restore_compose(plan: RestorePlan) -> str:
 
   meilisearch:
     image: getmeili/meilisearch:v1.12
+    mem_limit: 1536m
+    mem_reservation: 512m
     environment:
       MEILI_ENV: development
       MEILI_NO_ANALYTICS: "true"
@@ -423,6 +485,10 @@ def verify_restored_manifest(layout: RestoredLayout) -> dict[str, Any]:
             1 for path in raw_files if str(path).startswith("outputs/open-catalog/")
         ),
         "tree_digests": payload.get("tree_digests", {}),
+        "data_scope": payload.get("data_scope"),
+        "retirement_history_included": payload.get(
+            "retirement_history_included"
+        ),
     }
 
 
@@ -441,17 +507,26 @@ def compare_database_snapshots(
         if baseline_counts.get(table) != restored_counts.get(table)
     }
     fixed_query_equal = baseline.get("fixed_queries") == restored.get("fixed_queries")
+    retirement_ledger_equal = (
+        _mapping(baseline.get("fixed_queries")).get("retirement_ledger")
+        == _mapping(restored.get("fixed_queries")).get("retirement_ledger")
+    )
     revision_equal = baseline.get("schema_revision") == restored.get("schema_revision")
     invariants = restored.get("invariants", {})
     invariants_valid = all(value == 0 for value in invariants.values())
     return {
         "status": (
             "verified"
-            if not count_differences and fixed_query_equal and revision_equal and invariants_valid
+            if not count_differences
+            and fixed_query_equal
+            and retirement_ledger_equal
+            and revision_equal
+            and invariants_valid
             else "failed"
         ),
         "count_differences": count_differences,
         "fixed_queries_equal": fixed_query_equal,
+        "retirement_ledger_equal": retirement_ledger_equal,
         "schema_revision_equal": revision_equal,
         "restored_invariants": invariants,
     }
@@ -465,9 +540,11 @@ def run_restore_rehearsal(
     index_rebuilder: IndexRebuilder | None = None,
     dry_run: bool = False,
     keep_environment: bool = False,
+    scope: ServingScope = "serving_active",
 ) -> dict[str, Any]:
     """Restore into isolated resources, validate, report, and safely tear them down."""
 
+    normalized_scope = _normalize_scope(scope)
     plan.validate(require_free_ports=not dry_run)
     plan.run_root.mkdir(parents=True, exist_ok=False)
     compose = render_restore_compose(plan)
@@ -478,6 +555,7 @@ def run_restore_rehearsal(
         "status": "planned" if dry_run else "running",
         "dry_run": dry_run,
         "snapshot_id": snapshot_id,
+        "scope": normalized_scope,
         "safety": {
             "active_project": ACTIVE_PROJECT_NAME,
             "restore_project": plan.compose_project,
@@ -500,7 +578,7 @@ def run_restore_rehearsal(
         return report
 
     manager = manager or BackupManager()
-    index_rebuilder = index_rebuilder or MetadataIndexRebuilder()
+    index_rebuilder = index_rebuilder or MetadataIndexRebuilder(scope=normalized_scope)
     compose_started = False
     try:
         baseline = _query_active_database(plan.project_root)
@@ -644,9 +722,13 @@ def _compose(plan: RestorePlan, arguments: Sequence[str]) -> str:
 def _verify_runtime_isolation(plan: RestorePlan) -> dict[str, Any]:
     raw_ids = _compose(plan, ["ps", "-q"])
     container_ids = [value for value in raw_ids.splitlines() if value]
-    if len(container_ids) != 3:
+    # The restore compose intentionally contains only the two stateful
+    # services.  (The default Compose network is not a container.)
+    expected_container_count = 2
+    if len(container_ids) != expected_container_count:
         raise RestoreSafetyError(
-            f"isolated Compose project should have three containers, found {len(container_ids)}"
+            "isolated Compose project should have "
+            f"{expected_container_count} containers, found {len(container_ids)}"
         )
     command = "docker inspect " + " ".join(
         shlex.quote(container_id) for container_id in container_ids
@@ -708,6 +790,45 @@ def _database_snapshot_sql() -> str:
                         GROUP BY subject_asset_id, relation_type, object_asset_id
                         HAVING count(*) > 1
                     ) duplicates
+                ),
+                'active_retirement_enabled_sources',
+                (
+                    SELECT count(*)
+                    FROM source_retirements retirement
+                    JOIN sources source ON source.id = retirement.source_id
+                    WHERE source.enabled
+                      AND NOT EXISTS (
+                          SELECT 1 FROM source_retirement_rollbacks rollback
+                          WHERE rollback.retirement_id = retirement.id
+                      )
+                ),
+                'active_retirement_incomplete_ledger',
+                (
+                    SELECT count(*)
+                    FROM source_retirements retirement
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM source_retirement_rollbacks rollback
+                        WHERE rollback.retirement_id = retirement.id
+                    )
+                      AND (
+                        COALESCE(jsonb_array_length(retirement.payload->'record_mappings'), -1)
+                            <> (SELECT count(*) FROM source_retirement_record_maps item
+                                WHERE item.retirement_id = retirement.id)
+                        OR COALESCE(
+                            jsonb_array_length(
+                                retirement.payload->'representation_mappings'
+                            ),
+                            -1
+                        )
+                            <> (SELECT count(*) FROM source_retirement_representation_maps item
+                                WHERE item.retirement_id = retirement.id)
+                        OR COALESCE(jsonb_array_length(retirement.payload->'mount_mappings'), -1)
+                            <> (SELECT count(*) FROM source_retirement_mount_maps item
+                                WHERE item.retirement_id = retirement.id)
+                        OR COALESCE(jsonb_array_length(retirement.payload->'successors'), -1)
+                            <> (SELECT count(*) FROM source_retirement_successors item
+                                WHERE item.retirement_id = retirement.id)
+                      )
                 )
             ),
             'fixed_queries', jsonb_build_object(
@@ -742,6 +863,33 @@ def _database_snapshot_sql() -> str:
                         GROUP BY status
                         ORDER BY status
                     ) values
+                ),
+                'retirement_ledger',
+                (
+                    SELECT COALESCE(jsonb_agg(to_jsonb(ledger) ORDER BY ledger.id), '[]'::jsonb)
+                    FROM (
+                        SELECT
+                            retirement.id::text AS id,
+                            retirement.source_id::text AS source_id,
+                            retirement.backup_id::text AS backup_id,
+                            retirement.payload_digest,
+                            retirement.collection_digest,
+                            retirement.signature_algorithm,
+                            retirement.signer_key_id,
+                            md5(retirement.signature) AS signature_fingerprint,
+                            (rollback.id IS NULL) AS active,
+                            (SELECT count(*) FROM source_retirement_record_maps item
+                                WHERE item.retirement_id = retirement.id) AS record_maps,
+                            (SELECT count(*) FROM source_retirement_representation_maps item
+                                WHERE item.retirement_id = retirement.id) AS representation_maps,
+                            (SELECT count(*) FROM source_retirement_mount_maps item
+                                WHERE item.retirement_id = retirement.id) AS mount_maps,
+                            (SELECT count(*) FROM source_retirement_successors item
+                                WHERE item.retirement_id = retirement.id) AS successors
+                        FROM source_retirements retirement
+                        LEFT JOIN source_retirement_rollbacks rollback
+                            ON rollback.retirement_id = retirement.id
+                    ) ledger
                 )
             )
         )::text;
@@ -757,7 +905,34 @@ def _query_active_database(project_root: Path) -> dict[str, Any]:
         f"docker compose -f {compose_path} exec -T postgres "
         f"psql -X -A -t -U research_hub -d research_asset_hub -c {sql}"
     )
-    return _run_json_wsl(command)
+    try:
+        return _run_json_wsl(command)
+    except RuntimeError as compose_error:
+        # The packaged desktop runs PostgreSQL natively, so there may be no
+        # active Compose service even though the local database is healthy.
+        # Preserve the read-only baseline check by querying that database
+        # directly before starting the isolated restore containers.
+        database_dsn = os.environ.get(
+            "HUB_DATABASE_URL",
+            "postgresql://research_hub:research_hub_local@127.0.0.1:5432/"
+            "research_asset_hub",
+        ).replace("postgresql+psycopg://", "postgresql://", 1)
+        try:
+            with psycopg.connect(database_dsn) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(_database_snapshot_sql())
+                    row = cursor.fetchone()
+        except Exception as native_error:
+            raise RuntimeError(
+                "read-only database validation failed through Compose and "
+                f"the native desktop database: {type(native_error).__name__}"
+            ) from compose_error
+        if row is None:
+            raise RuntimeError("native database validation query returned no rows") from None
+        value = json.loads(str(row[0]))
+        if not isinstance(value, dict):
+            raise TypeError("database validation query did not return an object") from None
+        return value
 
 
 def _query_restore_database(plan: RestorePlan) -> dict[str, Any]:

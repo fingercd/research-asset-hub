@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, or_, select, tuple_, update
 from sqlalchemy.orm import Session
 
 from packages.domain.enums import IndexKind, IndexStatus, ReadingStatus
@@ -24,23 +25,27 @@ from packages.domain.models import (
     ReadingState,
     Representation,
 )
+from packages.domain.serving_scope import active_representation_clause
 
 from .keyword import KeywordSearchService
-from .meili import (
-    HttpxJSONTransport,
-    KeywordIndex,
-    MeilisearchAdmin,
-    MeilisearchIndex,
-)
+from .meili import HttpxJSONTransport, KeywordIndex, MeilisearchAdmin, MeilisearchIndex
 from .models import SearchDocument
 
 KEYWORD_INDEX_NAMES = ("assets", "documents", "code", "annotations")
 DEFAULT_INDEX_VERSION = "v1"
+DEFAULT_TASK_FLUSH_BATCHES = 16
 T = TypeVar("T")
+ServingScope = Literal["serving_active", "all"]
 
 
 @dataclass(frozen=True, slots=True)
 class IndexCatalog:
+    """Compatibility materialization for small callers and tests.
+
+    Production rebuilds use :meth:`PostgresIndexCatalog.iter_index_batches`
+    directly and never instantiate this all-in-memory representation.
+    """
+
     keyword_documents: Mapping[str, tuple[SearchDocument, ...]]
 
 
@@ -51,6 +56,15 @@ class KeywordBuildReport:
     keyword_counts_after: Mapping[str, int]
     keyword_documents_upserted: Mapping[str, int]
     stale_keyword_documents_removed: Mapping[str, int]
+    scope: ServingScope = "serving_active"
+    batch_size: int = 256
+    peak_buffered_documents: int = 0
+    task_flush_batch_count: int = DEFAULT_TASK_FLUSH_BATCHES
+    selected_indexes: tuple[str, ...] = KEYWORD_INDEX_NAMES
+    skipped_indexes: tuple[str, ...] = ()
+    buffering_strategy: str = (
+        "uuid_keyset_pages; bounded_meili_task_groups; stale_ids_spooled_to_disk"
+    )
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -68,22 +82,30 @@ class RemoteIndexSuite:
         *,
         meilisearch_url: str,
         meilisearch_api_key: str | None,
+        index_names: Sequence[str] | None = None,
+        initialize_indexes: bool = True,
     ) -> RemoteIndexSuite:
+        selected_indexes = tuple(
+            dict.fromkeys(KEYWORD_INDEX_NAMES if index_names is None else index_names)
+        )
+        if not selected_indexes:
+            raise ValueError("index_names must contain at least one keyword index")
+        unknown_indexes = sorted(set(selected_indexes) - set(KEYWORD_INDEX_NAMES))
+        if unknown_indexes:
+            raise ValueError(f"Unknown keyword indexes: {unknown_indexes}")
         meili_transport = HttpxJSONTransport(
             meilisearch_url,
             api_key=meilisearch_api_key,
             timeout=30,
         )
         meili_admin = MeilisearchAdmin(meili_transport)
-        for index_name in KEYWORD_INDEX_NAMES:
-            meili_admin.ensure_index(index_name)
+        if initialize_indexes:
+            for index_name in selected_indexes:
+                meili_admin.ensure_index(index_name)
         return cls(
             keyword_indexes={
-                index_name: MeilisearchIndex(
-                    meili_transport,
-                    index_name=index_name,
-                )
-                for index_name in KEYWORD_INDEX_NAMES
+                index_name: MeilisearchIndex(meili_transport, index_name=index_name)
+                for index_name in selected_indexes
             },
             meili_admin=meili_admin,
             meili_transport=meili_transport,
@@ -96,40 +118,325 @@ class RemoteIndexSuite:
         return KeywordSearchService(self.keyword_indexes)
 
 
-class PostgresIndexCatalog:
-    """Materialize backend-neutral keyword documents from PostgreSQL."""
+@dataclass(frozen=True, slots=True)
+class _AssetContext:
+    asset: Asset
+    metadata: dict[str, Any]
+    identifiers: tuple[str, ...]
+    representation_digest_by_id: Mapping[UUID, str | None]
 
-    def load(self, session: Session, *, user_id: str = "local") -> IndexCatalog:
+
+class PostgresIndexCatalog:
+    """Build backend-neutral documents using deterministic, bounded keyset pages."""
+
+    def load(
+        self,
+        session: Session,
+        *,
+        user_id: str = "local",
+        scope: ServingScope = "serving_active",
+    ) -> IndexCatalog:
+        """Materialize a catalog for compatibility; production uses the iterator."""
+
+        normalized_scope = _normalize_scope(scope)
+        return IndexCatalog(
+            keyword_documents={
+                index_name: tuple(
+                    document
+                    for batch in self.iter_index_batches(
+                        session,
+                        index_name=index_name,
+                        user_id=user_id,
+                        scope=normalized_scope,
+                        batch_size=256,
+                    )
+                    for document in batch
+                )
+                for index_name in KEYWORD_INDEX_NAMES
+            }
+        )
+
+    def iter_index_batches(
+        self,
+        session: Session,
+        *,
+        index_name: str,
+        user_id: str = "local",
+        scope: ServingScope = "serving_active",
+        batch_size: int = 256,
+    ) -> Iterable[list[SearchDocument]]:
+        """Yield one index in UUID order without retaining prior pages."""
+
+        if index_name not in KEYWORD_INDEX_NAMES:
+            raise ValueError(f"Unknown keyword index: {index_name}")
+        normalized_scope = _normalize_scope(scope)
+        size = max(1, batch_size)
+        if index_name == "assets":
+            yield from self._iter_asset_batches(
+                session, user_id=user_id, scope=normalized_scope, batch_size=size
+            )
+        elif index_name in {"documents", "code"}:
+            yield from self._iter_chunk_batches(
+                session,
+                index_name=index_name,
+                user_id=user_id,
+                scope=normalized_scope,
+                batch_size=size,
+            )
+        else:
+            yield from self._iter_annotation_batches(
+                session, user_id=user_id, scope=normalized_scope, batch_size=size
+            )
+
+    def _iter_asset_batches(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        scope: ServingScope,
+        batch_size: int,
+    ) -> Iterable[list[SearchDocument]]:
+        cursor: UUID | None = None
+        while True:
+            statement = select(Asset).where(Asset.deleted_at.is_(None))
+            if cursor is not None:
+                statement = statement.where(Asset.id > cursor)
+            assets = list(session.scalars(statement.order_by(Asset.id).limit(batch_size)).all())
+            if not assets:
+                return
+            contexts = self._asset_contexts(
+                session,
+                {asset.id for asset in assets},
+                user_id=user_id,
+                scope=scope,
+            )
+            yield [self._asset_document(contexts[asset.id]) for asset in assets]
+            cursor = assets[-1].id
+
+    def _iter_chunk_batches(
+        self,
+        session: Session,
+        *,
+        index_name: str,
+        user_id: str,
+        scope: ServingScope,
+        batch_size: int,
+    ) -> Iterable[list[SearchDocument]]:
+        cursor: UUID | None = None
+        code_clause = func.coalesce(
+            or_(
+                func.lower(DocumentChunk.chunk_kind).like("%code%"),
+                DocumentChunk.anchor_kind == "code_lines",
+                Representation.representation_type.in_(("source_code", "repository")),
+            ),
+            False,
+        )
+        while True:
+            statement = (
+                select(
+                    DocumentChunk,
+                    Representation.representation_type,
+                    Representation.sha256,
+                    Representation.tree_digest,
+                    Representation.revision,
+                )
+                .join(Representation, Representation.id == DocumentChunk.representation_id)
+                .join(Asset, Asset.id == DocumentChunk.asset_id)
+                .where(
+                    Asset.deleted_at.is_(None),
+                    Representation.deleted_at.is_(None),
+                    code_clause if index_name == "code" else ~code_clause,
+                )
+            )
+            if scope == "serving_active":
+                statement = statement.where(active_representation_clause())
+            if cursor is not None:
+                statement = statement.where(DocumentChunk.id > cursor)
+            rows = list(
+                session.execute(statement.order_by(DocumentChunk.id).limit(batch_size)).all()
+            )
+            if not rows:
+                return
+            contexts = self._asset_contexts(
+                session,
+                {row[0].asset_id for row in rows},
+                user_id=user_id,
+                scope=scope,
+            )
+            documents: list[SearchDocument] = []
+            for chunk, rep_type, sha256, tree_digest, revision in rows:
+                context = contexts[chunk.asset_id]
+                representation_digest = sha256 or tree_digest or revision
+                metadata = {
+                    **context.metadata,
+                    "representation_id": str(chunk.representation_id),
+                    "representation_digest": (
+                        str(representation_digest) if representation_digest else None
+                    ),
+                    "chunk_id": str(chunk.id),
+                    "chunk_index": chunk.chunk_index,
+                    "chunk_kind": chunk.chunk_kind,
+                    "anchor_kind": chunk.anchor_kind,
+                    "anchor": dict(chunk.anchor or {}),
+                    "chunk_hash": chunk.content_hash,
+                    "content_hash": chunk.content_hash,
+                    "parser_name": chunk.parser_name,
+                    "parser_version": chunk.parser_version,
+                }
+                documents.append(
+                    SearchDocument(
+                        document_id=f"chunk:{chunk.id}",
+                        asset_id=str(chunk.asset_id),
+                        kind=(
+                            "code"
+                            if _is_code_chunk(chunk.chunk_kind, chunk.anchor_kind, str(rep_type))
+                            else "document"
+                        ),
+                        title=context.asset.title,
+                        text=chunk.text_content,
+                        metadata=metadata,
+                        exact_terms=_anchor_exact_terms(chunk.anchor),
+                    )
+                )
+            yield documents
+            cursor = rows[-1][0].id
+
+    def _iter_annotation_batches(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        scope: ServingScope,
+        batch_size: int,
+    ) -> Iterable[list[SearchDocument]]:
+        cursor: UUID | None = None
+        active_annotation_representation = exists(
+            select(Representation.id).where(
+                Representation.id == Annotation.representation_id,
+                Representation.deleted_at.is_(None),
+                active_representation_clause(),
+            )
+        )
+        while True:
+            statement = (
+                select(Annotation)
+                .join(Asset, Asset.id == Annotation.asset_id)
+                .where(Asset.deleted_at.is_(None), Annotation.deleted_at.is_(None))
+            )
+            if scope == "serving_active":
+                statement = statement.where(
+                    or_(
+                        Annotation.representation_id.is_(None),
+                        active_annotation_representation,
+                    )
+                )
+            if cursor is not None:
+                statement = statement.where(Annotation.id > cursor)
+            annotations = list(
+                session.scalars(statement.order_by(Annotation.id).limit(batch_size)).all()
+            )
+            if not annotations:
+                return
+            contexts = self._asset_contexts(
+                session,
+                {annotation.asset_id for annotation in annotations},
+                user_id=user_id,
+                scope=scope,
+            )
+            documents: list[SearchDocument] = []
+            for annotation in annotations:
+                context = contexts[annotation.asset_id]
+                documents.append(
+                    SearchDocument(
+                        document_id=f"annotation:{annotation.id}",
+                        asset_id=str(annotation.asset_id),
+                        kind="annotation",
+                        title=annotation.title or context.asset.title,
+                        text="\n".join(
+                            value
+                            for value in (annotation.summary, annotation.body_markdown)
+                            if value
+                        ),
+                        metadata={
+                            **context.metadata,
+                            "annotation_kind": annotation.kind,
+                            "pinned": annotation.pinned,
+                            "representation_id": (
+                                str(annotation.representation_id)
+                                if annotation.representation_id
+                                else None
+                            ),
+                            "representation_digest": (
+                                context.representation_digest_by_id.get(
+                                    annotation.representation_id
+                                )
+                                if annotation.representation_id
+                                else None
+                            ),
+                        },
+                        exact_terms=_unique_terms(annotation.title),
+                    )
+                )
+            yield documents
+            cursor = annotations[-1].id
+
+    def _asset_contexts(
+        self,
+        session: Session,
+        asset_ids: set[UUID],
+        *,
+        user_id: str,
+        scope: ServingScope,
+    ) -> dict[UUID, _AssetContext]:
+        if not asset_ids:
+            return {}
         assets = list(
             session.scalars(
-                select(Asset).where(Asset.deleted_at.is_(None)).order_by(Asset.id)
+                select(Asset).where(
+                    Asset.id.in_(asset_ids), Asset.deleted_at.is_(None)
+                )
             ).all()
         )
-        asset_by_id = {asset.id: asset for asset in assets}
         identifiers: defaultdict[UUID, list[str]] = defaultdict(list)
         for asset_id, value, canonical in session.execute(
             select(
                 ExternalIdentifierModel.asset_id,
                 ExternalIdentifierModel.value,
                 ExternalIdentifierModel.canonical,
-            ).where(ExternalIdentifierModel.asset_id.in_(asset_by_id))
+            ).where(ExternalIdentifierModel.asset_id.in_(asset_ids))
         ):
             identifiers[asset_id].extend((str(canonical), str(value)))
-
         reading_status = {
-            asset_id: status
+            asset_id: str(status)
             for asset_id, status in session.execute(
                 select(ReadingState.asset_id, ReadingState.status).where(
                     ReadingState.user_id == user_id,
-                    ReadingState.asset_id.in_(asset_by_id),
+                    ReadingState.asset_id.in_(asset_ids),
                 )
             )
         }
         representation_types: defaultdict[UUID, set[str]] = defaultdict(set)
         available_representation_types: defaultdict[UUID, set[str]] = defaultdict(set)
         representation_availability: defaultdict[UUID, set[str]] = defaultdict(set)
-        representation_type_by_id: dict[UUID, str] = {}
-        representation_digest_by_id: dict[UUID, str | None] = {}
+        representation_digest_by_asset: defaultdict[
+            UUID, dict[UUID, str | None]
+        ] = defaultdict(dict)
+        representation_statement = select(
+            Representation.id,
+            Representation.asset_id,
+            Representation.representation_type,
+            Representation.availability,
+            Representation.sha256,
+            Representation.tree_digest,
+            Representation.revision,
+        ).where(
+            Representation.deleted_at.is_(None),
+            Representation.asset_id.in_(asset_ids),
+        )
+        if scope == "serving_active":
+            representation_statement = representation_statement.where(
+                active_representation_clause()
+            )
         for (
             representation_id,
             asset_id,
@@ -138,155 +445,65 @@ class PostgresIndexCatalog:
             sha256,
             tree_digest,
             revision,
-        ) in session.execute(
-            select(
-                Representation.id,
-                Representation.asset_id,
-                Representation.representation_type,
-                Representation.availability,
-                Representation.sha256,
-                Representation.tree_digest,
-                Representation.revision,
-            ).where(
-                Representation.deleted_at.is_(None),
-                Representation.asset_id.in_(asset_by_id),
+        ) in session.execute(representation_statement):
+            normalized_type = str(rep_type)
+            normalized_availability = str(availability)
+            representation_types[asset_id].add(normalized_type)
+            representation_availability[asset_id].add(normalized_availability)
+            if normalized_availability == "available":
+                available_representation_types[asset_id].add(normalized_type)
+            digest = sha256 or tree_digest or revision
+            representation_digest_by_asset[asset_id][representation_id] = (
+                str(digest) if digest else None
             )
-        ):
-            representation_types[asset_id].add(str(rep_type))
-            representation_availability[asset_id].add(str(availability))
-            if str(availability) == "available":
-                available_representation_types[asset_id].add(str(rep_type))
-            representation_type_by_id[representation_id] = str(rep_type)
-            representation_digest_by_id[representation_id] = (
-                str(sha256 or tree_digest or revision)
-                if sha256 or tree_digest or revision
-                else None
-            )
-
-        asset_documents: list[SearchDocument] = []
-        metadata_by_asset: dict[UUID, dict[str, Any]] = {}
+        contexts: dict[UUID, _AssetContext] = {}
         for asset in assets:
-            rep_types = sorted(representation_types[asset.id])
-            metadata = _asset_metadata(
-                asset,
-                reading_status=str(reading_status.get(asset.id, ReadingStatus.UNREAD.value)),
-                representation_types=rep_types,
-                available_representation_types=sorted(available_representation_types[asset.id]),
-                availability=sorted(representation_availability[asset.id]),
+            contexts[asset.id] = _AssetContext(
+                asset=asset,
+                metadata=_asset_metadata(
+                    asset,
+                    reading_status=reading_status.get(asset.id, ReadingStatus.UNREAD.value),
+                    representation_types=sorted(representation_types[asset.id]),
+                    available_representation_types=sorted(
+                        available_representation_types[asset.id]
+                    ),
+                    availability=sorted(representation_availability[asset.id]),
+                ),
+                identifiers=tuple(identifiers[asset.id]),
+                representation_digest_by_id=representation_digest_by_asset[asset.id],
             )
-            exact_terms = _unique_terms(
+        return contexts
+
+    @staticmethod
+    def _asset_document(context: _AssetContext) -> SearchDocument:
+        asset = context.asset
+        return SearchDocument(
+            document_id=f"asset:{asset.id}",
+            asset_id=str(asset.id),
+            kind="asset",
+            title=asset.title,
+            text="\n".join(
+                str(value)
+                for value in (
+                    asset.title_zh,
+                    asset.subtitle,
+                    asset.venue,
+                    asset.abstract,
+                    asset.summary,
+                    asset.content,
+                    " ".join(asset.authors or []),
+                    " ".join(asset.tags or []),
+                )
+                if value
+            ),
+            metadata=context.metadata,
+            exact_terms=_unique_terms(
                 asset.title,
                 asset.title_zh,
                 *list(asset.authors or []),
                 *list(asset.source_urls or []),
-                *identifiers[asset.id],
-            )
-            metadata_by_asset[asset.id] = metadata
-            asset_documents.append(
-                SearchDocument(
-                    document_id=f"asset:{asset.id}",
-                    asset_id=str(asset.id),
-                    kind="asset",
-                    title=asset.title,
-                    text="\n".join(
-                        str(value)
-                        for value in (
-                            asset.title_zh,
-                            asset.subtitle,
-                            asset.venue,
-                            asset.abstract,
-                            asset.summary,
-                            asset.content,
-                            " ".join(asset.authors or []),
-                            " ".join(asset.tags or []),
-                        )
-                        if value
-                    ),
-                    metadata=metadata,
-                    exact_terms=exact_terms,
-                )
-            )
-
-        document_chunks: list[SearchDocument] = []
-        code_chunks: list[SearchDocument] = []
-        for chunk in session.scalars(
-            select(DocumentChunk)
-            .where(DocumentChunk.asset_id.in_(asset_by_id))
-            .order_by(DocumentChunk.id)
-        ):
-            asset = asset_by_id[chunk.asset_id]
-            rep_type = representation_type_by_id.get(chunk.representation_id, "")
-            is_code = _is_code_chunk(chunk.chunk_kind, chunk.anchor_kind, rep_type)
-            metadata = {
-                **metadata_by_asset[chunk.asset_id],
-                "representation_id": str(chunk.representation_id),
-                "representation_digest": representation_digest_by_id.get(chunk.representation_id),
-                "chunk_id": str(chunk.id),
-                "chunk_index": chunk.chunk_index,
-                "chunk_kind": chunk.chunk_kind,
-                "anchor_kind": chunk.anchor_kind,
-                "anchor": dict(chunk.anchor or {}),
-                "chunk_hash": chunk.content_hash,
-                "content_hash": chunk.content_hash,
-                "parser_name": chunk.parser_name,
-                "parser_version": chunk.parser_version,
-            }
-            exact_terms = _anchor_exact_terms(chunk.anchor)
-            document = SearchDocument(
-                document_id=f"chunk:{chunk.id}",
-                asset_id=str(chunk.asset_id),
-                kind="code" if is_code else "document",
-                title=asset.title,
-                text=chunk.text_content,
-                metadata=metadata,
-                exact_terms=exact_terms,
-            )
-            (code_chunks if is_code else document_chunks).append(document)
-
-        annotation_documents: list[SearchDocument] = []
-        for annotation in session.scalars(
-            select(Annotation)
-            .where(
-                Annotation.deleted_at.is_(None),
-                Annotation.asset_id.in_(asset_by_id),
-            )
-            .order_by(Annotation.id)
-        ):
-            asset = asset_by_id[annotation.asset_id]
-            annotation_documents.append(
-                SearchDocument(
-                    document_id=f"annotation:{annotation.id}",
-                    asset_id=str(annotation.asset_id),
-                    kind="annotation",
-                    title=annotation.title or asset.title,
-                    text="\n".join(
-                        value for value in (annotation.summary, annotation.body_markdown) if value
-                    ),
-                    metadata={
-                        **metadata_by_asset[annotation.asset_id],
-                        "annotation_kind": annotation.kind,
-                        "pinned": annotation.pinned,
-                        "representation_id": (
-                            str(annotation.representation_id)
-                            if annotation.representation_id
-                            else None
-                        ),
-                        "representation_digest": (
-                            representation_digest_by_id.get(annotation.representation_id)
-                            if annotation.representation_id
-                            else None
-                        ),
-                    },
-                    exact_terms=_unique_terms(annotation.title),
-                )
-            )
-        return IndexCatalog(
-            keyword_documents={
-                "assets": tuple(asset_documents),
-                "documents": tuple(document_chunks),
-                "code": tuple(code_chunks),
-                "annotations": tuple(annotation_documents),
-            }
+                *context.identifiers,
+            ),
         )
 
 
@@ -297,121 +514,169 @@ class IndexBuilder:
         *,
         version: str = DEFAULT_INDEX_VERSION,
         write_batch_size: int = 256,
+        task_flush_batch_count: int = DEFAULT_TASK_FLUSH_BATCHES,
+        catalog: PostgresIndexCatalog | None = None,
     ) -> None:
         self.suite = suite
         self.version = _safe_version(version)
         self.write_batch_size = max(1, write_batch_size)
+        self.task_flush_batch_count = max(1, task_flush_batch_count)
+        self.catalog = catalog or PostgresIndexCatalog()
 
     def rebuild_keywords(
         self,
         session: Session,
         *,
         user_id: str = "local",
+        scope: ServingScope = "serving_active",
+        index_names: Sequence[str] | None = None,
     ) -> KeywordBuildReport:
-        catalog = PostgresIndexCatalog().load(session, user_id=user_id)
+        """Rebuild in bounded pages; a failed remote task never marks DB state ready."""
+
+        normalized_scope = _normalize_scope(scope)
+        selected_indexes = tuple(
+            dict.fromkeys(KEYWORD_INDEX_NAMES if index_names is None else index_names)
+        )
+        if not selected_indexes:
+            raise ValueError("index_names must contain at least one keyword index")
+        unknown_indexes = sorted(set(selected_indexes) - set(KEYWORD_INDEX_NAMES))
+        if unknown_indexes:
+            raise ValueError(f"Unknown keyword indexes: {unknown_indexes}")
+        skipped_indexes = tuple(
+            name for name in KEYWORD_INDEX_NAMES if name not in selected_indexes
+        )
+        _require_repeatable_read_snapshot(session)
         counts_before = {
             name: self.suite.meili_admin.document_count(name)
             for name in KEYWORD_INDEX_NAMES
         }
-        expected_ids = {
-            name: {document.document_id for document in documents}
-            for name, documents in catalog.keyword_documents.items()
-        }
-        removed, upserted = self._rebuild_keyword_documents(
-            catalog,
-            expected_ids,
-        )
-        self._record_index_states(session, catalog)
-        session.flush()
-        counts_after = {
-            name: self.suite.meili_admin.document_count(name)
-            for name in KEYWORD_INDEX_NAMES
-        }
+        removed = dict.fromkeys(KEYWORD_INDEX_NAMES, 0)
+        upserted = dict.fromkeys(KEYWORD_INDEX_NAMES, 0)
+        peak_buffered_documents = 0
+        indexed_at = datetime.now(UTC)
+        previous_wait_mode = self.suite.meili_transport.wait_for_tasks
+        self.suite.meili_transport.wait_for_tasks = False
+        try:
+            # A savepoint keeps index-state/version changes atomic even if a caller
+            # catches a Meilisearch failure and later commits its outer transaction.
+            with session.begin_nested():
+                self._mark_previous_states_stale(
+                    session,
+                    indexed_at=indexed_at,
+                    index_names=selected_indexes,
+                )
+                for index_name in selected_indexes:
+                    queued_batches = 0
+                    for batch in self.catalog.iter_index_batches(
+                        session,
+                        index_name=index_name,
+                        user_id=user_id,
+                        scope=normalized_scope,
+                        batch_size=self.write_batch_size,
+                    ):
+                        peak_buffered_documents = max(peak_buffered_documents, len(batch))
+                        self.suite.keyword_indexes[index_name].upsert(batch)
+                        self._record_index_state_batch(
+                            session,
+                            index_name=index_name,
+                            documents=batch,
+                            indexed_at=indexed_at,
+                        )
+                        upserted[index_name] += len(batch)
+                        queued_batches += 1
+                        if queued_batches >= self.task_flush_batch_count:
+                            self.suite.meili_transport.flush_pending_tasks()
+                            queued_batches = 0
+                    # Additions must be durable before stale documents are inspected.
+                    self.suite.meili_transport.flush_pending_tasks()
+                    removed[index_name] = self._delete_stale_documents(
+                        session, index_name=index_name
+                    )
+                self.suite.meili_transport.flush_pending_tasks()
+                session.flush()
+                counts_after = {
+                    name: self.suite.meili_admin.document_count(name)
+                    for name in KEYWORD_INDEX_NAMES
+                }
+                for name in selected_indexes:
+                    if counts_after[name] != upserted[name]:
+                        raise RuntimeError(
+                            f"Index {name!r} count mismatch after rebuild: "
+                            f"expected {upserted[name]}, got {counts_after[name]}"
+                        )
+        finally:
+            self.suite.meili_transport.wait_for_tasks = previous_wait_mode
         return KeywordBuildReport(
             index_version=self.version,
             keyword_counts_before=counts_before,
             keyword_counts_after=counts_after,
             keyword_documents_upserted=upserted,
             stale_keyword_documents_removed=removed,
+            scope=normalized_scope,
+            batch_size=self.write_batch_size,
+            peak_buffered_documents=peak_buffered_documents,
+            task_flush_batch_count=self.task_flush_batch_count,
+            selected_indexes=selected_indexes,
+            skipped_indexes=skipped_indexes,
         )
 
-    def _rebuild_keyword_documents(
-        self,
-        catalog: IndexCatalog,
-        expected_ids: Mapping[str, set[str]],
-    ) -> tuple[dict[str, int], dict[str, int]]:
-        removed: dict[str, int] = {}
-        upserted: dict[str, int] = {}
-        previous_wait_mode: bool | None = None
-        if self.suite.meili_transport.wait_for_tasks:
-            previous_wait_mode = True
-            self.suite.meili_transport.wait_for_tasks = False
-        try:
-            for name, documents in catalog.keyword_documents.items():
-                stale_ids = self.suite.meili_admin.document_ids(name) - expected_ids[name]
-                if stale_ids:
-                    self.suite.keyword_indexes[name].delete(sorted(stale_ids))
-                removed[name] = len(stale_ids)
-                upserted[name] = len(documents)
-                for keyword_batch in _batches(documents, self.write_batch_size):
-                    self.suite.keyword_indexes[name].upsert(keyword_batch)
-        finally:
-            if previous_wait_mode is not None:
-                self.suite.meili_transport.wait_for_tasks = previous_wait_mode
-        self.suite.meili_transport.flush_pending_tasks()
-        return removed, upserted
-
-    def _record_index_states(
+    def _mark_previous_states_stale(
         self,
         session: Session,
-        catalog: IndexCatalog,
+        *,
+        indexed_at: datetime,
+        index_names: Sequence[str] = KEYWORD_INDEX_NAMES,
     ) -> None:
-        current: list[tuple[str, str, UUID, str, str]] = []
-        for index_name, documents in catalog.keyword_documents.items():
-            index_kind = IndexKind.CODE.value if index_name == "code" else IndexKind.KEYWORD.value
-            current.extend(
-                (
-                    index_name,
-                    _entity_type(document),
-                    _entity_id(document),
-                    _document_digest(document),
-                    index_kind,
-                )
-                for document in documents
+        session.execute(
+            update(IndexState)
+            .where(
+                IndexState.version == self.version,
+                IndexState.index_name.in_(tuple(index_names)),
+                IndexState.status == IndexStatus.READY.value,
             )
-        index_names = {item[0] for item in current}
+            .values(
+                status=IndexStatus.STALE.value,
+                updated_at=indexed_at,
+                row_version=IndexState.row_version + 1,
+            )
+        )
+
+    def _record_index_state_batch(
+        self,
+        session: Session,
+        *,
+        index_name: str,
+        documents: Sequence[SearchDocument],
+        indexed_at: datetime,
+    ) -> None:
+        if not documents:
+            return
+        current = [
+            (_entity_type(document), _entity_id(document), _document_digest(document))
+            for document in documents
+        ]
         existing = list(
             session.scalars(
                 select(IndexState).where(
                     IndexState.version == self.version,
-                    IndexState.index_name.in_(index_names),
+                    IndexState.index_name == index_name,
+                    tuple_(
+                        IndexState.entity_type,
+                        IndexState.entity_id,
+                        IndexState.content_digest,
+                    ).in_(set(current)),
                 )
             ).all()
         )
         by_key = {
-            (
-                state.index_name,
-                state.entity_type,
-                state.entity_id,
-                state.content_digest,
-            ): state
+            (state.entity_type, state.entity_id, state.content_digest): state
             for state in existing
         }
-        for state in existing:
-            if state.status == IndexStatus.READY.value:
-                state.status = IndexStatus.STALE.value
-        indexed_at = datetime.now(UTC)
-        for (
-            index_name,
-            entity_type,
-            entity_id,
-            digest,
-            index_kind,
-        ) in current:
-            key = (index_name, entity_type, entity_id, digest)
-            current_state = by_key.get(key)
-            if current_state is None:
-                current_state = IndexState(
+        index_kind = IndexKind.CODE.value if index_name == "code" else IndexKind.KEYWORD.value
+        for entity_type, entity_id, digest in current:
+            state = by_key.get((entity_type, entity_id, digest))
+            if state is None:
+                state = IndexState(
                     index_name=index_name,
                     index_kind=index_kind,
                     entity_type=entity_type,
@@ -419,14 +684,136 @@ class IndexBuilder:
                     content_digest=digest,
                     version=self.version,
                 )
-                session.add(current_state)
-                by_key[key] = current_state
-            current_state.status = IndexStatus.READY.value
-            current_state.provider = "meilisearch"
-            current_state.model = None
-            current_state.dimension = None
-            current_state.error = None
-            current_state.indexed_at = indexed_at
+                session.add(state)
+            state.status = IndexStatus.READY.value
+            state.provider = "meilisearch"
+            state.model = None
+            state.dimension = None
+            state.error = None
+            state.indexed_at = indexed_at
+        session.flush()
+
+    def _delete_stale_documents(self, session: Session, *, index_name: str) -> int:
+        """Spool stale logical IDs, then delete them without pagination drift."""
+
+        removed = 0
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", newline="\n") as spool:
+            for remote_ids in self._iter_remote_document_id_batches(index_name):
+                current_ids = self._current_document_ids(
+                    session, index_name=index_name, document_ids=remote_ids
+                )
+                for document_id in remote_ids:
+                    if document_id not in current_ids:
+                        spool.write(json.dumps(document_id, ensure_ascii=False) + "\n")
+                        removed += 1
+            spool.seek(0)
+            queued_batches = 0
+            while True:
+                stale_batch = [
+                    json.loads(line) for line in _take_lines(spool, self.write_batch_size)
+                ]
+                if not stale_batch:
+                    break
+                self.suite.keyword_indexes[index_name].delete(stale_batch)
+                queued_batches += 1
+                if queued_batches >= self.task_flush_batch_count:
+                    self.suite.meili_transport.flush_pending_tasks()
+                    queued_batches = 0
+            self.suite.meili_transport.flush_pending_tasks()
+        return removed
+
+    def _iter_remote_document_id_batches(
+        self, index_name: str
+    ) -> Iterable[list[str]]:
+        """Read stable remote pages before any delete mutates their offsets."""
+
+        transport = getattr(self.suite.meili_admin, "transport", None)
+        if transport is None:
+            # Compatibility for the tiny in-memory admin used by unit tests.
+            values = sorted(self.suite.meili_admin.document_ids(index_name))
+            yield from _batches(values, self.write_batch_size)
+            return
+        offset = 0
+        while True:
+            response = transport.request(
+                "GET",
+                f"/indexes/{index_name}/documents?fields=logical_document_id"
+                f"&limit={self.write_batch_size}&offset={offset}",
+            )
+            results = response.get("results")
+            if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+                raise TypeError("Expected a Meilisearch document result sequence")
+            values = [
+                str(item["logical_document_id"])
+                for item in results
+                if isinstance(item, Mapping) and item.get("logical_document_id") is not None
+            ]
+            if len(values) != len(results):
+                raise RuntimeError(
+                    f"Index {index_name!r} contains a document without logical_document_id; "
+                    "stale reconciliation cannot safely address it"
+                )
+            if values:
+                yield values
+            if len(results) < self.write_batch_size:
+                return
+            offset += len(results)
+
+    def _current_document_ids(
+        self,
+        session: Session,
+        *,
+        index_name: str,
+        document_ids: Sequence[str],
+    ) -> set[str]:
+        canonical_by_pair: dict[tuple[str, UUID], str] = {}
+        for document_id in document_ids:
+            entity_type, separator, raw_id = document_id.partition(":")
+            if not separator:
+                continue
+            try:
+                entity_id = UUID(raw_id)
+            except ValueError:
+                continue
+            canonical = f"{entity_type}:{entity_id}"
+            if canonical == document_id:
+                canonical_by_pair[(entity_type, entity_id)] = document_id
+        if not canonical_by_pair:
+            return set()
+        ready_pairs = set(
+            session.execute(
+                select(IndexState.entity_type, IndexState.entity_id).where(
+                    IndexState.version == self.version,
+                    IndexState.index_name == index_name,
+                    IndexState.status == IndexStatus.READY.value,
+                    tuple_(IndexState.entity_type, IndexState.entity_id).in_(
+                        set(canonical_by_pair)
+                    ),
+                )
+            ).all()
+        )
+        return {
+            document_id
+            for pair, document_id in canonical_by_pair.items()
+            if pair in ready_pairs
+        }
+
+
+def _require_repeatable_read_snapshot(session: Session) -> None:
+    """Require one PostgreSQL snapshot and serialize concurrent rebuilds."""
+
+    bind = session.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    connection = session.connection()
+    isolation = connection.get_isolation_level().replace("_", " ").upper()
+    if isolation not in {"REPEATABLE READ", "SERIALIZABLE"}:
+        raise RuntimeError(
+            "Streaming index builds require PostgreSQL REPEATABLE READ or SERIALIZABLE "
+            f"isolation, got {isolation!r}"
+        )
+    # Prevent two builders from interleaving writes from different snapshots.
+    session.execute(select(func.pg_advisory_xact_lock(1_384_425_732)))
 
 
 def _asset_metadata(
@@ -459,9 +846,7 @@ def _asset_metadata(
 
 
 def _is_code_chunk(
-    chunk_kind: str,
-    anchor_kind: str | None,
-    representation_type: str,
+    chunk_kind: str, anchor_kind: str | None, representation_type: str
 ) -> bool:
     return (
         "code" in chunk_kind.casefold()
@@ -502,6 +887,14 @@ def _batches(values: Sequence[T], size: int) -> Iterable[list[T]]:
         yield list(values[offset : offset + size])
 
 
+def _take_lines(stream: Any, size: int) -> Iterable[str]:
+    for _ in range(size):
+        line = stream.readline()
+        if not line:
+            return
+        yield line
+
+
 def _entity_type(document: SearchDocument) -> str:
     return document.document_id.partition(":")[0]
 
@@ -534,3 +927,11 @@ def _safe_version(value: str) -> str:
         for character in value.casefold()
     ).strip("_")
     return normalized or DEFAULT_INDEX_VERSION
+
+
+def _normalize_scope(value: str) -> ServingScope:
+    if value == "serving_active":
+        return "serving_active"
+    if value == "all":
+        return "all"
+    raise ValueError("scope must be 'serving_active' or 'all'")

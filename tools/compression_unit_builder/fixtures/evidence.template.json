@@ -1,0 +1,15 @@
+{
+  "schema_version": "paper-analysis-evidence.v1",
+  "status": "success",
+  "paper_id": "{PAPER_ID}",
+  "evidence": {
+    "abstract": [{"evidence_id": "E001", "section": "Abstract", "page": 1, "excerpt": "Fixture abstract evidence."}],
+    "introduction_contributions": [{"evidence_id": "E002", "section": "Introduction", "page": 1, "excerpt": "Fixture problem evidence."}],
+    "method": [{"evidence_id": "E003", "section": "Method", "page": 1, "excerpt": "Fixture method evidence."}],
+    "experiments_results": [{"evidence_id": "E004", "section": "Experiments", "page": 1, "excerpt": "Fixture result evidence."}],
+    "limitations_conclusion": [{"evidence_id": "E005", "section": "Conclusion", "page": 1, "excerpt": "Fixture limitation evidence."}],
+    "code_urls": []
+  },
+  "missing_categories": [],
+  "warnings": []
+}

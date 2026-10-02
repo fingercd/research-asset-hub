@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shlex
+import shutil
 import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 
 from packages.domain.exporters.common import atomic_write_json
 
 from .manager import BackupManager
+
+BackupScope = Literal["all"]
 
 
 def wsl_path(path: Path) -> str:
@@ -90,15 +95,84 @@ def _postgres_dump(project_root: Path, destination: Path) -> None:
         )
     if result.returncode != 0:
         destination.unlink(missing_ok=True)
-        message = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"PostgreSQL custom dump failed: {message}")
+        compose_message = result.stderr.decode("utf-8", errors="replace").strip()
+        native = _native_pg_dump_path()
+        if native is None:
+            raise RuntimeError(
+                f"PostgreSQL custom dump failed: {compose_message}; "
+                "no native pg_dump executable was found"
+            )
+        database_url = os.environ.get(
+            "HUB_DATABASE_URL",
+            "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub",
+        )
+        parsed = urlparse(database_url.replace("postgresql+psycopg://", "postgresql://", 1))
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            raise RuntimeError("PostgreSQL custom dump failed: unsupported HUB_DATABASE_URL")
+        database_name = parsed.path.lstrip("/")
+        if not database_name:
+            raise RuntimeError("PostgreSQL custom dump failed: database name is empty")
+        environment = os.environ.copy()
+        if parsed.password:
+            environment["PGPASSWORD"] = unquote(parsed.password)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as handle:
+            native_result = subprocess.run(
+                [
+                    str(native),
+                    "-h",
+                    parsed.hostname,
+                    "-p",
+                    str(parsed.port or 5432),
+                    "-U",
+                    unquote(parsed.username or "research_hub"),
+                    "-d",
+                    database_name,
+                    "-Fc",
+                ],
+                check=False,
+                stdout=handle,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+        if native_result.returncode != 0:
+            destination.unlink(missing_ok=True)
+            native_message = native_result.stderr.decode(
+                "utf-8", errors="replace"
+            ).strip()
+            raise RuntimeError(
+                "PostgreSQL custom dump failed through Compose and native pg_dump: "
+                f"{compose_message}; {native_message}"
+            )
+
+
+def _native_pg_dump_path() -> Path | None:
+    configured = os.environ.get("HUB_PG_DUMP_PATH", "").strip()
+    candidates = [
+        Path(configured) if configured else None,
+        Path(found) if (found := shutil.which("pg_dump")) else None,
+        Path(r"C:\Program Files\ResearchAssetHub\runtime\postgres\bin\pg_dump.exe"),
+    ]
+    return next(
+        (candidate.resolve() for candidate in candidates if candidate and candidate.is_file()),
+        None,
+    )
 
 
 def create_platform_backup(
     project_root: Path,
     manager: BackupManager | None = None,
+    *,
+    scope: BackupScope = "all",
 ) -> dict[str, Any]:
-    """Dump PostgreSQL, hash the staging set and create a tagged Restic snapshot."""
+    """Dump all PostgreSQL history and create a tagged Restic snapshot.
+
+    Backups deliberately use ``scope=all``: excluding retired provenance would
+    make a signed retirement impossible to audit or roll back after restore.
+    """
+
+    if scope != "all":
+        raise ValueError("platform backups must use scope='all'")
 
     manager = manager or BackupManager()
     manager_status = manager.ensure_repository()
@@ -122,7 +196,10 @@ def create_platform_backup(
             "postgres-custom-dump",
             "open-catalog",
             "configuration",
+            "source-retirement-ledger",
         ],
+        "data_scope": scope,
+        "retirement_history_included": True,
         "excluded_rebuildable": ["meilisearch-volume"],
         "risk": "local-copy-only",
         "files": files,
@@ -147,4 +224,6 @@ def create_platform_backup(
         "staging_manifest": str(manifest_path),
         "repository_check": check["status"],
         "risk": "local-copy-only",
+        "data_scope": scope,
+        "retirement_history_included": True,
     }

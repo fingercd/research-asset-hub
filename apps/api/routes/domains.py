@@ -6,7 +6,6 @@ from typing import Any
 from fastapi import Request, Response
 
 from apps.api import routes_v1 as _v1
-from apps.api.config import PROJECT_ROOT
 from apps.api.problem import ApiProblem, not_found
 from apps.api.routes_v1 import (
     _domains_with_counts,
@@ -54,7 +53,7 @@ def get_domain_portal(
     try:
         portal = load_domain_portal(
             settings.domain_portal_config_path,
-            PROJECT_ROOT.parent,
+            settings.host_workspace_root.parent,
             slug,
         )
     except DomainPortalLoadError as error:

@@ -71,6 +71,7 @@ function portal(): DomainPortal {
     },
     sections: [
       section("scope", { markdown: "机器人领域范围。" }),
+      section("catalog", { summary: "正式库动态生成完整目录。" }),
       section("timeline", { stages: [] }),
       section("capability-method-map", {
         capabilities: [],
@@ -80,7 +81,6 @@ function portal(): DomainPortal {
       section("landmarks", { items: [] }),
       section("benchmarks", { rows: [] }),
       section("reading-routes", { routes: [] }),
-      section("catalog", { summary: "正式库动态生成完整目录。" }),
       section("frontiers", { markdown: "开放问题。" }),
       section("evidence", { source_inputs: [] }),
     ],
@@ -159,9 +159,9 @@ describe("DomainDetailPage", () => {
     const firstSummary = screen.getByText(
       (_content, element) =>
         element?.classList.contains("loaded-unit-summary") === true &&
-        element.textContent?.includes("已加载 1 个研究单元") === true,
+        element.textContent?.includes("已加载 1 篇论文") === true,
     );
-    expect(firstSummary).toHaveTextContent("覆盖 2 / 3 项资产");
+    expect(firstSummary).toHaveTextContent("关联覆盖 2 / 3 项底层资产");
 
     fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
 
@@ -176,9 +176,9 @@ describe("DomainDetailPage", () => {
     const secondSummary = screen.getByText(
       (_content, element) =>
         element?.classList.contains("loaded-unit-summary") === true &&
-        element.textContent?.includes("已加载 2 个研究单元") === true,
+        element.textContent?.includes("已加载 2 篇论文") === true,
     );
-    expect(secondSummary).toHaveTextContent("覆盖 3 / 3 项资产");
+    expect(secondSummary).toHaveTextContent("关联覆盖 3 / 3 项底层资产");
     expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 
     fireEvent.click(screen.getByRole("tab", { name: "最近更新" }));
@@ -228,6 +228,19 @@ describe("DomainDetailPage", () => {
     expect(overviewTab).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("article")).toHaveAttribute("data-domain-portal");
     expect(screen.queryByTitle("机器人领域总览")).toBeNull();
+    expect(screen.getByText("论文（主口径）")).toBeInTheDocument();
+    expect(screen.getByText("代码仓库（单独统计）")).toBeInTheDocument();
+    expect(screen.queryByText("研究单元（聚合视图）")).not.toBeInTheDocument();
+    expect(screen.queryByText(/与论文一一对应，非额外论文/)).not.toBeInTheDocument();
+    const scopeHeading = screen.getByRole("heading", { name: "领域定位与边界" });
+    const catalogHeading = screen.getByRole("heading", { name: "论文、代码与导读目录" });
+    const timelineHeading = screen.getByRole("heading", { name: "发展时间线" });
+    expect(scopeHeading.compareDocumentPosition(catalogHeading)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(catalogHeading.compareDocumentPosition(timelineHeading)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
 
     const target = { location: { href: "" }, opener: window };
     vi.spyOn(window, "open").mockReturnValue(target as unknown as Window);

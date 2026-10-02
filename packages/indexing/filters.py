@@ -31,6 +31,7 @@ _SUPPORTED = frozenset(
         "representation_types",
         "available_representation_types",
         "availability",
+        "asset_id",
     }
 )
 _BOOLEAN_FILTERS = frozenset({"has_pdf", "has_html", "has_code", "has_guide"})
@@ -60,7 +61,7 @@ def metadata_filters(filters: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         key: value
         for key, value in canonical_filters(filters).items()
-        if key not in {"year_from", "year_to"}
+        if key not in {"year_from", "year_to", "asset_id"}
     }
 
 
@@ -74,6 +75,8 @@ def matches_metadata(metadata: Mapping[str, Any], filters: Mapping[str, Any] | N
     if upper is not None and (not isinstance(year, int) or year > int(upper)):
         return False
     for key, expected in normalized.items():
+        if key == "asset_id":
+            continue
         actual = metadata.get(key)
         if actual is None and key == "domains":
             actual = metadata.get("domain")
@@ -108,7 +111,7 @@ def meilisearch_filter(filters: Mapping[str, Any] | None) -> list[str]:
     if upper is not None:
         clauses.append(f"metadata.year <= {int(upper)}")
     for key, value in normalized.items():
-        field = f"metadata.{key}"
+        field = key if key == "asset_id" else f"metadata.{key}"
         if _is_sequence(value):
             rendered = ", ".join(_meili_literal(item) for item in value)
             clauses.append(f"{field} IN [{rendered}]")

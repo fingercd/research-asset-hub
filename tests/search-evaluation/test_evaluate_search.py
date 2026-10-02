@@ -10,12 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from packages.indexing import SearchDocument, SearchHit, SearchMode
 from scripts.evaluate_search import (
     SearchEvaluationQuery,
+    build_index_scope,
     deduplicate_asset_ids,
     evaluate_rankings,
     load_queries,
     ndcg_at_k,
     percentile_95,
     recall_at_k,
+    select_queries_for_index_scope,
 )
 
 
@@ -48,6 +50,58 @@ def test_fixed_search_fixture_covers_locked_exact_categories() -> None:
         SearchMode.EXACT,
         SearchMode.KEYWORD,
     }
+
+
+def test_code_query_is_explicitly_skipped_when_code_index_is_disabled() -> None:
+    fixture = Path(__file__).with_name("queries.yaml")
+    queries = load_queries(fixture)
+
+    selected, skipped = select_queries_for_index_scope(
+        queries,
+        code_index_enabled=False,
+    )
+
+    assert len(selected) == len(queries) - 1
+    assert all(item.category != "code_symbol" for item in selected)
+    assert skipped == (
+        {
+            "id": "exact-code-symbol",
+            "category": "code_symbol",
+            "reason": "code_index_disabled",
+        },
+    )
+    assert build_index_scope(
+        code_index_enabled=False,
+        fixture_query_count=len(queries),
+        evaluated_query_count=len(selected),
+        skipped_query_count=len(skipped),
+    ) == {
+        "code_index_enabled": False,
+        "selected_indexes": ["assets", "documents", "annotations"],
+        "skipped_indexes": ["code"],
+        "fixture_query_count": 12,
+        "evaluated_query_count": 11,
+        "skipped_query_count": 1,
+    }
+
+
+def test_code_query_remains_in_scope_when_code_index_is_enabled() -> None:
+    fixture = Path(__file__).with_name("queries.yaml")
+    queries = load_queries(fixture)
+
+    selected, skipped = select_queries_for_index_scope(
+        queries,
+        code_index_enabled=True,
+    )
+
+    assert selected == queries
+    assert skipped == ()
+    assert build_index_scope(
+        code_index_enabled=True,
+        fixture_query_count=len(queries),
+        evaluated_query_count=len(selected),
+        skipped_query_count=len(skipped),
+    )["selected_indexes"] == ["assets", "documents", "code", "annotations"]
 
 
 def test_asset_level_deduplication_prevents_chunk_heavy_assets_from_inflating_rank() -> None:

@@ -5,7 +5,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
 
@@ -24,6 +24,7 @@ from apps.api.contracts import (
     AssetPatch,
 )
 from apps.api.database import DatabaseManager
+from apps.api.domain_views import annotate_presentation_domains, presentation_domains
 from apps.api.editor import CODE_REPRESENTATION_TYPES, resolve_editor_path
 from apps.api.events import record_mutation, stable_hash
 from apps.api.pagination import encode_cursor
@@ -36,7 +37,7 @@ from apps.api.serialization import (
     serialize_representation,
     serialize_research_unit,
 )
-from apps.asset_gateway.registry import SourceRegistry
+from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from packages.domain.enums import (
     AuditAction,
     FieldClaimStatus,
@@ -58,9 +59,24 @@ from packages.domain.models import (
     Representation,
     Source,
 )
+from packages.domain.serving_scope import (
+    RetiredRepresentationError,
+    active_representation_clause,
+    assert_representation_active,
+)
+from packages.ingestion.safe_tree_policy import path_has_reparse
 
 router = APIRouter(prefix="/api/v1")
 PAGE_SIZE = 30
+_NO_CODE_ALLOWLIST_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "check-unit-actions-allowlist.yaml"
+)
+_NO_CODE_AUDIT_REASON = (
+    "经审计暂无本地可用的官方公开实现；"
+    "如存在联网线索，其可能仅为占位项目页或第三方仓库。"
+)
 _WORD = re.compile(r"[\w\u3400-\u9fff-]+", re.UNICODE)
 _OVERRIDABLE_ASSET_FIELDS = frozenset(
     {
@@ -156,6 +172,41 @@ def _serialize_representation_for_ui(
         result["local_available"] = editor["available"]
         result["local_reason"] = editor["reason"]
     return result
+
+
+def _retired_representation_problem(
+    error: RetiredRepresentationError,
+) -> ApiProblem:
+    """Build a path-free 410 response for historical representation IDs."""
+
+    successor = error.successor_representation_id
+    headers = (
+        {
+            "Link": (
+                f'</api/v1/representations/{successor}/open-actions>; '
+                'rel="successor-version"'
+            ),
+            "X-Successor-Representation-ID": str(successor),
+        }
+        if successor is not None
+        else None
+    )
+    return ApiProblem(
+        410,
+        "表示层已退出服务",
+        "The requested representation belongs to a retired source and is retained "
+        "only as audit provenance.",
+        problem_type="urn:research-asset-hub:problem:representation-retired",
+        code="representation_retired",
+        headers=headers,
+        errors=[
+            {
+                "successor_representation_id": (
+                    str(successor) if successor is not None else None
+                )
+            }
+        ],
+    )
 
 
 def _request_id(request: Request) -> str | None:
@@ -368,7 +419,7 @@ def _representation_matches_action(
         )
     if kind == "html":
         return (
-            representation.role != "guide"
+            (representation.role != "guide" or bool(representation.attributes.get("unified_guide")))
             and representation.representation_type in _ACTION_REPRESENTATION_TYPES["html"]
         )
     return representation.representation_type in _ACTION_REPRESENTATION_TYPES[kind]
@@ -403,6 +454,42 @@ def _representation_is_local(
             source_alias=source_alias,
         ).available
     return False
+
+
+def _representation_is_serving_local_code(
+    representation: Representation,
+    *,
+    source_registry: SourceRegistry | None,
+    source_alias: str | None,
+) -> bool:
+    """Require a registered, real, non-reparse code path for allowlist override."""
+
+    if (
+        representation.availability != "available"
+        or representation.representation_type not in CODE_REPRESENTATION_TYPES
+        or representation.materialization_kind not in {"directory", "file"}
+        or not representation.path_ref
+        or source_registry is None
+        or source_alias is None
+    ):
+        return False
+    root_key = representation.root_key or "repository"
+    try:
+        root = source_registry.root_for(source_alias, root_key)
+    except UnsafeAssetPath:
+        return False
+    path_ref = PurePosixPath(representation.path_ref.replace("\\", "/"))
+    if path_ref.is_absolute() or ".." in path_ref.parts:
+        return False
+    candidate = root.joinpath(*path_ref.parts)
+    has_reparse, _ = path_has_reparse(root, candidate)
+    if has_reparse:
+        return False
+    return resolve_editor_path(
+        source_registry,
+        representation,
+        source_alias=source_alias,
+    ).available
 
 
 def _representation_requires_network(
@@ -470,7 +557,8 @@ def _representation_choice_key(
             source_alias=source_alias,
         )
         else 1,
-        _REPRESENTATION_ROLE_ORDER.get(representation.role, 100),
+        -1 if representation.attributes.get("unified_guide")
+        else _REPRESENTATION_ROLE_ORDER.get(representation.role, 100),
         0
         if not _representation_requires_network(
             representation,
@@ -490,6 +578,67 @@ def _representation_missing_reason(representation: Representation) -> str:
         if isinstance(value, str) and value.strip():
             return " ".join(value.split())
     return f"Representation availability is {representation.availability}."
+
+
+def _no_code_allowlist_problem(path: Path, detail: str) -> ApiProblem:
+    return ApiProblem(
+        503,
+        "无代码审计配置不可用",
+        f"Could not safely load {path.name}: {detail}",
+        problem_type="urn:research-asset-hub:problem:configuration",
+    )
+
+
+def _load_no_code_titles_by_domain(
+    path: Path | None = None,
+) -> dict[str, frozenset[str]]:
+    """Load the audited exact-title allowlist with strict, fail-closed validation."""
+
+    target = path or _NO_CODE_ALLOWLIST_PATH
+    try:
+        document = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as error:
+        raise _no_code_allowlist_problem(target, type(error).__name__) from error
+    if document is None:
+        document = {}
+    if not isinstance(document, dict):
+        raise _no_code_allowlist_problem(target, "top level must be a mapping")
+
+    result: dict[str, frozenset[str]] = {}
+    for raw_domain, raw_policy in document.items():
+        if not isinstance(raw_domain, str) or not raw_domain or raw_domain.strip() != raw_domain:
+            raise _no_code_allowlist_problem(
+                target,
+                "every domain key must be a non-empty exact string",
+            )
+        if not isinstance(raw_policy, dict):
+            raise _no_code_allowlist_problem(
+                target,
+                f"domain {raw_domain!r} must map to an object",
+            )
+        raw_titles = raw_policy.get("no_code_titles", [])
+        if not isinstance(raw_titles, list) or any(
+            not isinstance(title, str) or not title or title.strip() != title
+            for title in raw_titles
+        ):
+            raise _no_code_allowlist_problem(
+                target,
+                f"domain {raw_domain!r}.no_code_titles must be a list of exact titles",
+            )
+        result[raw_domain] = frozenset(raw_titles)
+    return result
+
+
+def _paper_is_no_code_allowlisted(
+    paper: Asset,
+    no_code_titles_by_domain: dict[str, frozenset[str]],
+) -> bool:
+    if paper.asset_type != "paper":
+        return False
+    return any(
+        paper.title in no_code_titles_by_domain.get(domain, frozenset())
+        for domain in paper.domain_slugs or []
+    )
 
 
 def _quick_action(
@@ -598,6 +747,7 @@ def _research_unit_quick_actions(
     *,
     source_registry: SourceRegistry | None = None,
     source_aliases: dict[UUID, str] | None = None,
+    no_code_titles_by_domain: dict[str, frozenset[str]] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     for kind in ("pdf", "html"):
@@ -629,24 +779,61 @@ def _research_unit_quick_actions(
         for representation in representations.get(owner.id, [])
         if _representation_matches_action(representation, "code")
     ]
-    actions.append(
-        _quick_action(
-            kind="code",
-            candidates=code_candidates,
-            missing_owner_asset_id=(
-                code_owners[0].id
-                if code_owners
-                else primary_asset.id
-                if primary_asset.asset_type == "paper"
-                else None
-            ),
-            missing_relation_type=(
-                "implemented_by" if primary_asset.asset_type == "paper" else relation_type
-            ),
+
+    def source_alias_for(representation: Representation) -> str | None:
+        if source_aliases is None or representation.source_id is None:
+            return None
+        return source_aliases.get(representation.source_id)
+
+    has_available_local_code = any(
+        _representation_is_serving_local_code(
+            representation,
             source_registry=source_registry,
-            source_aliases=source_aliases,
+            source_alias=source_alias_for(representation),
         )
+        for representation, _, _ in code_candidates
     )
+    suppress_network_only_code = (
+        primary_asset.asset_type == "paper"
+        and _paper_is_no_code_allowlisted(
+            primary_asset,
+            no_code_titles_by_domain or {},
+        )
+        and not has_available_local_code
+    )
+    if suppress_network_only_code:
+        actions.append(
+            serialize_quick_action(
+                kind="code",
+                status="not_provided",
+                representation_id=None,
+                owner_asset_id=str(primary_asset.id),
+                relation_type="implemented_by",
+                reason=_NO_CODE_AUDIT_REASON,
+                alternatives=[],
+            )
+        )
+    else:
+        actions.append(
+            _quick_action(
+                kind="code",
+                candidates=code_candidates,
+                missing_owner_asset_id=(
+                    code_owners[0].id
+                    if code_owners
+                    else primary_asset.id
+                    if primary_asset.asset_type == "paper"
+                    else None
+                ),
+                missing_relation_type=(
+                    "implemented_by"
+                    if primary_asset.asset_type == "paper"
+                    else relation_type
+                ),
+                source_registry=source_registry,
+                source_aliases=source_aliases,
+            )
+        )
     return actions
 
 
@@ -716,7 +903,7 @@ def _asset_matches_unit_filters(
     has_annotation: bool | None,
 ) -> bool:
     if domain and not any(
-        domain in (member.domain_slugs or []) for member in (asset, *related_repositories)
+        domain in presentation_domains(member) for member in (asset, *related_repositories)
     ):
         return False
     if author and not any(author.casefold() in item.casefold() for item in asset.authors or []):
@@ -770,7 +957,7 @@ def _asset_facets(
     return {
         "domains": dict(
             Counter(
-                domain_slug for asset in assets for domain_slug in asset.domain_slugs or []
+                domain_slug for asset in assets for domain_slug in presentation_domains(asset)
             ).most_common()
         ),
         "years": dict(
@@ -816,6 +1003,7 @@ def _build_research_units(
     has_annotation: bool | None,
     source_registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], list[Asset]]:
+    no_code_titles_by_domain = _load_no_code_titles_by_domain()
     assets_by_id = {asset.id: asset for asset in catalog_assets}
     source_aliases: dict[UUID, str] = {}
     if source_registry is not None:
@@ -861,6 +1049,10 @@ def _build_research_units(
             ),
             key=lambda item: (item.title.casefold(), str(item.id)),
         )
+        if browse and domain and domain not in presentation_domains(paper):
+            # Domain catalogs are paper censuses.  A shared repository tagged for
+            # another domain must not pull its paper into a no-query browse total.
+            continue
         member_ids = {paper.id, *(repository.id for repository in related_repositories)}
         if not browse and not member_ids.intersection(matched_ids):
             continue
@@ -931,6 +1123,7 @@ def _build_research_units(
                 representations,
                 source_registry=source_registry,
                 source_aliases=source_aliases,
+                no_code_titles_by_domain=no_code_titles_by_domain,
             ),
             matched_assets=[
                 _serialize_matched_asset(
@@ -1005,6 +1198,7 @@ def _build_research_units(
                     representations,
                     source_registry=source_registry,
                     source_aliases=source_aliases,
+                    no_code_titles_by_domain=no_code_titles_by_domain,
                 ),
                 matched_assets=[
                     _serialize_matched_asset(
@@ -1421,7 +1615,7 @@ def _domain_catalog(settings: ApiSettings) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         slug = str(item.get("id", "")).strip()
-        if slug:
+        if slug and not item.get("hidden_from_catalog"):
             result.append(
                 {
                     "slug": slug,
@@ -1478,6 +1672,11 @@ def _local_code_context(
         representation = session.get(Representation, representation_id)
         if representation is None or representation.deleted_at is not None:
             raise not_found("Representation", representation_id)
+        _live_asset(session, representation.asset_id)
+        try:
+            assert_representation_active(session, representation)
+        except RetiredRepresentationError as error:
+            raise _retired_representation_problem(error) from error
         if representation.representation_type not in CODE_REPRESENTATION_TYPES:
             raise conflict("该表示不是代码项目。")
         if representation.availability != "available":
@@ -1487,7 +1686,9 @@ def _local_code_context(
             if representation.source_id is not None
             else None
         )
-        source_alias = source.alias if source is not None else None
+        if source is None or not source.enabled:
+            raise conflict("该代码来源当前不可用。")
+        source_alias = source.alias
         try:
             root = local_code_repository(
                 _source_registry(request),
@@ -1555,6 +1756,7 @@ def _domain_overviews(
             .where(
                 Representation.asset_id.in_(portal_ids),
                 Representation.deleted_at.is_(None),
+                active_representation_clause(),
                 Representation.representation_type.in_(_HTML_REPRESENTATION_TYPES),
             )
             .order_by(Representation.asset_id, Representation.id)
@@ -1625,10 +1827,14 @@ def _domains_with_counts(
     assets: list[Asset] | None = None,
     *,
     include_overview: bool = False,
+    all_assets: list[Asset] | None = None,
+    asset_context: tuple[dict[UUID, ReadingState], dict[UUID, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    all_assets = list(
-        session.scalars(select(Asset).where(Asset.deleted_at.is_(None))).all()
-    )
+    if all_assets is None:
+        all_assets = list(
+            session.scalars(select(Asset).where(Asset.deleted_at.is_(None))).all()
+        )
+    annotate_presentation_domains(session, all_assets)
     portal_assets = [
         asset for asset in all_assets if _is_domain_overview_asset(asset)
     ]
@@ -1637,7 +1843,17 @@ def _domains_with_counts(
         if assets is None
         else [asset for asset in assets if not _is_system_hidden_asset(asset)]
     )
-    states, _ = _asset_context(session, content_assets)
+    states, summaries = asset_context or _asset_context(session, content_assets)
+    annotation_counts = dict(
+        session.execute(
+            select(Annotation.asset_id, func.count(Annotation.id))
+            .where(
+                Annotation.asset_id.in_([asset.id for asset in content_assets]),
+                Annotation.deleted_at.is_(None),
+            )
+            .group_by(Annotation.asset_id)
+        ).all()
+    )
     overviews = _domain_overviews(session, portal_assets)
     confirmed_repository_ids = set(
         session.scalars(
@@ -1650,7 +1866,11 @@ def _domains_with_counts(
     )
     result: list[dict[str, Any]] = []
     catalog = _domain_catalog(settings)
-    known = {item["slug"] for item in catalog}
+    known = {
+        str(item.get("id"))
+        for item in _load_yaml(settings.taxonomy_config_path).get("domains", [])
+        if isinstance(item, dict)
+    }
     discovered = {
         slug
         for asset in [*content_assets, *portal_assets]
@@ -1676,26 +1896,13 @@ def _domains_with_counts(
     )
     for domain in catalog:
         slug = str(domain["slug"])
-        matching = [
-            item for item in content_assets if slug in (item.domain_slugs or [])
-        ]
+        matching = [item for item in content_assets if slug in presentation_domains(item)]
         reading_counts = {"unread": 0, "reading": 0, "read": 0}
         for asset in matching:
             reading_state = states.get(asset.id)
             value = reading_state.status if reading_state is not None else "unread"
             reading_counts[value] = reading_counts.get(value, 0) + 1
-        annotation_count = 0
-        matching_ids = [item.id for item in matching]
-        if matching_ids:
-            annotation_count = (
-                session.scalar(
-                    select(func.count(Annotation.id)).where(
-                        Annotation.asset_id.in_(matching_ids),
-                        Annotation.deleted_at.is_(None),
-                    )
-                )
-                or 0
-            )
+        annotation_count = sum(annotation_counts.get(item.id, 0) for item in matching)
         paper_count = sum(item.asset_type == "paper" for item in matching)
         repository_count = sum(item.asset_type == "repository" for item in matching)
         independent_repository_count = sum(
@@ -1713,10 +1920,16 @@ def _domains_with_counts(
             "annotation_count": annotation_count,
             "reading_counts": reading_counts,
             "overview_status": overview["status"],
-            "recent_assets": _serialize_assets(
-                session,
-                sorted(matching, key=lambda asset: asset.updated_at, reverse=True)[:5],
-            ),
+            "recent_assets": [
+                serialize_asset(
+                    asset,
+                    reading_state=states.get(asset.id),
+                    annotation_summary=summaries.get(asset.id),
+                )
+                for asset in sorted(
+                    matching, key=lambda asset: asset.updated_at, reverse=True
+                )[:5]
+            ],
         }
         if include_overview:
             item["overview"] = overview
@@ -1730,113 +1943,12 @@ def _domains_with_counts(
 
 
 
-def _graph_payload(
-    session: Session,
-    node_ids: set[UUID],
-    relations: list[Relation],
-    *,
-    truncated: bool = False,
-) -> dict[str, Any]:
-    assets = {
-        item.id: item for item in session.scalars(select(Asset).where(Asset.id.in_(node_ids))).all()
-    }
-    states, _ = _asset_context(session, list(assets.values()))
-    return {
-        "nodes": [
-            {
-                "id": str(asset.id),
-                "label": asset.title,
-                "title": asset.title,
-                "asset_type": asset.asset_type,
-                "domain_slugs": list(asset.domain_slugs or []),
-                "year": asset.year,
-                "reading_status": (states[asset.id].status if asset.id in states else "unread"),
-            }
-            for asset in assets.values()
-        ],
-        "edges": [
-            {
-                "id": str(item.id),
-                "source": str(item.subject_asset_id),
-                "target": str(item.object_asset_id),
-                "subject_asset_id": str(item.subject_asset_id),
-                "object_asset_id": str(item.object_asset_id),
-                "relation_type": item.relation_type,
-                "label": item.relation_type,
-                "confidence": item.confidence,
-                "confirmation_status": item.confirmation_status,
-            }
-            for item in relations
-        ],
-        "truncated": truncated,
-    }
-
-
-
-
-
-
-
-
-
-
-def _gitnexus_registry_index(
-    registry_path: Path | None = None,
-) -> dict[str, dict[str, Any]]:
-    registry_path = registry_path or Path.home() / ".gitnexus" / "registry.json"
-    try:
-        value = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(value, list):
-        return {}
-    result: dict[str, dict[str, Any]] = {}
-    for item in value:
-        if not isinstance(item, dict) or not item.get("path"):
-            continue
-        key = str(Path(item["path"]).resolve()).casefold()
-        result[key] = {
-            "name": item.get("name"),
-            "indexed_at": item.get("indexedAt"),
-        }
-    return result
-
-
-def _load_code_graph_hidden(settings: ApiSettings) -> dict[str, Any]:
-    """Load hidden-repository rules that affect Hub code graph display only."""
-
-    try:
-        document = _load_yaml(settings.code_graph_hidden_path)
-    except (OSError, yaml.YAMLError):
-        return {"registry_names": set(), "title_patterns": []}
-    rules = document.get("hidden_repositories", [])
-    if not isinstance(rules, list):
-        return {"registry_names": set(), "title_patterns": []}
-    registry_names: set[str] = set()
-    title_patterns: list[str] = []
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        name = str(rule.get("registry_name") or "").strip()
-        if name:
-            registry_names.add(name.casefold())
-        pattern = str(rule.get("title") or "").strip()
-        if pattern:
-            title_patterns.append(pattern.casefold())
-    return {
-        "registry_names": registry_names,
-        "title_patterns": title_patterns,
-    }
-
-
-
-
 def _comparison_columns(assets: list[Asset]) -> list[dict[str, Any]]:
     fields: list[tuple[str, str, Any]] = [
         ("year", "年份", lambda item: item.year),
         ("authors", "作者", lambda item: item.authors),
         ("venue", "发表场所", lambda item: item.venue),
-        ("domains", "领域", lambda item: item.domain_slugs),
+        ("domains", "领域", presentation_domains),
         ("summary", "摘要", lambda item: item.summary or item.abstract),
         ("tags", "标签", lambda item: item.tags),
     ]

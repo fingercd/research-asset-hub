@@ -34,6 +34,24 @@ afterEach(() => {
 });
 
 describe("ResearchUnitCard", () => {
+  it("keeps arXiv venue at the original size", () => {
+    renderCard({
+      unit_id: "paper:arxiv-1",
+      unit_kind: "paper",
+      primary_asset: {
+        id: "arxiv-1",
+        asset_type: "paper",
+        title: "Preprint",
+        venue: "arXiv 2026",
+      },
+      related_repositories: [],
+      matched_assets: [],
+      covered_asset_count: 1,
+      quick_actions: [],
+    });
+    expect(screen.getByText("arXiv 2026")).not.toHaveClass("research-unit-venue");
+  });
+
   it("uses quick-action status and binds personal state to the primary paper", async () => {
     const open = vi
       .spyOn(api, "openRepresentation")
@@ -49,6 +67,8 @@ describe("ResearchUnitCard", () => {
         id: "paper-1",
         asset_type: "paper",
         title: "Primary Paper",
+        venue: "ICML",
+        year: 2026,
         reading_status: "reading",
         annotation_summary: "主论文批注",
       },
@@ -93,14 +113,16 @@ describe("ResearchUnitCard", () => {
     });
 
     expect(screen.getByRole("heading", { name: "Primary Paper" })).toBeInTheDocument();
+    expect(screen.getByText("ICML 2026")).toHaveClass("research-unit-venue");
     expect(screen.queryByText("命中关联代码")).not.toBeInTheDocument();
     expect(screen.getByText("主论文批注")).toBeInTheDocument();
     expect(screen.queryByText("仓库批注不应显示")).not.toBeInTheDocument();
     expect(screen.getByLabelText("阅读状态")).toHaveValue("reading");
-    expect(screen.getByRole("link", { name: "Companion Code" })).toHaveAttribute(
-      "href",
-      "/assets/repo-1",
-    );
+    expect(screen.getByText("关联 1 个代码仓库")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Companion Code" })).toBeNull();
+    expect(document.querySelector(".card-more-menu")).not.toHaveAttribute("open");
+
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByRole("button", { name: "复制ID" })).toBeInTheDocument();
 
     const actionGroup = screen.getByLabelText("快速打开");
@@ -116,8 +138,8 @@ describe("ResearchUnitCard", () => {
       expect.stringContaining("本地 PDF 路径不存在"),
     );
     expect(actionButtons[1]).toBeEnabled();
-    expect(actionButtons[2]).toBeDisabled();
-    expect(actionButtons[2]).toHaveClass("is-unavailable");
+    expect(actionButtons[2]).toBeEnabled();
+    expect(actionButtons[2]).toHaveClass("requires-network");
     expect(actionButtons[2]).toHaveTextContent("需联网");
     expect(actionButtons[2]).toHaveAttribute(
       "title",
@@ -137,7 +159,7 @@ describe("ResearchUnitCard", () => {
       ),
     );
     fireEvent.click(actionButtons[2]!);
-    expect(screen.queryByRole("dialog", { name: "代码打开方式" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "代码打开方式" })).toBeInTheDocument();
     expect(open).not.toHaveBeenCalledWith("code-remote");
 
     fireEvent.click(screen.getByRole("button", { name: "加入对比" }));
@@ -205,6 +227,7 @@ describe("ResearchUnitCard", () => {
       ],
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     const defaultPdf = screen.getByRole("button", { name: "PDF" });
     expect(defaultPdf).toHaveTextContent("+2");
     fireEvent.click(defaultPdf);
@@ -265,6 +288,7 @@ describe("ResearchUnitCard", () => {
       ],
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     const codeButton = screen.getByRole("button", { name: "代码" });
     expect(codeButton).toBeDisabled();
     expect(codeButton).toHaveClass("is-unavailable");
@@ -315,16 +339,16 @@ describe("ResearchUnitCard", () => {
       ],
     });
 
+    expect(screen.queryByRole("button", { name: "加入对比" })).toBeNull();
+    expect(screen.getByText("关联 1 篇论文")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Linked Research Paper" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     const actionGroup = screen.getByLabelText("快速打开");
     const codeButton = within(actionGroup).getByRole("button", { name: "代码" });
     fireEvent.click(codeButton);
     expect(await screen.findByText("该仓库未提供源码")).toBeInTheDocument();
     expect(within(actionGroup).queryByRole("button", { name: /PDF/ })).toBeNull();
     expect(within(actionGroup).queryByRole("button", { name: "HTML" })).toBeNull();
-    expect(screen.getByText("关联论文")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Linked Research Paper" })).toHaveAttribute(
-      "href",
-      "/assets/paper-linked",
-    );
+    expect(screen.queryByRole("button", { name: "加入对比" })).toBeNull();
   });
 });

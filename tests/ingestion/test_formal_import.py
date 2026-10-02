@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from packages.cli.config import LoadedSource
+from packages.domain.enums import MaterializationKind
 from packages.domain.models import (
     Asset,
     Base,
@@ -21,7 +23,8 @@ from packages.domain.models import (
     RepresentationMount,
     Source,
 )
-from packages.domain.schemas import NormalizedRecord
+from packages.domain.schemas import NormalizedRecord, RepresentationMountCandidate
+from packages.domain.scope_policy import DomainExclusionRule, DomainScopePolicy
 from packages.ingestion import formal
 from packages.ingestion.reconciliation import (
     UnapprovedWeakMergeError,
@@ -117,6 +120,49 @@ def _weak_record(source_id: str, source_record_id: str) -> NormalizedRecord:
     )
 
 
+def test_merged_asset_values_combines_release_audit_attributes() -> None:
+    catalog = _record("a-catalog", "catalog.pdf")
+    catalog = catalog.model_copy(
+        update={
+            "asset": catalog.asset.model_copy(
+                update={
+                    "attributes": {
+                        "first_public_date": "2026-03-18",
+                        "release_status": {"code_open": "unknown"},
+                    }
+                }
+            )
+        }
+    )
+    audit = _record("z-release-audit", "audit.pdf")
+    audit = audit.model_copy(
+        update={
+            "asset": audit.asset.model_copy(
+                update={
+                    "attributes": {
+                        "release_status": {
+                            "code_open": "official_open",
+                            "code_local": "stale",
+                            "checkpoint_open": "announced",
+                        }
+                    }
+                }
+            )
+        }
+    )
+
+    values = formal._merged_asset_values([audit, catalog])
+
+    assert values["attributes"] == {
+        "first_public_date": "2026-03-18",
+        "release_status": {
+            "code_open": "official_open",
+            "code_local": "stale",
+            "checkpoint_open": "announced",
+        },
+    }
+
+
 def test_unapproved_title_year_merge_stops_before_grouping() -> None:
     records = [_weak_record("left", "paper-1"), _weak_record("right", "paper-2")]
 
@@ -166,6 +212,167 @@ def test_weak_merge_approval_fails_closed_when_record_set_expands() -> None:
     )
 
 
+def test_multi_variant_weak_merge_approval_accepts_only_exact_sets(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approvals.yaml"
+    approval_path.write_text(
+        "schema_version: 1\napproved_weak_merge_groups:\n"
+        "  - identity_key: title-year:a title only identity:2026\n"
+        "    records:\n"
+        "      - source_id: predecessor-left\n"
+        "        source_record_id: paper-1\n"
+        "      - source_id: predecessor-right\n"
+        "        source_record_id: paper-2\n"
+        "    rationale: Full configuration with frozen predecessors.\n"
+        "    alternate_record_sets:\n"
+        "      - name: serving-active\n"
+        "        rationale: Retired predecessors are excluded from serving.\n"
+        "        records:\n"
+        "          - source_id: successor-left\n"
+        "            source_record_id: paper-1\n"
+        "          - source_id: successor-right\n"
+        "            source_record_id: paper-2\n",
+        encoding="utf-8",
+    )
+    approvals = load_approved_weak_merges(approval_path)
+    identity_key = "title-year:a title only identity:2026"
+
+    assert approvals[identity_key] == (
+        frozenset({"predecessor-left:paper-1", "predecessor-right:paper-2"}),
+        frozenset({"successor-left:paper-1", "successor-right:paper-2"}),
+    )
+    for source_ids in (
+        ("predecessor-left", "predecessor-right"),
+        ("successor-left", "successor-right"),
+    ):
+        records = [
+            _weak_record(source_ids[0], "paper-1"),
+            _weak_record(source_ids[1], "paper-2"),
+        ]
+        result = apply_weak_merge_approvals(
+            reconcile_records(records),
+            approvals=approvals,
+        )
+        assert len(result["approved_review_groups"]) == 1
+        assert result["unapproved_review_groups"] == []
+        assert result["unused_approval_keys"] == []
+
+    unlisted_records = [
+        _weak_record("predecessor-left", "paper-1"),
+        _weak_record("successor-right", "paper-2"),
+    ]
+    unlisted_result = apply_weak_merge_approvals(
+        reconcile_records(unlisted_records),
+        approvals=approvals,
+    )
+    assert unlisted_result["approved_review_groups"] == []
+    assert (
+        unlisted_result["unapproved_review_groups"][0]["approval_status"]
+        == "record_set_changed"
+    )
+    assert unlisted_result["unused_approval_keys"] == []
+
+
+def test_legacy_weak_merge_approval_schema_has_stable_variant_type(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approvals.yaml"
+    approval_path.write_text(
+        "schema_version: 1\napproved_weak_merge_groups:\n"
+        "  - identity_key: title-year:paper:2026\n"
+        "    records:\n"
+        "      - source_id: left\n"
+        "        source_record_id: paper-1\n"
+        "      - source_id: right\n"
+        "        source_record_id: paper-2\n"
+        "    rationale: Legacy single-set approval.\n",
+        encoding="utf-8",
+    )
+
+    approvals = load_approved_weak_merges(approval_path)
+
+    assert approvals == {
+        "title-year:paper:2026": (
+            frozenset({"left:paper-1", "right:paper-2"}),
+        )
+    }
+    assert isinstance(approvals["title-year:paper:2026"], tuple)
+    assert isinstance(approvals["title-year:paper:2026"][0], frozenset)
+
+
+def test_duplicate_weak_merge_record_set_variant_fails_closed(
+    tmp_path: Path,
+) -> None:
+    approval_path = tmp_path / "approvals.yaml"
+    approval_path.write_text(
+        "schema_version: 1\napproved_weak_merge_groups:\n"
+        "  - identity_key: title-year:paper:2026\n"
+        "    records: &records\n"
+        "      - source_id: left\n"
+        "        source_record_id: paper-1\n"
+        "      - source_id: right\n"
+        "        source_record_id: paper-2\n"
+        "    rationale: Primary set.\n"
+        "    alternate_record_sets:\n"
+        "      - name: duplicate\n"
+        "        rationale: This must be rejected.\n"
+        "        records: *records\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate weak merge approval record set"):
+        load_approved_weak_merges(approval_path)
+
+
+@pytest.mark.parametrize(
+    ("alternate_yaml", "expected_error"),
+    [
+        ("{}", "must be a list"),
+        ("[]", "must not be empty"),
+        (
+            "\n      - name: serving-active\n"
+            "        rationale: ''\n"
+            "        records:\n"
+            "          - source_id: left\n"
+            "            source_record_id: paper-1\n"
+            "          - source_id: right\n"
+            "            source_record_id: paper-2",
+            "rationale must be a non-empty string",
+        ),
+        (
+            "\n      - name: serving-active\n"
+            "        rationale: Too small.\n"
+            "        records:\n"
+            "          - source_id: left\n"
+            "            source_record_id: paper-1",
+            "at least two unique records",
+        ),
+    ],
+)
+def test_invalid_alternate_weak_merge_record_sets_fail_closed(
+    tmp_path: Path,
+    alternate_yaml: str,
+    expected_error: str,
+) -> None:
+    approval_path = tmp_path / "approvals.yaml"
+    approval_path.write_text(
+        "schema_version: 1\napproved_weak_merge_groups:\n"
+        "  - identity_key: title-year:paper:2026\n"
+        "    records:\n"
+        "      - source_id: left\n"
+        "        source_record_id: paper-1\n"
+        "      - source_id: right\n"
+        "        source_record_id: paper-2\n"
+        "    rationale: Primary set.\n"
+        f"    alternate_record_sets: {alternate_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=expected_error):
+        load_approved_weak_merges(approval_path)
+
+
 def test_malformed_weak_merge_approval_file_fails_closed(tmp_path: Path) -> None:
     approval_path = tmp_path / "approvals.yaml"
     approval_path.write_text(
@@ -177,7 +384,7 @@ def test_malformed_weak_merge_approval_file_fails_closed(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="at least two records"):
+    with pytest.raises(ValueError, match="at least two unique records"):
         load_approved_weak_merges(approval_path)
 
 
@@ -205,6 +412,45 @@ def test_formal_import_rejects_unapproved_merge_before_database_write(
                 known_domain_slugs={"test-domain"},
             )
         assert session.scalars(select(Source)).all() == []
+
+
+def test_formal_import_does_not_recreate_excluded_paper_or_repository(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    root = tmp_path / "uav-source"
+    root.mkdir()
+    (root / "paper.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    source = _loaded_source(root, "uav-source")
+    record = _record("uav-source", "paper.pdf")
+    record.asset.title = "Example UAV Vision-Language Navigation"
+    policy = DomainScopePolicy(
+        [
+            DomainExclusionRule(
+                rule_id="exclude-uav",
+                domain="test-domain",
+                reason="test",
+                asset_ids=frozenset(),
+                title_patterns=(re.compile(r"\bUAV\b", re.IGNORECASE),),
+            )
+        ]
+    )
+    monkeypatch.setattr(formal, "_load_all_records", lambda _: [record])
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        report = formal.run_formal_import(
+            session,
+            [source],
+            known_domain_slugs={"test-domain"},
+            domain_scope_policy=policy,
+        )
+        assets = list(session.scalars(select(Asset)).all())
+
+    assert assets == []
+    assert report["scope_exclusions"]["source_records"] == 1
+    assert report["scope_exclusions"]["record_keys"] == ["uav-source:paper-1"]
 
 
 def test_formal_import_rejects_unregistered_domain_before_database_write(
@@ -645,7 +891,7 @@ def test_reused_repository_unions_domains_and_preserves_bundle_contract(
         record.asset.domain_slugs = [domain]
         repository = record.representations[1]
         repository.path_ref = "code/repo"
-        repository.materialization_kind = "bundle"
+        repository.materialization_kind = MaterializationKind.BUNDLE
         repository.entrypoint = "README.md"
         repository.revision = "a" * 40
         repository.tree_digest = "b" * 64
@@ -655,14 +901,14 @@ def test_reused_repository_unions_domains_and_preserves_bundle_contract(
             "source_label": source_id,
         }
         repository.mounts = [
-            {
-                "mount_path": "/docs",
-                "source_id": source_id,
-                "root_key": "source",
-                "path_ref": "code/repo/docs",
-                "read_only": True,
-                "priority": 10,
-            }
+            RepresentationMountCandidate(
+                mount_path="/docs",
+                source_id=source_id,
+                root_key="source",
+                path_ref="code/repo/docs",
+                read_only=True,
+                priority=10,
+            )
         ]
         records.append(record)
     monkeypatch.setattr(formal, "_load_all_records", lambda _: records)

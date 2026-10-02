@@ -12,10 +12,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from apps.asset_gateway.registry import SourceRegistry
-from packages.domain.models import Asset, Base, Representation, Source
+from packages.domain.models import Asset, Base, RepositoryProfile, Representation, Source
 from packages.ingestion.source_integrity import (
     _directory_tree_digest,
     _git_worktree_matches_recorded_revision,
+    _only_git_metadata_changed_since,
     verify_source_integrity,
 )
 
@@ -200,12 +201,17 @@ def test_clean_recorded_git_revision_ignores_only_repository_metadata_drift(
             path_ref="repository",
             tree_digest=_directory_tree_digest(tree),
             created_at=datetime.now(UTC) + timedelta(seconds=1),
-            attributes={
-                "_source_mtime_ns": tree_stat.st_mtime_ns,
-                "commit": "a" * 40,
-            },
+            attributes={"_source_mtime_ns": tree_stat.st_mtime_ns},
         )
-        session.add(representation)
+        session.add_all(
+            [
+                representation,
+                RepositoryProfile(
+                    asset_id=asset.id,
+                    pinned_revision="a" * 40,
+                ),
+            ]
+        )
         session.commit()
         metadata_stat = metadata.stat()
         os.utime(
@@ -276,3 +282,76 @@ def test_git_lfs_filter_false_positive_requires_raw_head_bytes(
         repository,
         {"commit": commit},
     )
+
+
+def test_gitnexus_generated_metadata_is_the_only_allowed_untracked_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    (repository / ".git").mkdir(parents=True)
+    (repository / ".gitnexus").mkdir()
+    (repository / ".gitnexus" / "index.db").write_bytes(b"generated")
+    commit = "b" * 40
+
+    def fake_run(
+        arguments: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[Any]:
+        del kwargs
+        if "rev-parse" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, f"{commit}\n", "")
+        if "status" in arguments:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                "?? .gitnexus/index.db\0",
+                "",
+            )
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(
+        "packages.ingestion.source_integrity.subprocess.run",
+        fake_run,
+    )
+    assert _git_worktree_matches_recorded_revision(repository, {"commit": commit})
+
+    (repository / "untracked.txt").write_text("user content", encoding="utf-8")
+
+    def unsafe_run(
+        arguments: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[Any]:
+        del kwargs
+        if "rev-parse" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, f"{commit}\n", "")
+        if "status" in arguments:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                "?? .gitnexus/index.db\0?? untracked.txt\0",
+                "",
+            )
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(
+        "packages.ingestion.source_integrity.subprocess.run",
+        unsafe_run,
+    )
+    assert not _git_worktree_matches_recorded_revision(
+        repository,
+        {"commit": commit},
+    )
+
+
+def test_gitnexus_mtime_is_ignored_but_worktree_mtime_is_not(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    metadata = repository / ".gitnexus" / "index.db"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_bytes(b"generated")
+    baseline = datetime.now(UTC) - timedelta(seconds=1)
+
+    assert _only_git_metadata_changed_since(repository, baseline)
+
+    (repository / "tracked.py").write_text("print('changed')\n", encoding="utf-8")
+    assert not _only_git_metadata_changed_since(repository, baseline)

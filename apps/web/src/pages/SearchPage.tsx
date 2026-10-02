@@ -7,6 +7,7 @@ import {
   isResearchUnitSummary,
   type ReadingStatus,
   type SearchMode,
+  type SearchSort,
 } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
@@ -18,36 +19,61 @@ const modeLabels: Record<SearchMode, string> = {
   exact: "精确匹配",
 };
 
+const sortLabels: Record<SearchSort, string> = {
+  date_desc: "时间：新到旧",
+  date_asc: "时间：旧到新",
+  relevance: "相关度",
+};
+
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") ?? "";
   const mode = (searchParams.get("mode") as SearchMode | null) ?? "keyword";
+  const sortParam = searchParams.get("sort");
+  const sort: SearchSort =
+    sortParam === "date_asc" || sortParam === "relevance"
+      ? sortParam
+      : "date_desc";
   const domain = searchParams.get("domain") ?? "";
   const status = (searchParams.get("status") as ReadingStatus | null) ?? "";
   const assetType = searchParams.get("type") ?? "";
   const author = searchParams.get("author") ?? "";
   const tag = searchParams.get("tag") ?? "";
-  const yearFrom = searchParams.get("year_from") ?? "";
-  const yearTo = searchParams.get("year_to") ?? "";
+  const legacyYearFrom = searchParams.get("year_from") ?? "";
+  const legacyYearTo = searchParams.get("year_to") ?? "";
+  const dateFrom =
+    searchParams.get("date_from") ??
+    (/^\d{4}$/.test(legacyYearFrom) ? `${legacyYearFrom}-01-01` : "");
+  const dateTo =
+    searchParams.get("date_to") ??
+    (/^\d{4}$/.test(legacyYearTo) ? `${legacyYearTo}-12-31` : "");
   const hasPdf = searchParams.get("has_pdf") === "true";
   const hasHtml = searchParams.get("has_html") === "true";
   const hasCode = searchParams.get("has_code") === "true";
-  const hasGuide = searchParams.get("has_guide") === "true";
   const hasAnnotation = searchParams.get("has_annotation") === "true";
   const groupBy = assetType === "repository" ? "none" : "paper";
   const [input, setInput] = useState(q);
   const [advanced, setAdvanced] = useState({
     author,
     tag,
-    yearFrom,
-    yearTo,
   });
 
   useEffect(() => setInput(q), [q]);
   useEffect(
-    () => setAdvanced({ author, tag, yearFrom, yearTo }),
-    [author, tag, yearFrom, yearTo],
+    () => setAdvanced({ author, tag }),
+    [author, tag],
   );
+  useEffect(() => {
+    if (!searchParams.has("has_guide")) return;
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("has_guide");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [searchParams, setSearchParams]);
 
   const domains = useQuery({
     queryKey: ["domains"],
@@ -58,17 +84,19 @@ export function SearchPage() {
       "search",
       q,
       mode,
+      sort,
       domain,
       status,
       assetType,
       author,
       tag,
-      yearFrom,
-      yearTo,
+      dateFrom,
+      dateTo,
+      legacyYearFrom,
+      legacyYearTo,
       hasPdf,
       hasHtml,
       hasCode,
-      hasGuide,
       hasAnnotation,
       groupBy,
     ],
@@ -77,18 +105,20 @@ export function SearchPage() {
         {
           q,
           mode,
+          sort,
           group_by: groupBy,
           domain,
           status,
           type: assetType,
           author,
           tag,
-          year_from: yearFrom ? Number(yearFrom) : undefined,
-          year_to: yearTo ? Number(yearTo) : undefined,
+          year_from: legacyYearFrom ? Number(legacyYearFrom) : undefined,
+          year_to: legacyYearTo ? Number(legacyYearTo) : undefined,
+          date_from: dateFrom || undefined,
+          date_to: dateTo || undefined,
           has_pdf: hasPdf || undefined,
           has_html: hasHtml || undefined,
           has_code: hasCode || undefined,
-          has_guide: hasGuide || undefined,
           has_annotation: hasAnnotation || undefined,
           cursor: pageParam,
         },
@@ -106,6 +136,20 @@ export function SearchPage() {
       } else {
         next.delete(key);
       }
+      return next;
+    });
+  };
+
+  const updateDateFilter = (
+    key: "date_from" | "date_to",
+    value: string,
+  ) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      const legacyKey = key === "date_from" ? "year_from" : "year_to";
+      next.delete(legacyKey);
+      if (value) next.set(key, value);
+      else next.delete(key);
       return next;
     });
   };
@@ -128,8 +172,6 @@ export function SearchPage() {
     const values = {
       author: advanced.author.trim(),
       tag: advanced.tag.trim(),
-      year_from: advanced.yearFrom.trim(),
-      year_to: advanced.yearTo.trim(),
     };
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
@@ -147,31 +189,35 @@ export function SearchPage() {
       [
         "author",
         "tag",
-        "type",
-        "year_from",
-        "year_to",
         "has_pdf",
         "has_html",
         "has_code",
-        "has_guide",
         "has_annotation",
+        "mode",
       ].forEach((key) => next.delete(key));
       return next;
     });
   };
 
   const advancedActive = Boolean(
-    assetType ||
+    mode !== "keyword" ||
       author ||
       tag ||
-      yearFrom ||
-      yearTo ||
       hasPdf ||
       hasHtml ||
       hasCode ||
-      hasGuide ||
       hasAnnotation,
   );
+  const advancedCount = [
+    mode !== "keyword",
+    author,
+    tag,
+    hasPdf,
+    hasHtml,
+    hasCode,
+    hasAnnotation,
+  ].filter(Boolean).length;
+  const [advancedOpen, setAdvancedOpen] = useState(advancedActive);
 
   const units =
     results.data?.pages
@@ -184,9 +230,9 @@ export function SearchPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="统一检索"
-        title="跨领域搜索"
-        description="在论文、代码、导读和批注中查找证据；默认关键词检索，可切换到精确匹配。"
+        eyebrow="资料库"
+        title={q ? `“${q}”的搜索结果` : "浏览资料库"}
+        description="先用关键词、时间和常用条件缩小范围，需要时再展开更多筛选。"
       />
 
       <form className="search-workbench" onSubmit={submit} role="search">
@@ -206,27 +252,11 @@ export function SearchPage() {
             搜索
           </button>
         </div>
-        <div className="filter-row">
-          <span>
-            <SlidersHorizontal size={15} aria-hidden="true" />
-            筛选
-          </span>
-          <label>
-            <span className="sr-only">检索模式</span>
+        <div className="filter-row" aria-label="常用筛选">
+          <label className={domain ? "is-active" : ""}>
+            <span>领域</span>
             <select
-              value={mode}
-              onChange={(event) => updateFilter("mode", event.target.value)}
-            >
-              {(Object.keys(modeLabels) as SearchMode[]).map((value) => (
-                <option value={value} key={value}>
-                  {modeLabels[value]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span className="sr-only">领域</span>
-            <select
+              aria-label="领域"
               value={domain}
               onChange={(event) => updateFilter("domain", event.target.value)}
             >
@@ -238,21 +268,10 @@ export function SearchPage() {
               ))}
             </select>
           </label>
-          <label>
-            <span className="sr-only">阅读状态</span>
+          <label className={assetType ? "is-active" : ""}>
+            <span>类型</span>
             <select
-              value={status}
-              onChange={(event) => updateFilter("status", event.target.value)}
-            >
-              <option value="">全部阅读状态</option>
-              <option value="unread">未读</option>
-              <option value="reading">阅读中</option>
-              <option value="read">已读</option>
-            </select>
-          </label>
-          <label>
-            <span className="sr-only">资产类型</span>
-            <select
+              aria-label="资产类型"
               value={assetType}
               onChange={(event) => updateFilter("type", event.target.value)}
             >
@@ -262,10 +281,90 @@ export function SearchPage() {
               <option value="dataset">数据集</option>
             </select>
           </label>
+          <label className={status ? "is-active" : ""}>
+            <span>阅读状态</span>
+            <select
+              aria-label="阅读状态"
+              value={status}
+              onChange={(event) => updateFilter("status", event.target.value)}
+            >
+              <option value="">全部阅读状态</option>
+              <option value="unread">未读</option>
+              <option value="reading">阅读中</option>
+              <option value="read">已读</option>
+            </select>
+          </label>
+          <fieldset
+            className={`time-range-filter ${dateFrom || dateTo ? "is-active" : ""}`}
+          >
+            <legend>时间范围</legend>
+            <div className="time-range-inputs">
+              <label>
+                <span className="sr-only">起始日期</span>
+                <input
+                  aria-label="起始日期"
+                  type="date"
+                  value={dateFrom}
+                  max={dateTo || undefined}
+                  onChange={(event) =>
+                    updateDateFilter("date_from", event.target.value)
+                  }
+                />
+              </label>
+              <span aria-hidden="true">至</span>
+              <label>
+                <span className="sr-only">结束日期</span>
+                <input
+                  aria-label="结束日期"
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  onChange={(event) =>
+                    updateDateFilter("date_to", event.target.value)
+                  }
+                />
+              </label>
+            </div>
+          </fieldset>
+          <label className={sort !== "date_desc" ? "is-active" : ""}>
+            <span>排序</span>
+            <select
+              aria-label="排序"
+              value={sort}
+              onChange={(event) => updateFilter("sort", event.target.value)}
+            >
+              {(Object.keys(sortLabels) as SearchSort[]).map((value) => (
+                <option value={value} key={value}>
+                  {sortLabels[value]}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        <details className="advanced-filters" open={advancedActive || undefined}>
-          <summary>更多筛选{advancedActive ? "（已启用）" : ""}</summary>
+        <details
+          className="advanced-filters"
+          open={advancedOpen}
+          onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <SlidersHorizontal size={15} aria-hidden="true" />
+            更多筛选
+            {advancedCount > 0 && <span>{advancedCount}</span>}
+          </summary>
           <div className="advanced-filter-grid">
+            <label>
+              <span>检索模式</span>
+              <select
+                value={mode}
+                onChange={(event) => updateFilter("mode", event.target.value)}
+              >
+                {(Object.keys(modeLabels) as SearchMode[]).map((value) => (
+                  <option value={value} key={value}>
+                    {modeLabels[value]}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>作者</span>
               <input
@@ -292,43 +391,12 @@ export function SearchPage() {
                 placeholder="单个标签"
               />
             </label>
-            <label>
-              <span>起始年份</span>
-              <input
-                type="number"
-                min="1450"
-                max="2200"
-                value={advanced.yearFrom}
-                onChange={(event) =>
-                  setAdvanced((current) => ({
-                    ...current,
-                    yearFrom: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>结束年份</span>
-              <input
-                type="number"
-                min="1450"
-                max="2200"
-                value={advanced.yearTo}
-                onChange={(event) =>
-                  setAdvanced((current) => ({
-                    ...current,
-                    yearTo: event.target.value,
-                  }))
-                }
-              />
-            </label>
           </div>
           <fieldset className="availability-filters">
             <legend>可用内容</legend>
             {[
               ["has_pdf", "PDF", hasPdf],
               ["has_code", "代码", hasCode],
-              ["has_guide", "导读", hasGuide],
               ["has_html", "HTML", hasHtml],
               ["has_annotation", "有批注", hasAnnotation],
             ].map(([key, label, checked]) => (
@@ -350,7 +418,7 @@ export function SearchPage() {
               type="button"
               onClick={applyAdvanced}
             >
-              应用更多筛选
+              应用筛选
             </button>
             {advancedActive && (
               <button
@@ -358,7 +426,7 @@ export function SearchPage() {
                 type="button"
                 onClick={clearAdvanced}
               >
-                清除更多筛选
+                清除
               </button>
             )}
           </div>
@@ -381,7 +449,8 @@ export function SearchPage() {
                 {groupBy === "paper" ? " 个研究单元" : " 条代码仓库"}
               </span>
               <small>
-                {q ? `“${q}”` : "全部资产"} · {modeLabels[mode]}
+                {q ? `“${q}”` : "全部资产"} · {modeLabels[mode]} ·{" "}
+                {sortLabels[sort]}
               </small>
             </div>
           </div>

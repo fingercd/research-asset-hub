@@ -232,7 +232,7 @@ Invoke-RestMethod `
 - `reading-routes.yaml`：3–5 条推荐阅读路线；
 - `open-questions.md`：前沿趋势和开放问题。
 
-同时在 `config/domain-portals/v2/portal-index.yaml` 登记 slug、目录、原始 HTML selector 和允许的虚拟 mount。每个门户必须按同一顺序产生九个页面章节：领域定位、时间线、能力与方法、代表工作、评测、阅读路线、目录、前沿、证据。论文数量、阅读状态和完整研究单元目录不写进 YAML，而由 PostgreSQL 动态生成。
+同时在 `config/domain-portals/v2/portal-index.yaml` 登记 slug、目录、原始 HTML selector 和允许的虚拟 mount。每个门户必须按同一顺序产生九个页面章节：领域定位、论文/代码/导读目录、时间线、能力与方法、代表工作、评测、阅读路线、前沿、证据。论文数量、阅读状态和完整研究单元目录不写进 YAML，而由 PostgreSQL 动态生成；统计以 `paper_count` 为论文主口径，`repository_count` 与 `asset_count` 只作独立辅助统计，不能相加后称作论文数。
 
 如果只是给已有领域增加论文，不需要改门户文件；导入和索引完成后，统计与目录会自动更新。只有新资料改变了该领域的发展脉络、阅读路线或开放问题时，才更新对应内容文件并提高 `content_version`。更新后运行：
 
@@ -314,8 +314,11 @@ cd "D:\ResearchLibrary\research-asset-hub"
 ```powershell
 ./.venv/Scripts/python.exe scripts/build_indexes.py `
   --version v1 `
+  --skip-code `
   --report work/validation/index-build.json
 ```
+
+`--skip-code` 是当前本机默认维护口径：论文/资产/批注索引会更新，已有代码仓库仍保留并可从详情页打开，但不会为代码符号建立全文索引。需要代码符号搜索时才去掉该参数，并显式设置 `HUB_SEARCH_CODE_INDEX_ENABLED=true`。
 
 有 HTML 时再执行：
 

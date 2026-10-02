@@ -73,6 +73,9 @@ schema = canonical_snapshot_json_schema()
   used by domain portals without exposing an absolute source path.
 - `domain-portal-v2.schema.json` documents the native full-page portal
   response. Curated inputs live in `config/domain-portals/v2/<slug>/`, always
-  assemble into the same nine ordered sections, and carry source digests plus
-  stale status. Database counts and the research-unit catalog are merged at
-  request/export time rather than copied into the content files.
+  assemble into the same nine ordered sections (`scope`, `catalog`, `timeline`,
+  `capability-method-map`, `landmarks`, `benchmarks`, `reading-routes`,
+  `frontiers`, `evidence`), and carry source digests plus stale status. Database
+  counts and the research-unit catalog are merged at request/export time rather
+  than copied into the content files; `paper_count` is the paper-counting source
+  of truth, while asset and repository counts remain separate measures.

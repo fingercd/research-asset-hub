@@ -36,6 +36,7 @@ def main() -> int:
             result = apply_html_policy_inferences(session, inferences)
         output = {
             "schema": "research-asset-hub.html-policy-apply/v1",
+            "scope": "serving_active",
             "audit_started_at": audit.started_at.isoformat(),
             "audit_finished_at": (
                 audit.finished_at.isoformat() if audit.finished_at else None

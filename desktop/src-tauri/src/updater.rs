@@ -64,8 +64,8 @@ pub fn check(current: &str, updates_dir: &Path) -> Result<UpdateCheck, UpdateErr
         .map_err(|e| UpdateError::InvalidManifest(format!("当前版本号无效: {e}")))?;
     match load_manifest(updates_dir) {
         Ok(manifest) => {
-            let update_available = manifest.version > current
-                && updates_dir.join(&manifest.installer).is_file();
+            let update_available =
+                manifest.version > current && updates_dir.join(&manifest.installer).is_file();
             Ok(UpdateCheck {
                 update_available,
                 manifest: Some(manifest),
@@ -75,10 +75,7 @@ pub fn check(current: &str, updates_dir: &Path) -> Result<UpdateCheck, UpdateErr
     }
 }
 
-pub fn launch_installer(
-    updates_dir: &Path,
-    manifest: &UpdateManifest,
-) -> Result<(), UpdateError> {
+pub fn launch_installer(updates_dir: &Path, manifest: &UpdateManifest) -> Result<(), UpdateError> {
     let installer = updates_dir.join(&manifest.installer);
     if !installer.is_file() {
         return Err(UpdateError::NotFound);
@@ -138,7 +135,10 @@ mod tests {
     fn invalid_manifest_reports_parse_error() {
         let dir = std::env::temp_dir().join(format!("hub-upd-bad-{}", std::process::id()));
         write_manifest(&dir, r#"{"version": "not-a-version"}"#);
-        assert!(matches!(check("0.1.0", &dir), Err(UpdateError::InvalidManifest(_))));
+        assert!(matches!(
+            check("0.1.0", &dir),
+            Err(UpdateError::InvalidManifest(_))
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

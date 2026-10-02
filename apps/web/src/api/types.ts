@@ -1,6 +1,7 @@
 export type ReadingStatus = "unread" | "reading" | "read";
 export type SearchMode = "exact" | "keyword";
 export type SearchGroupBy = "paper" | "none";
+export type SearchSort = "date_desc" | "date_asc" | "relevance";
 export type RepresentationPresentation = "hub" | "original";
 export type QuickActionKind = "pdf" | "html" | "code";
 export type QuickActionStatus =
@@ -133,6 +134,8 @@ export interface Asset {
   annotation_summary?: string | null;
   annotations?: Annotation[];
   representations?: Representation[];
+  related_repositories?: Asset[];
+  quick_actions?: QuickAction[];
   score?: number;
   updated_at?: string;
   created_at?: string;
@@ -295,64 +298,6 @@ export interface DomainPortalResponse {
   portal: DomainPortal | null;
 }
 
-export interface GraphNode {
-  id: string;
-  label?: string;
-  title?: string;
-  asset_type?: string;
-  domain_slugs?: string[];
-  year?: number | null;
-  reading_status?: ReadingStatus;
-}
-
-export interface GraphEdge {
-  id?: string;
-  source?: string;
-  target?: string;
-  subject_asset_id?: string;
-  object_asset_id?: string;
-  relation_type?: string;
-  label?: string;
-  confidence?: number | null;
-}
-
-export interface GraphResponse {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  truncated?: boolean;
-}
-
-export interface CodeGraphRepository {
-  id: string;
-  title: string;
-  title_zh?: string | null;
-  asset_type?: string;
-  year?: number | null;
-  domain_slugs?: string[];
-  paths?: string[];
-  representation_count?: number;
-  gitnexus_indexed?: boolean;
-  gitnexus_repo_name?: string | null;
-  hidden?: boolean;
-}
-
-export interface CodeGraphDomain {
-  slug: string;
-  label: string;
-  repository_count: number;
-  indexed_count: number;
-  repositories: CodeGraphRepository[];
-  hidden_repositories?: CodeGraphRepository[];
-  hidden_count?: number;
-}
-
-export interface CodeGraphResponse {
-  total_count: number;
-  indexed_count: number;
-  hidden_count?: number;
-  domains: CodeGraphDomain[];
-}
-
 export interface Comparison {
   id?: string;
   title?: string;
@@ -404,7 +349,6 @@ export interface Settings {
     database_status?: string;
     database_revision?: string;
     gateway_origin?: string;
-    gitnexus_url?: string;
   };
   search?: Record<string, unknown>;
   sources?: Array<Record<string, unknown>>;

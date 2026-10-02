@@ -11,7 +11,7 @@ import pytest
 from apps.api.config import ApiSettings
 from apps.api.database import DatabaseManager, create_database_engine
 from apps.asset_gateway.registry import SourceRegistry
-from packages.domain.models import Asset, Base, Representation, Source
+from packages.domain.models import Asset, Base, Representation, RepresentationMount, Source
 from packages.integrations.html_audit import (
     DynamicPageCheck,
     DynamicProbeBatch,
@@ -89,6 +89,7 @@ def test_static_audit_classifies_dependencies_and_redacts_urls(
 
     report = audit_registered_html(database, registry)
     rendered = cast(dict[str, Any], report.to_dict())
+    assert rendered["scope"] == "serving_active"
     page = rendered["representations"][0]
     assert page["static"]["status"] == "audited"
     assert page["static"]["inferred_policy"] == "network_required"
@@ -118,6 +119,46 @@ def test_static_audit_infers_trusted_local_for_offline_script(
     assert page.inferred_policy == "trusted_local"
     assert page.inline_event_handler_count == 1
     assert "declared_policy_mismatch" in page.risk_flags
+
+
+@pytest.mark.parametrize("strict_value", [True, "true"])
+def test_strict_file_portal_audit_respects_directory_mounts(
+    html_runtime: tuple[DatabaseManager, SourceRegistry, Representation, Path],
+    strict_value: bool | str,
+) -> None:
+    database, registry, representation, root = html_runtime
+    paper = root / "library" / "papers" / "paper" / "index.html"
+    paper.parent.mkdir(parents=True)
+    paper.write_text("<h1>Paper</h1>", encoding="utf-8")
+    (root / "not-mounted.txt").write_text("Not exposed", encoding="utf-8")
+    (root / "index.html").write_text(
+        '<a href="library/papers/paper/index.html">Paper</a>'
+        '<a href="not-mounted.txt">Not exposed</a>',
+        encoding="utf-8",
+    )
+    with database.session() as session:
+        registered = session.get(Representation, representation.id)
+        assert registered is not None
+        registered.attributes = {"strict_mounts": strict_value}
+        for mount_path, path_ref, priority in (
+            ("/", "index.html", 0),
+            ("/library", "library", 10),
+        ):
+            session.add(
+                RepresentationMount(
+                    representation_id=registered.id,
+                    source_id=registered.source_id,
+                    root_key="html",
+                    mount_path=mount_path,
+                    path_ref=path_ref,
+                    priority=priority,
+                )
+            )
+    page = audit_registered_html(database, registry).pages[0]
+    assert page.static_status == "audited"
+    by_reference = {item.reference: item for item in page.dependencies}
+    assert by_reference["__rah__/library/papers/paper/index.html"].resolution == "available"
+    assert by_reference["__rah__/not-mounted.txt"].resolution == "rejected"
 
 
 class _FakeProbe:

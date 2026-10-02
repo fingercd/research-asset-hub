@@ -13,7 +13,7 @@ from sqlalchemy import select
 from apps.api.config import ApiSettings
 from apps.api.database import DatabaseManager, create_database_engine
 from apps.asset_gateway.registry import SourceRegistry
-from apps.worker.handlers import RuntimeHandlers
+from apps.worker.handlers import RuntimeHandlers, _meili_document_batches
 from apps.worker.lease import (
     ClaimedJob,
     claim_next_job,
@@ -33,6 +33,26 @@ from packages.domain.models import (
     Representation,
     Source,
 )
+from packages.indexing import SearchDocument
+
+
+def test_worker_batches_and_bounds_meilisearch_documents() -> None:
+    documents = [
+        SearchDocument(
+            document_id=f"chunk:{index}",
+            asset_id="paper-1",
+            kind="document",
+            title="Large paper",
+            text="x" * 300_000,
+        )
+        for index in range(20)
+    ]
+
+    batches = _meili_document_batches(documents)
+
+    assert len(batches) >= 2
+    assert sum(len(batch) for batch in batches) == len(documents)
+    assert max(len(item.text) for batch in batches for item in batch) == 250_000
 
 
 @pytest.fixture

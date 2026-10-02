@@ -2,24 +2,30 @@
 param(
     [string]$PostgresZip,      # EDB PostgreSQL 16 Windows zip binaries 路径(必填,一次性下载)
     [string]$MeiliExe,         # meilisearch-windows-amd64.exe 路径(必填,一次性下载)
-    [string]$NodeZip           # node-v20.x-win-x64.zip 路径(必填,一次性下载)
+    [string]$SourceWorkspaceRoot # sources.yaml workspace_root 的宿主覆盖;缺省为项目根
 )
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path $PostgresZip)) { throw "PostgresZip 路径不存在: $PostgresZip" }
 if (-not (Test-Path $MeiliExe)) { throw "MeiliExe 路径不存在: $MeiliExe" }
-if (-not (Test-Path $NodeZip)) { throw "NodeZip 路径不存在: $NodeZip" }
 $desktopRoot = Split-Path -Parent $PSScriptRoot          # desktop/
 $projectRoot = Split-Path -Parent $desktopRoot
+if ([string]::IsNullOrWhiteSpace($SourceWorkspaceRoot)) {
+    $SourceWorkspaceRoot = $projectRoot
+}
+if (-not (Test-Path -LiteralPath $SourceWorkspaceRoot -PathType Container)) {
+    throw "SourceWorkspaceRoot 目录不存在: $SourceWorkspaceRoot"
+}
+$SourceWorkspaceRoot = (Resolve-Path -LiteralPath $SourceWorkspaceRoot).ProviderPath
 $stage = Join-Path $desktopRoot 'stage'
 $runtimeDir = Join-Path $stage 'runtime'
 $appDir = Join-Path $stage 'app'
 
-Write-Host '[1/5] 清理并创建 stage 目录'
+Write-Host '[1/4] 清理并创建 stage 目录'
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $runtimeDir, $appDir | Out-Null
 
-Write-Host '[2/5] 组装便携 Python(基环境 + 项目依赖合并)'
+Write-Host '[2/4] 组装便携 Python(基环境 + 项目依赖合并)'
 $venvSource = Join-Path $projectRoot '.venv'
 if (-not (Test-Path $venvSource)) { throw '.venv 不存在,先在项目根跑 uv sync' }
 # 解析 .venv/pyvenv.cfg 的 home 行作为 Python 基环境目录(uv 创建的 .venv 位于项目根,
@@ -39,6 +45,14 @@ $targetSitePackages = Join-Path $targetPy 'Lib\site-packages'
 if (-not (Test-Path $venvSitePackages)) { throw "未找到 .venv site-packages: $venvSitePackages" }
 New-Item -ItemType Directory -Force -Path $targetSitePackages | Out-Null
 Copy-Item -Recurse -Force (Join-Path $venvSitePackages '*') (Join-Path $targetSitePackages '')
+# 项目源码会单独复制到 stage/app。开发 venv 中的 editable 安装元数据既无必要，
+# 又包含开发机绝对路径和构建时 README 快照，不能进入可分发运行时。
+Get-ChildItem -LiteralPath $targetSitePackages -Force -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -like 'research_asset_hub-*.dist-info' -or
+        $_.Name -like '_editable_impl_research_asset_hub*'
+    } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 # 删减:ML/科研类死重包(apps/ 与 packages/ 零导入),否则 NSIS 32 位 makensis 因输入超 2GB 失败。
 # 前缀匹配一并带走 dist-info / 生态残留(functorch/torchgen/sentence_transformers/scikit_learn 等)
 Get-ChildItem $targetSitePackages -ErrorAction SilentlyContinue |
@@ -48,55 +62,7 @@ Remove-Item -Force (Join-Path $targetSitePackages 'isympy.py') -ErrorAction Sile
 Get-ChildItem -Recurse -Force -Directory $targetPy -Filter '__pycache__' -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-Write-Host '[3/5] 组装便携 Node + gitnexus'
-New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'node') | Out-Null
-Expand-Archive -Force $NodeZip (Join-Path $runtimeDir 'node')
-$nodeRoot = Get-ChildItem (Join-Path $runtimeDir 'node') -Directory | Select-Object -First 1
-if ($nodeRoot) {
-    Get-ChildItem $nodeRoot.FullName | Move-Item -Destination (Join-Path $runtimeDir 'node') -Force
-    Remove-Item $nodeRoot.FullName -Force
-}
-# gitnexus 包整体拷贝(含其 node_modules 与 shim)
-# 必须用开发机 PATH 上的 npm 定位全局包:刚解压的便携 node 无全局安装记录
-$devNpm = Get-Command npm -ErrorAction SilentlyContinue
-if (-not $devNpm) { throw '开发机未找到 npm(需安装 Node.js 用于定位全局 gitnexus)' }
-$devNpmRoot = (& $devNpm.Source root -g).Trim()   # npm root -g 返回全局 node_modules 目录本身
-$gitnexusDir = Join-Path $runtimeDir 'gitnexus'
-New-Item -ItemType Directory -Force -Path $gitnexusDir | Out-Null
-$gitnexusPkg = Join-Path $devNpmRoot 'gitnexus'
-if (-not (Test-Path $gitnexusPkg)) {
-    # 兜底:个别 npm 包装实现返回 prefix 而非 node_modules 目录,
-    # 此时直接在其下拼接 node_modules\gitnexus(prefix 本身不剥层)
-    $gitnexusPkg = Join-Path $devNpmRoot 'node_modules\gitnexus'
-}
-if (-not (Test-Path $gitnexusPkg)) {
-    Write-Host '  未找到全局 gitnexus,请在开发机 `npm install -g gitnexus` 后重跑'
-    throw 'gitnexus 全局包缺失'
-}
-Copy-Item -Recurse -Force $gitnexusPkg (Join-Path $gitnexusDir 'pkg')
-# 删减:onnxruntime-node 非 Windows 预编译二进制(Windows 上运行只需 win32)
-foreach ($plat in @('darwin', 'linux')) {
-    Remove-Item -Recurse -Force (Join-Path $gitnexusDir "pkg\node_modules\onnxruntime-node\bin\napi-v6\$plat") -ErrorAction SilentlyContinue
-}
-Get-ChildItem -Recurse -Force -Directory (Join-Path $gitnexusDir 'pkg') -Filter '__pycache__' -ErrorAction SilentlyContinue |
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-# 生成 ps1 shim(镜像 npm 生成的 shim:node 执行包入口)
-$shim = @'
-# gitnexus shim (portable)
-param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Args)
-$root = $PSScriptRoot
-$node = Join-Path $root '..\node\node.exe'
-$entry = Join-Path $root 'pkg\dist\cli\index.js'
-if (-not (Test-Path $entry)) { $entry = Join-Path $root 'pkg\dist\cli.js' }
-if (-not (Test-Path $entry)) { $entry = Join-Path $root 'pkg\bin\gitnexus.js' }
-if (-not (Test-Path $entry)) { throw "gitnexus entry not found under $root" }
-& $node $entry @Args
-exit $LASTEXITCODE
-'@
-$shim | Set-Content (Join-Path $gitnexusDir 'gitnexus.ps1')
-Write-Host '  gitnexus shim 已生成(入口按 pkg\dist\cli\index.js 依序探测)'
-
-Write-Host '[4/5] 组装便携 PostgreSQL'
+Write-Host '[3/4] 组装便携 PostgreSQL'
 New-Item -ItemType Directory -Force -Path (Join-Path $runtimeDir 'postgres') | Out-Null
 Expand-Archive -Force $PostgresZip (Join-Path $runtimeDir 'postgres')
 $pgRoot = Get-ChildItem (Join-Path $runtimeDir 'postgres') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'bin\pg_ctl.exe') } | Select-Object -First 1
@@ -108,10 +74,87 @@ foreach ($dead in @('pgAdmin 4', 'doc', 'StackBuilder')) {
     Remove-Item -Recurse -Force (Join-Path $runtimeDir "postgres\$dead") -ErrorAction SilentlyContinue
 }
 
-Write-Host '[5/5] 组装 Meilisearch 与 app 源码'
+Write-Host '[4/4] 构建前端并组装 Meilisearch 与 app 源码'
+# 安装包复制的是 desktop/stage/app 下的前端产物；必须在复制 apps 前构建，不能依赖
+# cargo tauri build 的 beforeBuild（它发生在 stage 完成之后）。
+& pnpm --filter @research-asset-hub/web build
+if ($LASTEXITCODE -ne 0) {
+    throw 'Web 前端构建失败，未继续复制 apps 到 stage'
+}
 Copy-Item -Force $MeiliExe (Join-Path $runtimeDir 'meilisearch.exe')
 foreach ($item in @('apps', 'packages', 'migrations', 'config')) {
     Copy-Item -Recurse -Force (Join-Path $projectRoot $item) (Join-Path $appDir $item)
+}
+# `workspace_root` 是 sources.yaml 中所有 source.root 的解析基准，不是资料
+# 目录本身。以源项目 config 按其默认 workspace_root 解析的完整根映射为冻结参照，
+# 再比较安装版经 SourceWorkspaceRoot 覆盖后的映射，防止把上一级“核心领域”误写进
+# hint 后令每个 ../ 路径再多退一级。历史上已缺失的来源只作告警，不能据此误判根。
+$stagedPython = Join-Path $targetPy 'python.exe'
+$rootValidation = @'
+import os
+import sys
+from pathlib import Path
+
+app_dir = Path(sys.argv[1]).resolve()
+workspace_root = Path(sys.argv[2]).resolve()
+project_root = Path(sys.argv[3]).resolve()
+sys.path.insert(0, str(app_dir))
+
+from apps.asset_gateway.registry import SourceRegistry
+
+
+def root_paths(registry):
+    return {
+        (item.source_id, item.root_key): item.path
+        for item in registry.describe()
+    }
+
+
+# The reference must use sources.yaml's own workspace_root, even if the staging
+# shell inherited a host override. The staged registry is the only one that uses
+# the requested override.
+os.environ.pop("HUB_HOST_WORKSPACE_ROOT", None)
+reference = SourceRegistry.load(project_root / "config" / "sources.yaml")
+os.environ["HUB_HOST_WORKSPACE_ROOT"] = str(workspace_root)
+staged = SourceRegistry.load(app_dir / "config" / "sources.yaml")
+
+reference_paths = root_paths(reference)
+staged_paths = root_paths(staged)
+if staged_paths != reference_paths:
+    print("  ERROR SourceWorkspaceRoot changes the registered source-root mapping")
+    for key in sorted(set(reference_paths) | set(staged_paths)):
+        expected = reference_paths.get(key)
+        actual = staged_paths.get(key)
+        if actual != expected:
+            print(f"  MISMATCH {key[0]}/{key[1]}: expected={expected} actual={actual}")
+    raise SystemExit(2)
+
+status = staged.root_status()
+print(
+    "  source roots: "
+    f"configured={status['configured']} existing={status['existing']} "
+    f"missing={status['missing']} workspace_root={workspace_root}"
+)
+if status["missing"]:
+    print("  WARNING configured source roots currently missing; preserving frozen source mapping")
+    for item in status["missing_roots"][:20]:
+        print(f"  MISSING {item['source_id']}/{item['root_key']}: {item['path']}")
+'@
+& $stagedPython -c $rootValidation $appDir $SourceWorkspaceRoot $projectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "SourceWorkspaceRoot 改变了 sources.yaml 的注册根映射: $SourceWorkspaceRoot"
+}
+# 不改写 sources.yaml，也不把开发机绝对路径提交到仓库。提示仅存在于已忽略的
+# desktop/stage/app/config 中，安装后由桌面壳验证目录存在再注入子进程环境。
+$workspaceHint = Join-Path $appDir 'config\workspace-root.txt'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($workspaceHint, $SourceWorkspaceRoot, $utf8NoBom)
+
+# Precompile pure Python imports into one archive. Native extensions, templates
+# and source metadata remain in the runtime's normal package directories.
+& $stagedPython (Join-Path $projectRoot 'scripts\build_startup_archive.py') --app-dir $appDir
+if ($LASTEXITCODE -ne 0) {
+    throw 'Python startup archive build failed'
 }
 
 Write-Host "stage 完成: $stage"

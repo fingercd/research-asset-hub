@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { AnnotationsPage } from "./pages/AnnotationsPage";
@@ -20,44 +20,25 @@ const ComparePage = lazy(() =>
     default: module.ComparePage,
   })),
 );
-const GraphPage = lazy(() =>
-  import("./pages/GraphPage").then((module) => ({
-    default: module.GraphPage,
-  })),
-);
-const CodeGraphPage = lazy(() =>
-  import("./pages/CodeGraphPage").then((module) => ({
-    default: module.CodeGraphPage,
-  })),
-);
 
 export default function App() {
   return (
-    <Suspense
-      fallback={
-        <div className="route-loading" role="status">
-          正在加载页面…
-        </div>
-      }
-    >
-      <Routes>
-        <Route element={<AppShell />}>
-          <Route index element={<HomePage />} />
-          <Route path="search" element={<SearchPage />} />
-          <Route path="assets/:assetId" element={<AssetDetailPage />} />
-          <Route path="domains" element={<DomainsPage />} />
-          <Route path="domains/:slug" element={<DomainDetailPage />} />
-          <Route path="graph" element={<GraphPage />} />
-          <Route path="code-graph" element={<CodeGraphPage />} />
-          <Route path="compare" element={<ComparePage />} />
-          <Route path="annotations" element={<AnnotationsPage />} />
-          <Route path="jobs" element={<JobsPage />} />
-          <Route path="conflicts" element={<ConflictsPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-          <Route path="404" element={<NotFoundPage />} />
-          <Route path="*" element={<Navigate to="/404" replace />} />
-        </Route>
-      </Routes>
-    </Suspense>
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route index element={<HomePage />} />
+        <Route path="index.html" element={<Navigate to="/" replace />} />
+        <Route path="search" element={<SearchPage />} />
+        <Route path="assets/:assetId" element={<AssetDetailPage />} />
+        <Route path="domains" element={<DomainsPage />} />
+        <Route path="domains/:slug" element={<DomainDetailPage />} />
+        <Route path="compare" element={<ComparePage />} />
+        <Route path="annotations" element={<AnnotationsPage />} />
+        <Route path="jobs" element={<JobsPage />} />
+        <Route path="conflicts" element={<ConflictsPage />} />
+        <Route path="settings" element={<SettingsPage />} />
+        <Route path="404" element={<NotFoundPage />} />
+        <Route path="*" element={<Navigate to="/404" replace />} />
+      </Route>
+    </Routes>
   );
 }

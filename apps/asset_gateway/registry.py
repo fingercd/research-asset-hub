@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import yaml
+
+from packages.domain.path_exclusions import OperationalPathExclusions
+
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 class UnsafeAssetPath(ValueError):
@@ -20,14 +26,28 @@ class SourceRoot:
 class SourceRegistry:
     """Resolve only source/root/path triples explicitly registered in sources.yaml."""
 
-    def __init__(self, roots: dict[tuple[str, str], Path]) -> None:
+    def __init__(
+        self,
+        roots: dict[tuple[str, str], Path],
+        *,
+        workspace_root: Path | None = None,
+        operational_exclusions: OperationalPathExclusions | None = None,
+    ) -> None:
         self._roots = roots
+        self._workspace_root = workspace_root
+        self.operational_exclusions = operational_exclusions or OperationalPathExclusions.empty()
+        if self.operational_exclusions.enabled:
+            self.operational_exclusions.validate_roots(roots)
 
     @classmethod
     def load(cls, config_path: Path) -> SourceRegistry:
-        document = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        document = yaml.load(config_path.read_text(encoding="utf-8"), Loader=_YAML_LOADER) or {}
         config_dir = config_path.parent
-        workspace_root = (config_dir / str(document.get("workspace_root", "."))).resolve()
+        host_workspace_root = os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip()
+        if host_workspace_root:
+            workspace_root = Path(host_workspace_root).expanduser().resolve()
+        else:
+            workspace_root = (config_dir / str(document.get("workspace_root", "."))).resolve()
         roots: dict[tuple[str, str], Path] = {}
         for raw_source in document.get("sources", []):
             if not isinstance(raw_source, dict):
@@ -40,7 +60,11 @@ class SourceRegistry:
                 continue
             for root_key, relative in asset_roots.items():
                 roots[(source_id, str(root_key))] = (source_base / str(relative)).resolve()
-        return cls(roots)
+        return cls(
+            roots,
+            workspace_root=workspace_root,
+            operational_exclusions=OperationalPathExclusions.for_sources_config(config_path),
+        )
 
     def root_for(self, source_id: str, root_key: str) -> Path:
         try:
@@ -67,3 +91,65 @@ class SourceRegistry:
             SourceRoot(source_id=source_id, root_key=root_key, path=path)
             for (source_id, root_key), path in sorted(self._roots.items())
         ]
+
+    def root_status(self) -> dict[str, object]:
+        """Return a small diagnostic summary without probing any source contents."""
+        configured = self.describe()
+        missing: list[SourceRoot] = []
+        invalid: list[dict[str, str]] = []
+        for item in configured:
+            reason = None
+            try:
+                if not stat.S_ISDIR(item.path.stat().st_mode):
+                    reason = "not_directory"
+            except FileNotFoundError:
+                missing.append(item)
+            except OSError as error:
+                reason = type(error).__name__
+            if reason:
+                invalid.append(
+                    {
+                        "source_id": item.source_id,
+                        "root_key": item.root_key,
+                        "path": str(item.path),
+                        "reason": reason,
+                    }
+                )
+        ignored = []
+        applied: set[str] = set()
+        for item in missing:
+            rule = self.operational_exclusions.active_root(
+                item.source_id, item.root_key, self._roots
+            )
+            if rule is not None:
+                applied.add(rule.id)
+                ignored.append(
+                    {
+                        "source_id": item.source_id,
+                        "root_key": item.root_key,
+                        "path": str(item.path),
+                        "rule_id": rule.id,
+                        "reason": rule.reason,
+                    }
+                )
+        return {
+            "workspace_root": (
+                str(self._workspace_root) if self._workspace_root is not None else None
+            ),
+            "configured": len(configured),
+            "existing": len(configured) - len(missing) - len(invalid),
+            "missing": len(missing),
+            "ignored_missing": len(ignored),
+            "actionable_missing": len(missing) - len(ignored),
+            "invalid_roots": invalid,
+            "ignored_missing_roots": ignored,
+            "operational_exclusions": self.operational_exclusions.summary(applied),
+            "missing_roots": [
+                {
+                    "source_id": item.source_id,
+                    "root_key": item.root_key,
+                    "path": str(item.path),
+                }
+                for item in missing
+            ],
+        }

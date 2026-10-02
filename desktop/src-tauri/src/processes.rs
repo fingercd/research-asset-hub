@@ -174,14 +174,11 @@ pub fn list_processes() -> Vec<(u32, String)> {
     items
         .iter()
         .filter_map(|item| {
-            let pid = item
-                .get("ProcessId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| {
-                    item.get("ProcessId")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<u64>().ok())
-                })?;
+            let pid = item.get("ProcessId").and_then(|v| v.as_u64()).or_else(|| {
+                item.get("ProcessId")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+            })?;
             let cmd = item
                 .get("CommandLine")
                 .and_then(|v| v.as_str())

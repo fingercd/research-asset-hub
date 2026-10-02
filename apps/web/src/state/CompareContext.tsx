@@ -21,10 +21,26 @@ interface CompareContextValue {
 
 const CompareContext = createContext<CompareContextValue | null>(null);
 
+function isPaperAsset(asset: Asset) {
+  const assetType = asset.asset_type ?? asset.type;
+  return typeof assetType === "string" && assetType.trim().toLowerCase() === "paper";
+}
+
+function sanitizeAssets(assets: Asset[]) {
+  const seen = new Set<string>();
+  return assets
+    .filter((asset) => {
+      if (!isPaperAsset(asset) || seen.has(asset.id)) return false;
+      seen.add(asset.id);
+      return true;
+    })
+    .slice(0, 4);
+}
+
 function readInitialAssets(): Asset[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.slice(0, 4) : [];
+    return Array.isArray(parsed) ? sanitizeAssets(parsed) : [];
   } catch {
     return [];
   }
@@ -34,7 +50,7 @@ export function CompareProvider({ children }: { children: ReactNode }) {
   const [assets, setAssets] = useState<Asset[]>(readInitialAssets);
 
   const update = useCallback((next: Asset[]) => {
-    const safe = next.slice(0, 4);
+    const safe = sanitizeAssets(next);
     setAssets(safe);
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
@@ -45,6 +61,7 @@ export function CompareProvider({ children }: { children: ReactNode }) {
 
   const add = useCallback(
     (asset: Asset) => {
+      if (!isPaperAsset(asset)) return false;
       if (assets.some((item) => item.id === asset.id)) return true;
       if (assets.length >= 4) return false;
       update([...assets, asset]);
@@ -60,6 +77,7 @@ export function CompareProvider({ children }: { children: ReactNode }) {
 
   const toggle = useCallback(
     (asset: Asset) => {
+      if (!isPaperAsset(asset)) return false;
       if (assets.some((item) => item.id === asset.id)) {
         remove(asset.id);
         return false;

@@ -4,12 +4,10 @@ import type {
   Asset,
   CodeFileResponse,
   CodeTreeResponse,
-  CodeGraphResponse,
   Comparison,
   Dashboard,
   Domain,
   DomainPortalResponse,
-  GraphResponse,
   HealthResponse,
   Job,
   ReadingStatus,
@@ -19,6 +17,7 @@ import type {
   ResearchUnitSummary,
   SearchGroupBy,
   SearchMode,
+  SearchSort,
   Settings,
   SyncConflict,
 } from "./types";
@@ -202,6 +201,7 @@ function normalizeList<T>(value: unknown): ApiList<T> {
 export interface SearchParams {
   q: string;
   mode?: SearchMode;
+  sort?: SearchSort;
   group_by?: SearchGroupBy;
   domain?: string;
   status?: ReadingStatus | "";
@@ -209,6 +209,8 @@ export interface SearchParams {
   type?: string;
   year_from?: number;
   year_to?: number;
+  date_from?: string;
+  date_to?: string;
   tag?: string;
   has_pdf?: boolean;
   has_html?: boolean;
@@ -241,6 +243,7 @@ async function search(
       `${API_BASE}/search${params({
         q: searchParams.q,
         mode: searchParams.mode ?? "keyword",
+        sort: searchParams.sort ?? "date_desc",
         group_by: searchParams.group_by,
         domain: searchParams.domain,
         status: searchParams.status,
@@ -248,6 +251,8 @@ async function search(
         type: searchParams.type,
         year_from: searchParams.year_from,
         year_to: searchParams.year_to,
+        date_from: searchParams.date_from,
+        date_to: searchParams.date_to,
         tag: searchParams.tag,
         has_pdf: searchParams.has_pdf,
         has_html: searchParams.has_html,
@@ -267,7 +272,8 @@ export const api = {
     // tauri://localhost)下会被 SPA fallback 返回 index.html,status 解析为
     // undefined,健康徽章误报"部分服务不可用"。桌面壳走 /api/v1/health,
     // 浏览器托管模式经 web_host /api/* 代理到同一后端路由。
-    request<HealthResponse>(`${API_BASE}/health`, { signal, timeout: 5_000 }),
+    // 冷启动时健康检查还会验证数据库结构，5 秒会把仍可用的服务误判为超时。
+    request<HealthResponse>(`${API_BASE}/health`, { signal, timeout: 30_000 }),
 
   dashboard: (signal?: AbortSignal) =>
     request<Dashboard>(`${API_BASE}/dashboard`, { signal }),
@@ -388,21 +394,6 @@ export const api = {
       `${API_BASE}/domains/${encodeURIComponent(slug)}/portal`,
       { signal },
     ),
-
-  graphNeighbors: (assetId: string, depth = 1, signal?: AbortSignal) =>
-    request<GraphResponse>(
-      `${API_BASE}/graph/neighbors${params({ asset_id: assetId, depth })}`,
-      { signal },
-    ),
-
-  graphPath: (from: string, to: string, signal?: AbortSignal) =>
-    request<GraphResponse>(
-      `${API_BASE}/graph/path${params({ from, to })}`,
-      { signal },
-    ),
-
-  codeGraph: (signal?: AbortSignal) =>
-    request<CodeGraphResponse>(`${API_BASE}/code-graph`, { signal }),
 
   comparisons: async (signal?: AbortSignal) =>
     normalizeList<Comparison>(

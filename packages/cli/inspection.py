@@ -11,6 +11,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from apps.asset_gateway.registry import SourceRegistry
+from packages.domain.path_exclusions import OperationalPathExclusions
+
 from .config import PROJECT_ROOT, LoadedSource
 
 
@@ -271,7 +274,10 @@ def _declared_extension_count(
     asset_roots: dict[str, Path],
     role: str,
     extension: str,
+    ignored_root_keys: frozenset[str] = frozenset(),
 ) -> int:
+    if role in ignored_root_keys:
+        return 0
     declared_root = asset_roots.get(role)
     if declared_root is not None:
         return _extension_count(declared_root, extension)
@@ -280,7 +286,24 @@ def _declared_extension_count(
     return _extension_count(source_root, extension)
 
 
-def source_inventory(source: LoadedSource) -> dict[str, Any]:
+def _glob_is_within_root(source: LoadedSource, pattern: str, root: Path) -> bool:
+    """Identify an excluded declared root before ``Path.glob`` can traverse it."""
+
+    prefix = pattern.replace("\\", "/").split("*")[0].rstrip("/")
+    candidate = source.resolve_source_path(prefix or ".")
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def source_inventory(
+    source: LoadedSource,
+    *,
+    operational_registry: SourceRegistry | None = None,
+    applied_rules: set[str] | None = None,
+) -> dict[str, Any]:
     document = load_json(source.manifest)
     records = record_list(document)
     stat = source.manifest.stat()
@@ -291,6 +314,39 @@ def source_inventory(source: LoadedSource) -> dict[str, Any]:
         for role, path in asset_roots.items()
         if isinstance(path, str)
     }
+    policy: OperationalPathExclusions | None = (
+        getattr(operational_registry, "operational_exclusions", None)
+        if operational_registry is not None
+        else None
+    )
+    registry_roots = (
+        {
+            (item.source_id, item.root_key): item.path
+            for item in operational_registry.describe()
+        }
+        if operational_registry is not None
+        else {}
+    )
+    active_root_rules: dict[str, Any] = {}
+    if policy is not None:
+        for root_key in resolved_asset_roots:
+            if (source.source_id, root_key) not in registry_roots:
+                continue
+            rule = policy.active_root(source.source_id, root_key, registry_roots)
+            if rule is not None:
+                active_root_rules[root_key] = rule
+                if applied_rules is not None:
+                    applied_rules.add(rule.id)
+    ignored_root_keys = frozenset(active_root_rules)
+    skipped_formal_patterns = [
+        pattern
+        for pattern in formal_patterns
+        if isinstance(pattern, str)
+        and any(
+            _glob_is_within_root(source, pattern, resolved_asset_roots[root_key])
+            for root_key in ignored_root_keys
+        )
+    ]
     return {
         "id": source.source_id,
         "label": source.label,
@@ -308,6 +364,14 @@ def source_inventory(source: LoadedSource) -> dict[str, Any]:
             role: {
                 "path": str(path),
                 "exists": path.exists(),
+                "operational_exclusion": (
+                    {
+                        "rule_id": active_root_rules[role].id,
+                        "reason": active_root_rules[role].reason,
+                    }
+                    if role in active_root_rules
+                    else None
+                ),
             }
             for role, path in resolved_asset_roots.items()
         },
@@ -316,8 +380,9 @@ def source_inventory(source: LoadedSource) -> dict[str, Any]:
             "matched_files": sum(
                 _safe_glob_count(source.root, pattern)
                 for pattern in formal_patterns
-                if isinstance(pattern, str)
+                if isinstance(pattern, str) and pattern not in skipped_formal_patterns
             ),
+            "skipped_operational_patterns": skipped_formal_patterns,
         },
         "visible_assets": {
             "pdf_files": _declared_extension_count(
@@ -325,24 +390,42 @@ def source_inventory(source: LoadedSource) -> dict[str, Any]:
                 asset_roots=resolved_asset_roots,
                 role="pdf",
                 extension=".pdf",
+                ignored_root_keys=ignored_root_keys,
             ),
             "html_files_in_declared_html_root": _declared_extension_count(
                 source_root=source.root,
                 asset_roots=resolved_asset_roots,
                 role="html",
                 extension=".html",
+                ignored_root_keys=ignored_root_keys,
             ),
         },
         "read_only": source.read_only,
     }
 
 
-def build_inventory_report(sources: list[LoadedSource]) -> dict[str, Any]:
+def build_inventory_report(
+    sources: list[LoadedSource],
+    *,
+    operational_registry: SourceRegistry | None = None,
+) -> dict[str, Any]:
     inventories: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    applied_rules: set[str] = set()
+    policy: OperationalPathExclusions | None = (
+        getattr(operational_registry, "operational_exclusions", None)
+        if operational_registry is not None
+        else None
+    )
     for source in sources:
         try:
-            inventories.append(source_inventory(source))
+            inventories.append(
+                source_inventory(
+                    source,
+                    operational_registry=operational_registry,
+                    applied_rules=applied_rules,
+                )
+            )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             errors.append({"source": source.source_id, "error": str(exc)})
     return {
@@ -359,6 +442,9 @@ def build_inventory_report(sources: list[LoadedSource]) -> dict[str, Any]:
             ),
         },
         "errors": errors,
+        "operational_path_exclusions": (
+            policy.summary(applied_rules) if policy is not None else None
+        ),
         "status": "failed" if errors else "passed",
     }
 

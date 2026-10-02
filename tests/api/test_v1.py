@@ -25,8 +25,8 @@ from packages.domain.models import (
     Job,
     Relation,
     Representation,
-    Source,
 )
+from packages.indexing import InMemoryKeywordIndex, KeywordSearchService, SearchDocument
 
 
 @pytest.fixture
@@ -103,6 +103,154 @@ def install_fake_search_runtime(
 
     runtime = SimpleNamespace(service=FakeSearchService())
     monkeypatch.setattr("apps.api.routes_v1._search_runtime", lambda _request: runtime)
+
+
+def install_memory_search_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    documents: list[SearchDocument],
+    observed_options: list[dict[str, Any]],
+) -> None:
+    index = InMemoryKeywordIndex()
+    index.upsert(documents)
+    service = KeywordSearchService({"documents": index})
+
+    class RecordingSearchService:
+        def search(self, query: str, **options: Any) -> Any:
+            observed_options.append(dict(options))
+            return service.search(query, **options)
+
+    runtime = SimpleNamespace(service=RecordingSearchService())
+    monkeypatch.setattr("apps.api.routes_v1._search_runtime", lambda _request: runtime)
+
+
+def test_search_uses_publication_dates_by_default_and_keeps_relevance_optional(
+    api_runtime: tuple[Any, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, _ = api_runtime
+    fallback = create_asset(
+        client,
+        title="Fallback Year Paper",
+        year=2025,
+        attributes={},
+    )
+    older = create_asset(
+        client,
+        title="Older Public Paper",
+        year=2026,
+        attributes={"first_public_date": "2026-02-12"},
+    )
+    newer = create_asset(
+        client,
+        title="Newer Public Paper",
+        year=2026,
+        attributes={"first_public_date": "2026-03-04"},
+    )
+
+    default_response = client.get("/api/v1/search", params={"type": "paper"})
+    assert default_response.status_code == 200
+    assert default_response.json()["sort"] == "date_desc"
+    assert [item["id"] for item in default_response.json()["items"]] == [
+        newer["id"],
+        older["id"],
+        fallback["id"],
+    ]
+    grouped_default = client.get(
+        "/api/v1/search",
+        params={"type": "paper", "group_by": "paper"},
+    )
+    assert grouped_default.status_code == 200
+    assert [item["primary_asset"]["id"] for item in grouped_default.json()["items"]] == [
+        newer["id"],
+        older["id"],
+        fallback["id"],
+    ]
+
+    ascending = client.get(
+        "/api/v1/search",
+        params={"type": "paper", "sort": "date_asc"},
+    )
+    assert ascending.status_code == 200
+    assert [item["id"] for item in ascending.json()["items"]] == [
+        fallback["id"],
+        older["id"],
+        newer["id"],
+    ]
+
+    precise_range = client.get(
+        "/api/v1/search",
+        params={
+            "type": "paper",
+            "date_from": "2026-02-01",
+            "date_to": "2026-02-28",
+        },
+    )
+    assert precise_range.status_code == 200
+    assert [item["id"] for item in precise_range.json()["items"]] == [older["id"]]
+    grouped_range = client.get(
+        "/api/v1/search",
+        params={
+            "type": "paper",
+            "group_by": "paper",
+            "date_from": "2026-02-01",
+            "date_to": "2026-02-28",
+        },
+    )
+    assert grouped_range.status_code == 200
+    assert [item["primary_asset"]["id"] for item in grouped_range.json()["items"]] == [
+        older["id"]
+    ]
+
+    legacy_year = client.get(
+        "/api/v1/search",
+        params={"type": "paper", "year_from": 2026, "year_to": 2026},
+    )
+    assert legacy_year.status_code == 200
+    assert {item["id"] for item in legacy_year.json()["items"]} == {
+        older["id"],
+        newer["id"],
+    }
+    invalid_range = client.get(
+        "/api/v1/search",
+        params={"date_from": "2026-04-01", "date_to": "2026-03-01"},
+    )
+    assert invalid_range.status_code == 422
+
+    install_fake_search_runtime(
+        monkeypatch,
+        {
+            "publication order": [(older["id"], 0.95), (newer["id"], 0.7)],
+            "Older Public": [(newer["id"], 0.95), (older["id"], 0.7)],
+        },
+    )
+    relevance = client.get(
+        "/api/v1/search",
+        params={"q": "publication order", "type": "paper", "sort": "relevance"},
+    )
+    assert relevance.status_code == 200
+    assert [item["id"] for item in relevance.json()["items"]] == [
+        older["id"],
+        newer["id"],
+    ]
+    date_sorted_query = client.get(
+        "/api/v1/search",
+        params={"q": "publication order", "type": "paper"},
+    )
+    assert date_sorted_query.status_code == 200
+    assert [item["id"] for item in date_sorted_query.json()["items"]] == [
+        newer["id"],
+        older["id"],
+    ]
+    title_match = client.get(
+        "/api/v1/search",
+        params={
+            "q": "Older Public",
+            "type": "paper",
+            "group_by": "paper",
+        },
+    )
+    assert title_match.status_code == 200
+    assert title_match.json()["items"][0]["primary_asset"]["id"] == older["id"]
 
 
 def test_asset_lifecycle_etag_idempotency_and_audit(api_runtime: tuple[Any, ...]) -> None:
@@ -232,12 +380,12 @@ def test_reading_annotations_revision_search_and_dashboard(
     assert portal.json()["domain"]["asset_count"] == 1
     assert [item["id"] for item in portal.json()["portal"]["sections"]] == [
         "scope",
+        "catalog",
         "timeline",
         "capability-method-map",
         "landmarks",
         "benchmarks",
         "reading-routes",
-        "catalog",
         "frontiers",
         "evidence",
     ]
@@ -283,16 +431,6 @@ def test_relation_crud_evidence_and_logical_deduplication(
     assert replay.headers["Idempotency-Replayed"] == "true"
     assert replay.json()["id"] == created.json()["id"]
     relation_id = created.json()["id"]
-    default_graph = client.get(
-        "/api/v1/graph/neighbors",
-        params={"asset_id": subject["id"]},
-    )
-    candidate_graph = client.get(
-        "/api/v1/graph/neighbors",
-        params={"asset_id": subject["id"], "relation_status": "candidate"},
-    )
-    assert default_graph.json()["edges"] == []
-    assert len(candidate_graph.json()["edges"]) == 1
 
     duplicate = client.post("/api/v1/relations", json=payload)
     assert duplicate.status_code == 409
@@ -308,11 +446,6 @@ def test_relation_crud_evidence_and_logical_deduplication(
     )
     assert confirmed.status_code == 200
     assert confirmed.json()["confirmation_status"] == "confirmed"
-    confirmed_graph = client.get(
-        "/api/v1/graph/neighbors",
-        params={"asset_id": subject["id"]},
-    )
-    assert len(confirmed_graph.json()["edges"]) == 1
 
     evidence_payload = {
         "provider": "manual",
@@ -647,204 +780,35 @@ def test_unmigrated_database_is_explicitly_degraded() -> None:
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
-def test_settings_exposes_gitnexus_url(
+def test_graph_and_gitnexus_surfaces_are_not_exposed(
     api_runtime: tuple[TestClient, DatabaseManager, Engine],
 ) -> None:
     client, _, _ = api_runtime
 
-    response = client.get("/api/v1/settings")
+    settings = client.get("/api/v1/settings")
+    assert settings.status_code == 200
+    assert "gitnexus_url" not in settings.json()["app"]
+    assert "gitnexus_url" not in ApiSettings.model_fields
+    assert "code_graph_hidden_path" not in ApiSettings.model_fields
 
-    assert response.status_code == 200
-    assert response.json()["app"]["gitnexus_url"] == "http://127.0.0.1:4747"
+    for path in (
+        "/api/v1/graph/neighbors",
+        "/api/v1/graph/path",
+        "/api/v1/graph/common-neighbors",
+        "/api/v1/graph/timeline",
+        "/api/v1/code-graph",
+        "/api/v1/code-graph/status",
+        "/api/v1/code-graph/graph",
+        "/api/v1/code-graph/overview",
+        "/api/v1/code-graph/neighborhood",
+    ):
+        assert client.get(path).status_code == 404
 
-
-def test_code_graph_exposes_gitnexus_repo_name_from_registry(
-    api_runtime: tuple[TestClient, DatabaseManager, Engine],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    client, database, _ = api_runtime
-    repository = create_asset(
-        client,
-        title="Candidate Implementation",
-        asset_type="repository",
-        domain_slugs=["agent"],
-    )
-    repository_dir = tmp_path / "repos" / "candidate"
-    repository_dir.mkdir(parents=True)
-    settings_path = tmp_path / "sources.yaml"
-    settings_path.write_text(
-        (
-            "schema_version: 1\n"
-            "workspace_root: .\n"
-            "sources:\n"
-            "  - id: test-source\n"
-            "    label: Test Source\n"
-            "    adapter: generic\n"
-            "    root: .\n"
-            "    asset_roots:\n"
-            "      repository: repos\n"
-        ),
-        encoding="utf-8",
-    )
-    with database.session() as session:
-        source = Source(
-            alias="test-source",
-            label="Test Source",
-            adapter="generic",
-            root_path=str(tmp_path),
-            config={},
-        )
-        session.add(source)
-        session.flush()
-        session.add(
-            Representation(
-                asset_id=UUID(repository["id"]),
-                representation_type="repository",
-                role="official",
-                materialization_kind="directory",
-                availability="available",
-                root_key="repository",
-                path_ref="candidate",
-                source_id=source.id,
-                attributes={},
-            )
-        )
-        session.flush()
-
-    home = tmp_path / "home"
-    gitnexus_dir = home / ".gitnexus"
-    gitnexus_dir.mkdir(parents=True)
-    (gitnexus_dir / "registry.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": "candidate-repo",
-                    "path": str(repository_dir),
-                    "indexedAt": "2026-08-04T00:00:00Z",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "apps.api.routes_v1.Path.home",
-        classmethod(lambda cls: home),
-    )
-
-    response = client.get("/api/v1/code-graph")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["total_count"] == 1
-    assert payload["indexed_count"] == 1
-    repo = payload["domains"][0]["repositories"][0]
-    assert repo["gitnexus_indexed"] is True
-    assert repo["gitnexus_repo_name"] == "candidate-repo"
-
-
-def test_code_graph_hides_registered_repositories(
-    api_runtime: tuple[TestClient, DatabaseManager, Engine],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    client, database, _ = api_runtime
-    repository = create_asset(
-        client,
-        title="OpenBMB/BMTools",
-        asset_type="repository",
-        domain_slugs=["agent"],
-    )
-    repository_dir = tmp_path / "repos" / "bmtools"
-    repository_dir.mkdir(parents=True)
-    settings_path = tmp_path / "sources.yaml"
-    settings_path.write_text(
-        (
-            "schema_version: 1\n"
-            "workspace_root: .\n"
-            "sources:\n"
-            "  - id: test-source\n"
-            "    label: Test Source\n"
-            "    adapter: generic\n"
-            "    root: .\n"
-            "    asset_roots:\n"
-            "      repository: repos\n"
-        ),
-        encoding="utf-8",
-    )
-    with database.session() as session:
-        source = Source(
-            alias="test-source",
-            label="Test Source",
-            adapter="generic",
-            root_path=str(tmp_path),
-            config={},
-        )
-        session.add(source)
-        session.flush()
-        session.add(
-            Representation(
-                asset_id=UUID(repository["id"]),
-                representation_type="repository",
-                role="official",
-                materialization_kind="directory",
-                availability="available",
-                root_key="repository",
-                path_ref="bmtools",
-                source_id=source.id,
-                attributes={},
-            )
-        )
-        session.flush()
-
-    home = tmp_path / "home"
-    gitnexus_dir = home / ".gitnexus"
-    gitnexus_dir.mkdir(parents=True)
-    (gitnexus_dir / "registry.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": "BMTools",
-                    "path": str(repository_dir),
-                    "indexedAt": "2026-08-04T00:00:00Z",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "apps.api.routes_v1.Path.home",
-        classmethod(lambda cls: home),
-    )
-
-    hidden_path = tmp_path / "code-graph-hidden.yaml"
-    hidden_path.write_text(
-        (
-            "schema_version: 1\n"
-            "hidden_repositories:\n"
-            "  - registry_name: BMTools\n"
-            "    reason: default hidden\n"
-        ),
-        encoding="utf-8",
-    )
-    client.app.state.settings.sources_config_path = settings_path
-    client.app.state.settings.code_graph_hidden_path = hidden_path
-
-    response = client.get("/api/v1/code-graph")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["total_count"] == 0
-    assert payload["indexed_count"] == 0
-    assert payload["hidden_count"] == 1
-    agent_domain = next(
-        domain for domain in payload["domains"] if domain["slug"] == "agent"
-    )
-    assert agent_domain["repositories"] == []
-    assert agent_domain["hidden_count"] == 1
-    assert (
-        agent_domain["hidden_repositories"][0]["gitnexus_repo_name"]
-        == "BMTools"
+    assert client.post("/api/v1/code-graph/search", json={}).status_code == 404
+    paths = client.get("/openapi.json").json()["paths"]
+    assert not any(
+        path.startswith("/api/v1/graph") or path.startswith("/api/v1/code-graph")
+        for path in paths
     )
 
 
@@ -1086,6 +1050,20 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
         "reason": "源码未下载/未开源",
     }
 
+    detail = client.get(f"/api/v1/assets/{papers[0]['id']}")
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert [item["id"] for item in detail_payload["related_repositories"]] == [
+        shared_repository["id"]
+    ]
+    detail_actions = {
+        action["kind"]: action for action in detail_payload["quick_actions"]
+    }
+    assert detail_actions["code"]["representation_id"] == representation_ids[
+        "shared_code"
+    ]
+    assert detail_actions["code"]["owner_asset_id"] == shared_repository["id"]
+
     candidate = client.get(
         "/api/v1/search",
         params={
@@ -1101,6 +1079,20 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
     assert candidate_unit["unit_kind"] == "repository"
     assert candidate_unit["match_source"] == "repository"
     assert candidate_unit["related_repositories"] == []
+
+    browse = client.get(
+        "/api/v1/search",
+        params={"group_by": "paper", "type": "all"},
+    )
+    assert browse.status_code == 200
+    assert browse.json()["total"] == len(papers) + 1
+    assert all(item["unit_kind"] == "paper" for item in browse.json()["items"])
+    repository_domain_browse = client.get(
+        "/api/v1/search",
+        params={"group_by": "paper", "type": "all", "domain": "code-domain"},
+    )
+    assert repository_domain_browse.status_code == 200
+    assert repository_domain_browse.json()["total"] == 0
 
     no_confirmed_code = client.get(
         "/api/v1/search",
@@ -1207,6 +1199,156 @@ def test_paper_grouping_confirmed_relations_actions_and_raw_compatibility(
         representation_ids["remote_pdf"],
         representation_ids["missing_html"],
     }
+
+
+def test_paper_grouped_domain_search_scopes_full_text_candidates_and_paginates(
+    api_runtime: tuple[Any, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, _ = api_runtime
+    domain = "vision-language-navigation"
+    direct_paper = create_asset(
+        client,
+        title="VLN Scope Anchor",
+        domain_slugs=[domain],
+    )
+    new_guide = create_asset(
+        client,
+        title="VLN Unified Guide",
+        domain_slugs=[domain],
+    )
+    shared_repository = create_asset(
+        client,
+        title="Shared VLN Repository",
+        asset_type="repository",
+        authors=[],
+        year=None,
+        domain_slugs=[domain],
+    )
+    independent_repository = create_asset(
+        client,
+        title="Independent VLN Repository",
+        asset_type="repository",
+        authors=[],
+        year=None,
+        domain_slugs=[domain],
+    )
+    sibling_papers = []
+    for index in range(31):
+        sibling_papers.append(
+            create_asset(client, title=f"Shared Repository Sibling {index:02d}")
+        )
+    for paper in sibling_papers:
+        relation = client.post(
+            "/api/v1/relations",
+            json={
+                "subject_asset_id": paper["id"],
+                "object_asset_id": shared_repository["id"],
+                "relation_type": "implemented_by",
+                "confirmation_status": "confirmed",
+            },
+        )
+        assert relation.status_code == 201
+
+    observed_options: list[dict[str, Any]] = []
+    install_memory_search_runtime(
+        monkeypatch,
+        [
+            SearchDocument(
+                document_id=f"guide:{new_guide['id']}",
+                asset_id=new_guide["id"],
+                kind="document",
+                title=new_guide["title"],
+                text="二维投影的新导读全文",
+            ),
+            SearchDocument(
+                document_id=f"repository:{shared_repository['id']}",
+                asset_id=shared_repository["id"],
+                kind="document",
+                title=shared_repository["title"],
+                text="二维投影的共享实现全文",
+            ),
+            SearchDocument(
+                document_id=f"repository:{independent_repository['id']}",
+                asset_id=independent_repository["id"],
+                kind="document",
+                title=independent_repository["title"],
+                text="二维投影的独立实现全文",
+            ),
+        ],
+        observed_options,
+    )
+    query = "二维投影"
+    parameters = {
+        "q": query,
+        "group_by": "paper",
+        "type": "paper",
+        "domain": domain,
+    }
+    first = client.get("/api/v1/search", params=parameters)
+    assert first.status_code == 200
+    first_payload = first.json()
+    assert first_payload["total"] == 32
+    assert len(first_payload["items"]) == 30
+    assert first_payload["next_cursor"] is not None
+
+    second = client.get(
+        "/api/v1/search",
+        params={**parameters, "cursor": first_payload["next_cursor"]},
+    )
+    assert second.status_code == 200
+    second_payload = second.json()
+    assert second_payload["total"] == 32
+    assert len(second_payload["items"]) == 2
+    assert second_payload["next_cursor"] is None
+    page_ids = [item["unit_id"] for item in first_payload["items"]] + [
+        item["unit_id"] for item in second_payload["items"]
+    ]
+    assert len(page_ids) == len(set(page_ids)) == 32
+    assert new_guide["id"] in page_ids
+    assert set(item["unit_id"] for item in first_payload["items"]).isdisjoint(
+        item["unit_id"] for item in second_payload["items"]
+    )
+    repeated = client.get("/api/v1/search", params=parameters)
+    assert [item["unit_id"] for item in repeated.json()["items"]] == [
+        item["unit_id"] for item in first_payload["items"]
+    ]
+
+    expected_paper_scope = {
+        direct_paper["id"],
+        new_guide["id"],
+        shared_repository["id"],
+        *(paper["id"] for paper in sibling_papers),
+    }
+    assert set(observed_options[0]["filters"]["asset_id"]) == expected_paper_scope
+    assert independent_repository["id"] not in expected_paper_scope
+
+    all_types = client.get(
+        "/api/v1/search",
+        params={**parameters, "type": "all"},
+    )
+    assert all_types.status_code == 200
+    all_types_payload = all_types.json()
+    assert all_types_payload["total"] == 33
+    all_types_second = client.get(
+        "/api/v1/search",
+        params={**parameters, "type": "all", "cursor": all_types_payload["next_cursor"]},
+    )
+    assert all_types_second.status_code == 200
+    assert independent_repository["id"] in {
+        item["unit_id"] for item in [*all_types_payload["items"], *all_types_second.json()["items"]]
+    }
+    assert independent_repository["id"] in set(observed_options[-1]["filters"]["asset_id"])
+
+    search_calls_before_no_match = len(observed_options)
+    no_match = client.get(
+        "/api/v1/search",
+        params={**parameters, "domain": "no-such-domain"},
+    )
+    assert no_match.status_code == 200
+    assert no_match.json()["total"] == 0
+    assert no_match.json()["degraded"] is False
+    assert len(observed_options) == search_calls_before_no_match
 
 
 def test_paper_grouping_paginates_after_fanout_without_duplicates(

@@ -203,33 +203,15 @@ export function ResearchUnitActions({
           );
         }
 
-        if (definition.kind === "code" && action.status !== "available") {
-          return (
-            <span
-              className="quick-action-tooltip"
-              title={title}
-              key={definition.kind}
-            >
-              <button
-                className="quick-action is-unavailable"
-                type="button"
-                disabled
-                title={title}
-                aria-label={accessibleLabel}
-              >
-                {content}
-              </button>
-            </span>
-          );
-        }
-
         if (definition.kind === "code") {
           return (
             <button
-              className="quick-action"
+              className={`quick-action ${
+                requiresNetwork ? "requires-network" : ""
+              }`}
               type="button"
               title={title}
-              aria-label={definition.label}
+              aria-label={accessibleLabel}
               onClick={() => setCodeMenuAction(action)}
               key={definition.kind}
             >

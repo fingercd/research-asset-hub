@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
+import { CompareProvider } from "../state/CompareContext";
 import { HomePage } from "./HomePage";
 
 afterEach(() => {
@@ -10,7 +11,7 @@ afterEach(() => {
 });
 
 describe("HomePage", () => {
-  it("renders every dynamic domain without truncating the research map", async () => {
+  it("renders one search entry, compact metrics, and five frequent domains", async () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({
       stats: {
         assets: 80,
@@ -41,17 +42,68 @@ describe("HomePage", () => {
     render(
       <QueryClientProvider client={client}>
         <MemoryRouter>
-          <HomePage />
+          <CompareProvider>
+            <HomePage />
+          </CompareProvider>
         </MemoryRouter>
       </QueryClientProvider>,
     );
 
     expect(
-      await screen.findByRole("heading", { name: "研究方向" }),
+      await screen.findByRole("heading", { name: "常用领域" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "领域 1" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "领域 8" })).toBeInTheDocument();
-    expect(screen.getAllByText("进入领域")).toHaveLength(8);
-    expect(screen.getByText("总览可用")).toBeInTheDocument();
+    expect(screen.getAllByRole("searchbox")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: /领域 1/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /领域 5/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /领域 6/ })).toBeNull();
+    expect(screen.getByRole("link", { name: /查看全部领域/ })).toHaveAttribute(
+      "href",
+      "/domains",
+    );
+    expect(screen.getByText("64")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("does not repeat continuing-reading assets in the recent section", async () => {
+    const continuingAsset = {
+      id: "paper-1",
+      asset_type: "paper",
+      title: "Same Paper",
+      reading_status: "reading" as const,
+    };
+    vi.spyOn(api, "dashboard").mockResolvedValue({
+      stats: {
+        assets: 1,
+        papers: 1,
+        unread: 0,
+        reading: 1,
+        read: 0,
+        domains: 0,
+        relations: 0,
+        annotations: 0,
+      },
+      continue_reading: [continuingAsset],
+      recent_assets: [continuingAsset],
+      domains: [],
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <CompareProvider>
+            <HomePage />
+          </CompareProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Same Paper" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { name: "Same Paper" })).toHaveLength(1);
+    expect(screen.getByText("没有其他最近资料")).toBeInTheDocument();
   });
 });

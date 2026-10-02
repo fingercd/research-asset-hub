@@ -126,6 +126,10 @@ class Source(TimestampVersionMixin, Base):
 
     records: Mapped[list[SourceRecord]] = relationship(back_populates="source")
     import_runs: Mapped[list[ImportRun]] = relationship(back_populates="source")
+    retirements: Mapped[list[SourceRetirement]] = relationship(
+        foreign_keys="SourceRetirement.source_id",
+        back_populates="source",
+    )
 
 
 class ImportRun(TimestampVersionMixin, Base):
@@ -636,3 +640,295 @@ SyncConflict = _platform_models.SyncConflict
 SyncRun = _platform_models.SyncRun
 SyncSnapshot = _platform_models.SyncSnapshot
 Tombstone = _platform_models.Tombstone
+
+
+class SourceRetirement(Base):
+    """Immutable, signed event retiring one frozen source from active serving."""
+
+    __tablename__ = "source_retirements"
+    __table_args__ = (
+        UniqueConstraint("payload_digest", name="uq_source_retirement_payload"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    source_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sources.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    backup_id: Mapped[UUID] = mapped_column(
+        ForeignKey("backup_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_source_config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    record_set_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    representation_set_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    mount_set_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    collection_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_algorithm: Mapped[str] = mapped_column(String(32), nullable=False)
+    signer_key_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    signature: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    applied_by: Mapped[str] = mapped_column(String(127), nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    source: Mapped[Source] = relationship(
+        foreign_keys=[source_id],
+        back_populates="retirements",
+    )
+    record_maps: Mapped[list[SourceRetirementRecordMap]] = relationship(
+        back_populates="retirement"
+    )
+    representation_maps: Mapped[list[SourceRetirementRepresentationMap]] = relationship(
+        back_populates="retirement"
+    )
+    mount_maps: Mapped[list[SourceRetirementMountMap]] = relationship(
+        back_populates="retirement"
+    )
+    successors: Mapped[list[SourceRetirementSuccessor]] = relationship(
+        back_populates="retirement"
+    )
+    rollbacks: Mapped[list[SourceRetirementRollback]] = relationship(
+        back_populates="retirement"
+    )
+
+
+class SourceRetirementRecordMap(Base):
+    """One immutable predecessor-to-successor source-record binding."""
+
+    __tablename__ = "source_retirement_record_maps"
+    __table_args__ = (
+        UniqueConstraint(
+            "retirement_id",
+            "retired_source_record_id",
+            name="uq_sr_record_retired",
+        ),
+        UniqueConstraint(
+            "retirement_id",
+            "successor_source_record_id",
+            name="uq_sr_record_successor",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    retirement_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_retirements.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    retired_source_record_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_records.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    successor_source_record_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_records.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    retired_record_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    successor_record_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    retirement: Mapped[SourceRetirement] = relationship(back_populates="record_maps")
+
+
+class SourceRetirementRepresentationMap(Base):
+    """Immutable proof that a retired representation has an equivalent successor."""
+
+    __tablename__ = "source_retirement_representation_maps"
+    __table_args__ = (
+        UniqueConstraint(
+            "retirement_id",
+            "retired_representation_id",
+            name="uq_sr_rep_retired",
+        ),
+        UniqueConstraint(
+            "retirement_id",
+            "successor_representation_id",
+            name="uq_sr_rep_successor",
+        ),
+        Index(
+            "ix_sr_rep_map_retired_representation",
+            "retired_representation_id",
+        ),
+        Index(
+            "ix_sr_rep_map_successor_representation",
+            "successor_representation_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    retirement_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_retirements.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    retired_representation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    successor_representation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    content_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    retired_representation_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    successor_representation_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    retirement: Mapped[SourceRetirement] = relationship(
+        back_populates="representation_maps"
+    )
+
+
+class SourceRetirementMountMap(Base):
+    """Immutable mapping for every active path mount relying on the retired source."""
+
+    __tablename__ = "source_retirement_mount_maps"
+    __table_args__ = (
+        UniqueConstraint("retirement_id", "retired_mount_id", name="uq_sr_mount_retired"),
+        UniqueConstraint(
+            "retirement_id",
+            "successor_mount_id",
+            name="uq_sr_mount_successor",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    retirement_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_retirements.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    retired_mount_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representation_mounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    successor_mount_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representation_mounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    retired_representation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    successor_representation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("representations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    retired_mount_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    successor_mount_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    retirement: Mapped[SourceRetirement] = relationship(back_populates="mount_maps")
+
+
+class SourceRetirementSuccessor(Base):
+    """Frozen successor-source identity attached to a retirement event."""
+
+    __tablename__ = "source_retirement_successors"
+    __table_args__ = (
+        UniqueConstraint(
+            "retirement_id",
+            "successor_source_id",
+            name="uq_sr_successor_source",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    retirement_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_retirements.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    successor_source_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sources.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    frozen_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_source_config_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_state_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    retirement: Mapped[SourceRetirement] = relationship(back_populates="successors")
+
+
+class SourceRetirementRollback(Base):
+    """Append-only event reversing one active retirement without erasing its evidence."""
+
+    __tablename__ = "source_retirement_rollbacks"
+    __table_args__ = (
+        UniqueConstraint("retirement_id", name="uq_sr_rollback_retirement"),
+        UniqueConstraint("payload_digest", name="uq_sr_rollback_payload"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)
+    retirement_id: Mapped[UUID] = mapped_column(
+        ForeignKey("source_retirements.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    backup_id: Mapped[UUID] = mapped_column(
+        ForeignKey("backup_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    signature_algorithm: Mapped[str] = mapped_column(String(32), nullable=False)
+    signer_key_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    signature: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    rolled_back_by: Mapped[str] = mapped_column(String(127), nullable=False)
+    rolled_back_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    retirement: Mapped[SourceRetirement] = relationship(back_populates="rollbacks")

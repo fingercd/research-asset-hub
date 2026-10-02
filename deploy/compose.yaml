@@ -3,6 +3,10 @@ name: research-asset-hub
 services:
   postgres:
     image: postgres:16-alpine
+    # Keep the local catalog service bounded; the large one-off index build is
+    # intentionally not part of the normal platform startup path.
+    mem_limit: 768m
+    mem_reservation: 384m
     environment:
       POSTGRES_DB: research_asset_hub
       POSTGRES_USER: research_hub
@@ -21,6 +25,10 @@ services:
 
   meilisearch:
     image: getmeili/meilisearch:v1.12
+    # The serving indexes are the paper/asset/annotation indexes.  The legacy
+    # code index remains on disk but is not queried by default.
+    mem_limit: 1536m
+    mem_reservation: 512m
     environment:
       MEILI_ENV: development
       MEILI_NO_ANALYTICS: "true"

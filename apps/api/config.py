@@ -28,11 +28,13 @@ class ApiSettings(BaseSettings):
     )
     # 最低要求的数据库迁移修订（>= 语义：数据库修订是它本身或其后代即可）。
     # tests/domain/test_migrations.py 断言该默认值与最新迁移 head 一致。
-    database_required_revision: str = "0003_search_rag_integrations"
+    database_required_revision: str = "0004_source_retirement"
     database_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     database_require_migrations: bool = True
     meilisearch_url: str = "http://127.0.0.1:7700"
     meilisearch_api_key: str = "research-hub-local-meili-key"
+    # 代码全文索引默认不参与查询；本地代码资产和代码按钮仍正常可用。
+    search_code_index_enabled: bool = False
 
     worker_heartbeat_path: Path = Path("work/state/worker-heartbeat.json")
     worker_stale_after_seconds: float = Field(default=30.0, gt=0)
@@ -55,14 +57,11 @@ class ApiSettings(BaseSettings):
             "环境变量 HUB_DESKTOP_ORIGINS 用逗号分隔覆盖。"
         ),
     )
-    gitnexus_url: str = "http://127.0.0.1:4747"
     web_api_proxy_timeout_seconds: float = Field(default=180.0, gt=0, le=3600)
     gateway_secret: str = ""
     gateway_session_seconds: int = Field(default=900, ge=30, le=86400)
     sources_config_path: Path = PROJECT_ROOT / "config" / "sources.yaml"
-    code_graph_hidden_path: Path = (
-        PROJECT_ROOT / "config" / "code-graph-hidden.yaml"
-    )
+    host_workspace_root: Path = PROJECT_ROOT
     taxonomy_config_path: Path = PROJECT_ROOT / "config" / "taxonomy.yaml"
     domain_portal_config_path: Path = (
         PROJECT_ROOT / "config" / "domain-portals" / "v2"

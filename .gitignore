@@ -26,6 +26,7 @@ state/catalog-export/
 outputs/reports/
 # outputs/release/ 有意入库（交付报告），不忽略
 outputs/open-catalog/
+outputs/knowledge-pilot/
 outputs/zotero/
 
 # Editors and operating systems

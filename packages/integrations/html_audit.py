@@ -29,6 +29,10 @@ from apps.api.config import PROJECT_ROOT
 from apps.api.database import DatabaseManager
 from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from packages.domain.models import Representation, RepresentationMount, Source
+from packages.domain.serving_scope import (
+    active_representation_clause,
+    active_source_clause,
+)
 
 _HTML_TYPES = frozenset({"html", "html_document", "guide", "analysis"})
 _HTML_SUFFIXES = frozenset({".html", ".htm", ".xhtml"})
@@ -246,6 +250,7 @@ class _Registration:
     declared_network_required: bool
     declared_policy: str
     mounts: tuple[_Mount, ...]
+    strict_mounts: bool = False
 
     def public_location(self) -> dict[str, object]:
         return {
@@ -440,6 +445,7 @@ class HtmlAuditReport:
                 if unverified
                 else "completed"
             ),
+            "scope": "serving_active",
             "read_only": True,
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -630,7 +636,19 @@ class _RegisteredResolver:
             if remainder is None:
                 continue
             mount_ref = PurePosixPath(mount.path_ref.replace("\\", "/"))
-            if registration.materialization_kind == "file" and (
+            mount_prefix = mount.mount_path.replace("\\", "/").strip("/")
+            if registration.materialization_kind == "file" and registration.strict_mounts:
+                if not mount_prefix:
+                    if remainder not in {"", mount_ref.as_posix()}:
+                        continue
+                    registered_ref = mount_ref.as_posix()
+                else:
+                    registered_ref = (
+                        mount_ref.as_posix()
+                        if not remainder
+                        else _join_registered_ref(mount_ref.as_posix(), remainder)
+                    )
+            elif registration.materialization_kind == "file" and (
                 not remainder or remainder == mount_ref.as_posix()
             ):
                 registered_ref = mount_ref.as_posix()
@@ -664,6 +682,8 @@ class _RegisteredResolver:
                 if index_candidate.is_file():
                     candidate = index_candidate
             return candidate
+        if registration.strict_mounts:
+            raise FileNotFoundError("Strict-mount representation does not expose this asset path.")
         if registration.source_alias is None or registration.path_ref is None:
             raise FileNotFoundError("Representation has no registered local source.")
         configured = PurePosixPath(registration.path_ref.replace("\\", "/"))
@@ -1022,6 +1042,7 @@ def _registrations(
                 .where(
                     Representation.representation_type.in_(_HTML_TYPES),
                     Representation.deleted_at.is_(None),
+                    active_representation_clause(),
                 )
                 .order_by(Representation.id)
             ).all()
@@ -1037,6 +1058,7 @@ def _registrations(
                 select(RepresentationMount).where(
                     RepresentationMount.representation_id.in_(representation_ids),
                     RepresentationMount.deleted_at.is_(None),
+                    active_source_clause(RepresentationMount.source_id),
                 )
             )
             for mount in mounts:
@@ -1075,6 +1097,7 @@ def _registrations(
                 key=lambda item: (item.priority, len(item.mount_path)),
                 reverse=True,
             )
+            strict_mounts = (representation.attributes or {}).get("strict_mounts")
             results.append(
                 _Registration(
                     representation_id=representation.id,
@@ -1089,6 +1112,10 @@ def _registrations(
                     declared_network_required=representation.network_required,
                     declared_policy=_policy_from_registration(representation),
                     mounts=tuple(ordered_mounts),
+                    strict_mounts=(
+                        strict_mounts is True
+                        or isinstance(strict_mounts, str) and strict_mounts.casefold() == "true"
+                    ),
                 )
             )
         return results if limit is None else results[: max(0, limit)]

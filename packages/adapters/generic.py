@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from packages.domain.enums import RelationType, RepresentationRole, RepresentationType
 from packages.domain.schemas import (
@@ -16,6 +18,15 @@ from ._helpers import optional_year, require_text, warn_if_empty
 from .base import BaseAdapter, get_in, http_urls, string_list, string_or_none
 from .types import AdapterError, AdapterErrorCode, ScannedRecord
 
+_FIELD_SELECTOR_RE = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*")
+_GIT_COMMIT_RE = re.compile(r"[0-9A-Fa-f]{40}")
+_GENERIC_REVISION_RE = re.compile(
+    r"(?!.*(?:\.\.|//))(?!@$)(?!.*(?:/|\.|\.lock)$)"
+    r"[A-Za-z0-9][A-Za-z0-9._/@+-]{0,254}"
+)
+_LICENSE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .()+:/_-]{0,126}")
+_STATUS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+
 
 class GenericManifestAdapter(BaseAdapter):
     """Map a simple manifest through declarative dotted-field selectors.
@@ -25,6 +36,8 @@ class GenericManifestAdapter(BaseAdapter):
     - ``record_selector``: dotted path to the record array (optional)
     - ``field_mapping``: normalized field name -> dotted source field
     - ``representations``: a list of path/url representation mappings
+      optionally carrying ``commit_field`` or ``revision_field``,
+      ``license_field``, and ``status_field``
     - ``relations``: a list of relation mappings
     """
 
@@ -43,6 +56,7 @@ class GenericManifestAdapter(BaseAdapter):
         "source_urls": "source_urls",
         "doi": "doi",
         "arxiv": "arxiv_id",
+        "attributes": "attributes",
     }
 
     def _mapping(self) -> dict[str, str]:
@@ -57,6 +71,168 @@ class GenericManifestAdapter(BaseAdapter):
             {str(key): str(value) for key, value in configured.items() if string_or_none(value)}
         )
         return result
+
+    @staticmethod
+    def _representation_selector(
+        spec: Mapping[str, Any],
+        *,
+        index: int,
+        key: str,
+    ) -> str | None:
+        """Return one opt-in dotted selector without coercing unsafe config values."""
+
+        if key not in spec:
+            return None
+        value = spec[key]
+        if not isinstance(value, str):
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                f"representations[{index}].{key} must be a non-empty dotted field selector",
+                details={
+                    "representation_index": index,
+                    "option": key,
+                    "actual_type": type(value).__name__,
+                },
+            )
+        normalized = value.strip()
+        if not normalized or not _FIELD_SELECTOR_RE.fullmatch(normalized):
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                f"representations[{index}].{key} must be a non-empty dotted field selector",
+                details={"representation_index": index, "option": key},
+            )
+        return normalized
+
+    @staticmethod
+    def _representation_text(
+        raw: Mapping[str, Any],
+        *,
+        index: int,
+        selector: str,
+        label: str,
+        pattern: re.Pattern[str],
+        expectation: str,
+    ) -> str:
+        """Read a configured representation field as bounded, safe manifest text."""
+
+        value = get_in(raw, selector)
+        if not isinstance(value, str):
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                f"representations[{index}] {label} must be {expectation}",
+                details={
+                    "representation_index": index,
+                    "field": selector,
+                    "actual_type": type(value).__name__,
+                },
+            )
+        normalized = value.strip()
+        if not normalized or not pattern.fullmatch(normalized):
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                f"representations[{index}] {label} must be {expectation}",
+                details={"representation_index": index, "field": selector},
+            )
+        return normalized
+
+    def _repository_metadata(
+        self,
+        raw: Mapping[str, Any],
+        spec: Mapping[str, Any],
+        *,
+        index: int,
+        representation_type: RepresentationType,
+        has_declared_location: bool,
+    ) -> tuple[str | None, dict[str, str]]:
+        """Map strictly configured repository revision/profile metadata."""
+
+        commit_field = self._representation_selector(spec, index=index, key="commit_field")
+        revision_field = self._representation_selector(
+            spec,
+            index=index,
+            key="revision_field",
+        )
+        license_field = self._representation_selector(
+            spec,
+            index=index,
+            key="license_field",
+        )
+        status_field = self._representation_selector(spec, index=index, key="status_field")
+        if commit_field is not None and revision_field is not None:
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                (
+                    f"representations[{index}] cannot configure both "
+                    "commit_field and revision_field"
+                ),
+                details={"representation_index": index},
+            )
+        repository_only = {
+            "commit_field": commit_field,
+            "revision_field": revision_field,
+            "license_field": license_field,
+            "status_field": status_field,
+        }
+        invalid_options = sorted(
+            key
+            for key, value in repository_only.items()
+            if value is not None and representation_type != RepresentationType.REPOSITORY
+        )
+        if invalid_options:
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                (
+                    f"representations[{index}] options are valid only for "
+                    f"repository representations: {', '.join(invalid_options)}"
+                ),
+                details={
+                    "representation_index": index,
+                    "options": invalid_options,
+                },
+            )
+        if not has_declared_location:
+            return None, {}
+
+        revision: str | None = None
+        if commit_field is not None:
+            revision = self._representation_text(
+                raw,
+                index=index,
+                selector=commit_field,
+                label="commit",
+                pattern=_GIT_COMMIT_RE,
+                expectation="a 40-character hexadecimal Git commit",
+            ).lower()
+        elif revision_field is not None:
+            revision = self._representation_text(
+                raw,
+                index=index,
+                selector=revision_field,
+                label="revision",
+                pattern=_GENERIC_REVISION_RE,
+                expectation="a safe revision token of at most 255 characters",
+            )
+
+        metadata: dict[str, str] = {}
+        if license_field is not None:
+            metadata["license"] = self._representation_text(
+                raw,
+                index=index,
+                selector=license_field,
+                label="license",
+                pattern=_LICENSE_RE,
+                expectation="a safe SPDX-style value of at most 127 characters",
+            )
+        if status_field is not None:
+            metadata["status"] = self._representation_text(
+                raw,
+                index=index,
+                selector=status_field,
+                label="status",
+                pattern=_STATUS_RE,
+                expectation="a safe status token of at most 32 characters",
+            )
+        return revision, metadata
 
     def normalize(self, record: ScannedRecord) -> NormalizedRecord:
         raw = record.raw
@@ -111,6 +287,24 @@ class GenericManifestAdapter(BaseAdapter):
                     url for url in http_urls([get_in(raw, path)]) if url not in source_urls
                 )
 
+        raw_attributes = get_in(raw, mapping.get("attributes"))
+        if raw_attributes is None:
+            mapped_attributes: dict[str, Any] = {}
+        elif isinstance(raw_attributes, Mapping):
+            mapped_attributes = {str(key): value for key, value in raw_attributes.items()}
+        else:
+            raise AdapterError(
+                AdapterErrorCode.INVALID_RECORD,
+                "generic_manifest attributes must be an object",
+                details={
+                    "field": mapping.get("attributes", "attributes"),
+                    "actual_type": type(raw_attributes).__name__,
+                },
+            )
+        # Keep adapter provenance under a reserved key after copying source-owned
+        # attributes so a manifest cannot spoof the mapping used for this record.
+        mapped_attributes["generic_mapping"] = mapping
+
         asset = self.asset(
             source_record_id=record_id,
             title=title,
@@ -127,9 +321,7 @@ class GenericManifestAdapter(BaseAdapter):
                 arxiv=get_in(raw, mapping.get("arxiv")),
                 urls=source_urls,
             ),
-            attributes={
-                "generic_mapping": mapping,
-            },
+            attributes=mapped_attributes,
         )
 
         representations = []
@@ -156,21 +348,42 @@ class GenericManifestAdapter(BaseAdapter):
             path_field = string_or_none(spec.get("path_field"))
             url_field = string_or_none(spec.get("url_field"))
             sha256_field = string_or_none(spec.get("sha256_field"))
+            raw_path = get_in(raw, path_field) if path_field else None
+            raw_url = get_in(raw, url_field) if url_field else None
+            has_declared_location = bool(string_or_none(raw_path)) or bool(
+                string_or_none(raw_url)
+            )
+            revision, representation_metadata = self._repository_metadata(
+                raw,
+                spec,
+                index=index,
+                representation_type=representation_type,
+                has_declared_location=has_declared_location,
+            )
+            fixed_metadata = spec.get("metadata", {})
+            if not isinstance(fixed_metadata, Mapping):
+                raise AdapterError(
+                    AdapterErrorCode.INVALID_RECORD,
+                    f"representations[{index}].metadata must be an object",
+                )
             candidate = self.representation(
                 representation_type,
                 warnings=warnings,
                 role=role,
-                raw_path=get_in(raw, path_field) if path_field else None,
+                raw_path=raw_path,
                 root_key=str(spec.get("root_key", "source")),
-                url=string_or_none(get_in(raw, url_field)) if url_field else None,
+                url=string_or_none(raw_url) if url_field else None,
                 sha256=(
                     string_or_none(get_in(raw, sha256_field))
                     if sha256_field
                     else None
                 ),
+                revision=revision,
                 mime_type=string_or_none(spec.get("mime_type")),
                 network_required=bool(spec.get("network_required", False)),
-                metadata_value={"mapping_index": index},
+                metadata_value=(
+                    dict(fixed_metadata) | {"mapping_index": index} | representation_metadata
+                ),
                 field=path_field or url_field,
             )
             if candidate is not None:

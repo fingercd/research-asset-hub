@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """四按钮验收脚本：断言每个论文研究单元的 PDF/HTML/代码 按钮状态与库内资料一致。
 
 用法:
@@ -16,18 +15,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-DEFAULT_ALLOWLIST = Path(__file__).resolve().parents[1] / "config" / "check-unit-actions-allowlist.yaml"
+DEFAULT_ALLOWLIST = (
+    Path(__file__).resolve().parents[1]
+    / "config"
+    / "check-unit-actions-allowlist.yaml"
+)
 
 
-def fetch_units(api_base: str, domain: str) -> list[dict]:
-    units: list[dict] = []
+def fetch_units(api_base: str, domain: str) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
         params = {"q": "", "mode": "keyword", "group_by": "paper"}
@@ -77,7 +80,10 @@ def main() -> int:
         )
         row.append(f"code={code_status}{'✓' if code_ok else '✗'}")
         if not code_ok:
-            failures.append(f"{title}: code 期望 available（或属于无代码白名单），实际 {code_status}")
+            failures.append(
+                f"{title}: code 期望 available（或属于无代码白名单），"
+                f"实际 {code_status}"
+            )
         if "guide" in actions:
             guide_found = True
             failures.append(f"{title}: 仍存在 guide 动作（已废除，应删除）")

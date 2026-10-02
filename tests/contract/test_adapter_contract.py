@@ -196,6 +196,49 @@ def test_generic_adapter_supports_common_root_shapes(
     assert records[0].asset.domain_slugs == ["new-domain"]
 
 
+def test_generic_adapter_preserves_structured_asset_attributes(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "paper-1",
+                        "title": "Release audit",
+                        "attributes": {
+                            "first_public_date": "2026-09-03",
+                            "release_status": {
+                                "code_open": "official_open",
+                                "code_local": "absent",
+                                "checkpoint_open": "announced",
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = SourceConfig(
+        id="release-audit",
+        label="Release audit",
+        adapter="generic_manifest",
+        root=str(tmp_path),
+        manifest="manifest.json",
+        domain="vision-language-navigation",
+    )
+
+    record = GenericManifestAdapter(config).load()[0]
+
+    assert record.asset.attributes["first_public_date"] == "2026-09-03"
+    assert record.asset.attributes["release_status"] == {
+        "code_open": "official_open",
+        "code_local": "absent",
+        "checkpoint_open": "announced",
+    }
+    assert record.asset.attributes["generic_mapping"]["attributes"] == "attributes"
+
+
 def test_representation_helper_preserves_bundle_runtime_contract(tmp_path: Path) -> None:
     (tmp_path / "repo/docs").mkdir(parents=True)
     (tmp_path / "repo/README.md").write_text("# Repo\n", encoding="utf-8")

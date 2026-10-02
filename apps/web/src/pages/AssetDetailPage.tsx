@@ -6,7 +6,6 @@ import {
   Code2,
   FileText,
   GitCompareArrows,
-  Network,
   Quote,
   ScrollText,
   Sparkles,
@@ -19,8 +18,6 @@ import {
   getAssetDomains,
   getReadingStatus,
   getRepresentationType,
-  type GraphEdge,
-  type GraphNode,
   type Representation,
 } from "../api/types";
 import { AnnotationComposer } from "../components/AnnotationComposer";
@@ -32,7 +29,9 @@ import {
 } from "../components/DocumentPanels";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { ReadingStatusControl } from "../components/ReadingStatusControl";
+import { ReleaseStatusBadges } from "../components/ReleaseStatusBadges";
 import { RepresentationActions } from "../components/RepresentationActions";
+import { ResearchUnitActions } from "../components/ResearchUnitActions";
 import {
   annotationBody,
   formatAuthors,
@@ -40,6 +39,7 @@ import {
   formatDate,
   representationLabel,
 } from "../lib/format";
+import { preferGuide } from "../lib/preferredGuide";
 import { useCompare } from "../state/CompareContext";
 
 const PdfPanel = lazy(() =>
@@ -53,7 +53,6 @@ type DetailTab =
   | "pdf"
   | "code"
   | "guide"
-  | "relations"
   | "similar"
   | "html";
 
@@ -66,7 +65,6 @@ const tabs: Array<{
   { id: "pdf", label: "PDF", icon: FileText },
   { id: "code", label: "代码", icon: Code2 },
   { id: "guide", label: "导读", icon: ScrollText },
-  { id: "relations", label: "关系", icon: Network },
   { id: "similar", label: "相似论文", icon: Sparkles },
   { id: "html", label: "原始 HTML", icon: BotMessageSquare },
 ];
@@ -78,20 +76,6 @@ function firstRepresentation(
   return representations.find(
     (item) => item.availability !== "missing" && predicate(item),
   );
-}
-
-function graphParts(value: unknown): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  if (!value || typeof value !== "object") return { nodes: [], edges: [] };
-  const graph = value as {
-    nodes?: GraphNode[];
-    assets?: GraphNode[];
-    edges?: GraphEdge[];
-    relations?: GraphEdge[];
-  };
-  return {
-    nodes: graph.nodes ?? graph.assets ?? [],
-    edges: graph.edges ?? graph.relations ?? [],
-  };
 }
 
 export function AssetDetailPage() {
@@ -119,12 +103,6 @@ export function AssetDetailPage() {
     enabled: Boolean(assetId) && activeTab === "similar",
     retry: false,
   });
-  const relations = useQuery({
-    queryKey: ["graph", "neighbors", assetId, 1],
-    queryFn: ({ signal }) => api.graphNeighbors(assetId, 1, signal),
-    enabled: Boolean(assetId) && activeTab === "relations",
-  });
-
   if (asset.isPending) {
     return (
       <div className="page">
@@ -156,21 +134,26 @@ export function AssetDetailPage() {
     ["repository", "source_code", "notebook"].includes(
       getRepresentationType(item),
     ),
-  );
-  const guide = firstRepresentation(
-    reps,
-    (item) =>
-      ["guide", "analysis", "markdown"].includes(getRepresentationType(item)) ||
-      item.role === "guide",
-  );
+  ) ?? (() => {
+    const action = data.quick_actions?.find(
+      (item) => item.kind === "code" && item.status === "available",
+    );
+    return action?.representation_id
+      ? {
+          id: action.representation_id,
+          asset_id: action.owner_asset_id ?? undefined,
+          representation_type: "repository",
+          availability: "available",
+        }
+      : undefined;
+  })();
+  const guide = preferGuide(reps);
   const html = firstRepresentation(
     reps,
     (item) =>
       ["html", "html_document"].includes(getRepresentationType(item)) &&
       item.role !== "guide",
   );
-  const related = graphParts(relations.data);
-
   return (
     <div className="page asset-detail-page">
       <Link className="back-link" to="/search">
@@ -191,6 +174,11 @@ export function AssetDetailPage() {
             <p className="asset-hero-original">{data.title}</p>
           )}
           <p className="asset-hero-authors">{formatAuthors(data.authors)}</p>
+          <ReleaseStatusBadges
+            asset={data}
+            quickActions={data.quick_actions}
+            relatedRepositories={data.related_repositories}
+          />
           {!!domains.length && (
             <div className="tag-row">
               {domains.map((domain) => (
@@ -220,7 +208,17 @@ export function AssetDetailPage() {
             {selected ? "已加入对比" : "加入对比"}
           </button>
         </div>
-        <RepresentationActions representations={reps} />
+        {data.quick_actions?.length ? (
+          <ResearchUnitActions
+            actions={data.quick_actions}
+            ownerAssetId={data.id}
+            repositoryLabel={
+              data.related_repositories?.[0]?.title ?? data.title
+            }
+          />
+        ) : (
+          <RepresentationActions representations={reps} />
+        )}
       </header>
 
       <div className="asset-tabs" role="tablist" aria-label="资产阅读视图">
@@ -362,10 +360,6 @@ export function AssetDetailPage() {
 
               <section className="section-block detail-links">
                 <h2>探索</h2>
-                <button type="button" onClick={() => setActiveTab("relations")}>
-                  <Network size={17} aria-hidden="true" />
-                  查看关系
-                </button>
                 <Link to="#annotations">
                   <StickyNote size={17} aria-hidden="true" />
                   添加批注
@@ -407,64 +401,6 @@ export function AssetDetailPage() {
         {activeTab === "code" && <CodePanel representation={code} />}
         {activeTab === "guide" && <GuidePanel representation={guide} />}
         {activeTab === "html" && <HtmlPanel representation={html} />}
-
-        {activeTab === "relations" &&
-          (relations.isPending ? (
-            <LoadingState label="正在加载关系…" />
-          ) : relations.isError ? (
-            <ErrorState
-              error={relations.error}
-              retry={() => void relations.refetch()}
-            />
-          ) : related.nodes.length ? (
-            <section className="section-block relation-summary">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">一跳邻域</p>
-                  <h2>关系资产</h2>
-                </div>
-                <Link
-                  className="button secondary compact"
-                  to={`/graph?asset_id=${encodeURIComponent(data.id)}`}
-                >
-                  打开完整图谱
-                </Link>
-              </div>
-              <p className="muted">
-                {related.nodes.length} 个节点 · {related.edges.length} 条关系
-              </p>
-              <div className="relation-node-grid">
-                {related.nodes
-                  .filter((node) => node.id !== data.id)
-                  .map((node) => (
-                    <Link
-                      to={`/assets/${encodeURIComponent(node.id)}`}
-                      key={node.id}
-                    >
-                      <strong>{node.title ?? node.label ?? node.id}</strong>
-                      <span>
-                        {[node.asset_type, node.year].filter(Boolean).join(" · ") ||
-                          "资产"}
-                      </span>
-                    </Link>
-                  ))}
-              </div>
-            </section>
-          ) : (
-            <EmptyState
-              title="该资产暂无关系"
-              detail="关系候选确认后会在此处展示；也可以打开完整图谱继续探索。"
-              kind="index"
-              action={
-                <Link
-                  className="button secondary"
-                  to={`/graph?asset_id=${encodeURIComponent(data.id)}`}
-                >
-                  打开关系图谱
-                </Link>
-              }
-            />
-          ))}
 
         {activeTab === "similar" &&
           (similar.isPending ? (

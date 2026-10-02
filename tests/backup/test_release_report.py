@@ -42,7 +42,7 @@ _REQUIRED_FORMAL_COUNTERS = (
 
 def _database() -> dict[str, object]:
     return {
-        "schema_revision": "0003_search_rag_integrations",
+        "schema_revision": "0004_source_retirement",
         "sources": {
             "count": 7,
             "all_read_only": True,
@@ -326,6 +326,100 @@ def test_new_domain_growth_does_not_fail_legacy_exact_counts() -> None:
     assert report["scope"]["growth"]["domain_delta"] == 1
     assert report["source_integrity"]["added_sources"] == ["new-domain"]
     assert report["status"] == "warn"
+
+
+def test_missing_representation_gate_allows_resolved_historical_item() -> None:
+    """A resolved baseline item must not be recreated as a release failure."""
+
+    database = _database()
+    reports = _reports()
+    representations = database["representations"]
+    assert isinstance(representations, dict)
+    representations["by_availability"] = {"available": 2400, "missing": 8}
+    missing = representations["missing"]
+    assert isinstance(missing, list)
+    representations["missing"] = missing[:8]
+
+    integrity = reports["source_integrity"]
+    counts = integrity["counts"]
+    assert isinstance(counts, dict)
+    counts["files_verified"] = 2400
+    counts["missing_confirmed"] = 8
+
+    report = build_release_report(
+        ReleaseReportInputs(database=database, reports=reports)
+    )
+    gate = _gate(report, "missing-representations-visible")
+    assert gate["status"] == "pass"
+    evidence = gate["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence == {
+        "listed": 8,
+        "database_by_availability": 8,
+        "source_integrity_missing_confirmed": 8,
+        "historical_baseline": 9,
+        "resolved_historical_count": 1,
+        "new_missing_count": 0,
+        "counts_match": True,
+    }
+    # The resolved item is not silently dropped from the report contract: the
+    # current explicit list is still exported under failures.
+    assert len(report["failures"]["missing_representations"]) == 8
+
+
+def test_missing_representation_gate_rejects_new_item_above_historical_baseline() -> None:
+    database = _database()
+    reports = _reports()
+    representations = database["representations"]
+    assert isinstance(representations, dict)
+    representations["by_availability"] = {"available": 2398, "missing": 10}
+    missing = representations["missing"]
+    assert isinstance(missing, list)
+    representations["missing"] = [
+        *missing,
+        {
+            "representation_id": "missing-9",
+            "asset_id": "asset-9",
+            "type": "pdf",
+            "root_key": "pdf",
+            "path_ref": "missing/9.pdf",
+        },
+    ]
+
+    integrity = reports["source_integrity"]
+    counts = integrity["counts"]
+    assert isinstance(counts, dict)
+    counts["files_verified"] = 2398
+    counts["missing_confirmed"] = 10
+
+    report = build_release_report(
+        ReleaseReportInputs(database=database, reports=reports)
+    )
+    gate = _gate(report, "missing-representations-visible")
+    assert gate["status"] == "fail"
+    evidence = gate["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["new_missing_count"] == 1
+    assert evidence["counts_match"] is True
+    assert len(report["failures"]["missing_representations"]) == 10
+
+
+def test_missing_representation_gate_cross_checks_source_integrity_count() -> None:
+    database = _database()
+    reports = _reports()
+    integrity = reports["source_integrity"]
+    counts = integrity["counts"]
+    assert isinstance(counts, dict)
+    counts["missing_confirmed"] = 8
+
+    report = build_release_report(
+        ReleaseReportInputs(database=database, reports=reports)
+    )
+    gate = _gate(report, "missing-representations-visible")
+    assert gate["status"] == "fail"
+    evidence = gate["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["counts_match"] is False
 
 
 def test_database_snapshot_projects_frozen_manifest_digest_without_source_config() -> None:

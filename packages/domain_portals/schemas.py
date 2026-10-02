@@ -207,23 +207,23 @@ class BenchmarkDocument(PortalModel):
 class PortalSection(PortalModel):
     id: Literal[
         "scope",
+        "catalog",
         "timeline",
         "capability-method-map",
         "landmarks",
         "benchmarks",
         "reading-routes",
-        "catalog",
         "frontiers",
         "evidence",
     ]
     kind: Literal[
         "scope",
+        "catalog",
         "timeline",
         "capability_method_map",
         "landmarks",
         "benchmarks",
         "reading_routes",
-        "catalog",
         "frontiers",
         "evidence",
     ]
@@ -259,12 +259,12 @@ class DomainPortalDocument(PortalModel):
     ) -> list[PortalSection]:
         expected = [
             "scope",
+            "catalog",
             "timeline",
             "capability-method-map",
             "landmarks",
             "benchmarks",
             "reading-routes",
-            "catalog",
             "frontiers",
             "evidence",
         ]

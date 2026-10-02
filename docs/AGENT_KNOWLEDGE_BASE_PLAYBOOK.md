@@ -346,10 +346,11 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 正式完成条件：
 
-- Meilisearch 四个关键词索引（assets/documents/code/annotations）计数非空；
+- serving scope 选中的关键词索引（默认 `assets/documents/annotations`）计数与报告一致；
 - 新增资产存在于 assets 索引；
-- 新增正文/代码存在于 documents/code 索引；
-- 不存在上一版本残留的失效文档。
+- 新增正文存在于 documents 索引；代码索引只有在明确启用时才要求建立和验证；
+- 不存在上一版本残留的失效文档。默认构建命令可加 `--skip-code`，API 默认
+  `HUB_SEARCH_CODE_INDEX_ENABLED=false`，代码仓库仍保留本地表示和详情页按钮。
 
 ## 9. 验证用户真正能用
 
@@ -361,7 +362,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 网站检查：
 
-1. 在 <http://127.0.0.1:8765/search> 用题名、DOI/arXiv、作者和代码符号搜索。
+1. 在 <http://127.0.0.1:8765/search> 用题名、DOI/arXiv 和作者搜索；只有明确启用代码索引时才测试代码符号搜索。
 2. 打开资产详情，核对题名、作者、年份、领域、标签和表示。
 3. 分别测试 PDF、代码、导读和原始 HTML；缺失按钮必须明确禁用。
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。

@@ -137,7 +137,11 @@ def _safe_child(root: Path, relative_path: str) -> Path:
         candidate.relative_to(root)
     except ValueError as error:
         raise CodeBrowserPathError("代码路径越过项目根目录。") from error
-    if _is_hidden_or_sensitive(candidate):
+    components = (*PurePosixPath(relative).parts, *candidate.relative_to(root).parts)
+    if any(
+        _is_hidden_or_sensitive(Path(part)) or _is_ignored_directory(Path(part))
+        for part in components
+    ):
         raise CodeBrowserPathError("隐藏或敏感文件不可预览。")
     return candidate
 
@@ -200,7 +204,8 @@ def read_code_file(
         raise CodeBrowserPathError("代码文件不存在。")
     try:
         size_bytes = file_path.stat().st_size
-        payload = file_path.read_bytes()[: MAX_PREVIEW_BYTES + 1]
+        with file_path.open("rb") as stream:
+            payload = stream.read(MAX_PREVIEW_BYTES + 1)
     except OSError as error:
         raise CodeBrowserPathError("代码文件无法读取。") from error
     if b"\x00" in payload:

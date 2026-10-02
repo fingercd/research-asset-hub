@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from packages.backup import rehearsal
 from packages.backup.rehearsal import (
     CORE_TABLES,
     RestorePlan,
@@ -151,3 +153,31 @@ def test_dry_run_writes_report_without_calling_external_systems(
     assert report["safety"]["active_resources_mutated"] is False
     assert plan.report_path.is_file()
     assert plan.compose_path.is_file()
+
+
+def test_active_database_snapshot_falls_back_to_native_desktop_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {
+        "schema_revision": "0004_source_retirement",
+        "counts": {},
+        "fixed_queries": {},
+        "invariants": {},
+    }
+
+    def fail_compose(_command: str) -> dict[str, object]:
+        raise RuntimeError('service "postgres" is not running')
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = MagicMock()
+    connection.cursor.return_value.__enter__.return_value = cursor
+    cursor.fetchone.return_value = (json.dumps(expected),)
+    connect = MagicMock(return_value=connection)
+    monkeypatch.setattr(rehearsal, "_run_json_wsl", fail_compose)
+    monkeypatch.setattr(rehearsal.psycopg, "connect", connect)
+
+    assert rehearsal._query_active_database(tmp_path) == expected
+    connect.assert_called_once()
+    cursor.execute.assert_called_once()

@@ -211,6 +211,15 @@ def load_domain_portal(
             },
         ),
         _section(
+            "catalog",
+            "catalog",
+            status,
+            {
+                "summary": "完整研究单元由正式库动态生成，统一版只保存入口语义。",
+                "asset_ids": metadata.section_evidence.get("catalog", []),
+            },
+        ),
+        _section(
             "timeline",
             "timeline",
             status,
@@ -239,15 +248,6 @@ def load_domain_portal(
             "reading_routes",
             status,
             routes.model_dump(mode="json"),
-        ),
-        _section(
-            "catalog",
-            "catalog",
-            status,
-            {
-                "summary": "完整研究单元由正式库动态生成，统一版只保存入口语义。",
-                "asset_ids": metadata.section_evidence.get("catalog", []),
-            },
         ),
         _section(
             "frontiers",

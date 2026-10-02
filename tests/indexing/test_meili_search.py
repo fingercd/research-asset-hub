@@ -78,6 +78,14 @@ def test_meili_search_uses_exact_term_filter_for_arxiv_identifier() -> None:
     assert transport.payloads[0]["filter"] == ['exact_terms = "1312.6114"']
 
 
+def test_meili_search_short_circuits_empty_asset_id_filter() -> None:
+    transport = _SearchTransport()
+    index = MeilisearchIndex(transport, index_name="assets")
+
+    assert index.search("variational", filters={"asset_id": []}) == []
+    assert transport.payloads == []
+
+
 def test_meili_upsert_bounds_large_code_text() -> None:
     transport = _WriteTransport()
     index = MeilisearchIndex(transport, index_name="code")

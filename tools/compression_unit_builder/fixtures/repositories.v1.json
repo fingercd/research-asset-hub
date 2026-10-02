@@ -1,0 +1,10 @@
+{
+  "schema_version": "videollm.repositories.v1",
+  "repositories": [
+    {
+      "paper_id": "legacy-video-2025",
+      "status": "none_found",
+      "url": null
+    }
+  ]
+}

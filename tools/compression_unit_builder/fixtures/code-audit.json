@@ -1,0 +1,10 @@
+{
+  "schema_version": "fixture.code-audit.v1",
+  "papers": [
+    {"paper_id": "source-video-reuse-2025", "status": "none_found", "evidence_reason": "Fixture search found no official public repository."},
+    {"paper_id": "source-video-alt-2025", "status": "none_found", "evidence_reason": "Fixture search found no official public repository."},
+    {"paper_id": "new-video-2026", "status": "none_found", "evidence_reason": "Fixture search found no official public repository."},
+    {"paper_id": "embodied-compression-2026", "status": "none_found", "evidence_reason": "Fixture search found no official public repository."},
+    {"paper_id": "navigation-compression-2026", "status": "none_found", "evidence_reason": "Fixture search found no official public repository."}
+  ]
+}

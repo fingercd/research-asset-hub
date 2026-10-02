@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from apps.api.config import ApiSettings
-from packages.indexing import KeywordSearchService, RemoteIndexSuite
+from packages.indexing import KEYWORD_INDEX_NAMES, KeywordSearchService, RemoteIndexSuite
 
 
 class SearchRuntime:
@@ -20,9 +20,16 @@ class SearchRuntime:
 
     @classmethod
     def connect(cls, settings: ApiSettings) -> SearchRuntime:
+        index_names = tuple(
+            name
+            for name in KEYWORD_INDEX_NAMES
+            if settings.search_code_index_enabled or name != "code"
+        )
         suite = RemoteIndexSuite.connect(
             meilisearch_url=settings.meilisearch_url,
             meilisearch_api_key=settings.meilisearch_api_key,
+            index_names=index_names,
+            initialize_indexes=False,
         )
         return cls(
             suite=suite,

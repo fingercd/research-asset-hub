@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from apps.api.domain_views import presentation_domains
 from packages.domain.models import (
     Annotation,
     AnnotationRevision,
@@ -43,7 +44,7 @@ def serialize_asset(
         "analysis": dict(asset.analysis or {}),
         "visibility": asset.visibility,
         "source_urls": list(asset.source_urls or []),
-        "domain_slugs": list(asset.domain_slugs or []),
+        "domain_slugs": presentation_domains(asset),
         "tags": list(asset.tags or []),
         "attributes": dict(asset.attributes or {}),
         "reading_status": reading_state.status if reading_state else "unread",

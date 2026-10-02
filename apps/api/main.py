@@ -129,7 +129,11 @@ def create_app(
                 status="unavailable",
                 detail=f"{readiness.status}: {readiness.detail}",
             )
-            result.status = "degraded"
+        result.status = (
+            "healthy"
+            if all(component.status == "healthy" for component in result.components.values())
+            else "degraded"
+        )
         return result
 
     # 桌面壳前端按 API_BASE(/api/v1)拼接 health 路径,与裸 /api/health 并存,

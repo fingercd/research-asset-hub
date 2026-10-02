@@ -46,14 +46,12 @@ function Get-HubPort {
 $webPort = Get-HubPort -EnvironmentName 'HUB_WEB_PORT' -Default 8765
 $assetGatewayPort = Get-HubPort -EnvironmentName 'HUB_ASSET_GATEWAY_PORT' -Default 8766
 $apiPort = Get-HubPort -EnvironmentName 'HUB_API_PORT' -Default 8767
-$gitnexusPort = Get-HubPort -EnvironmentName 'HUB_GITNEXUS_PORT' -Default 4747
-if (@(@($webPort, $assetGatewayPort, $apiPort, $gitnexusPort) | Sort-Object -Unique).Count -ne 4) {
-    throw 'HUB_WEB_PORT, HUB_ASSET_GATEWAY_PORT, HUB_API_PORT, and HUB_GITNEXUS_PORT must be distinct.'
+if (@(@($webPort, $assetGatewayPort, $apiPort) | Sort-Object -Unique).Count -ne 3) {
+    throw 'HUB_WEB_PORT, HUB_ASSET_GATEWAY_PORT, and HUB_API_PORT must be distinct.'
 }
 $webUrl = "http://127.0.0.1:$webPort"
 $assetGatewayUrl = "http://127.0.0.1:$assetGatewayPort"
 $apiUrl = "http://127.0.0.1:$apiPort"
-$gitnexusUrl = "http://127.0.0.1:$gitnexusPort"
 $runtimeUrls = [ordered]@{
     web = "$webUrl/"
     api = "$apiUrl/"
@@ -61,7 +59,6 @@ $runtimeUrls = [ordered]@{
     api_health = "$apiUrl/api/health"
     asset_gateway = "$assetGatewayUrl/"
     asset_gateway_health = "$assetGatewayUrl/health"
-    gitnexus = "$gitnexusUrl/"
 }
 
 if (-not $pythonPath) {
@@ -205,7 +202,8 @@ function Invoke-HubHealthProbe {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Url,
-        [switch]$AnySuccessfulResponse
+        [switch]$AnySuccessfulResponse,
+        [switch]$AllowDegradedWithReadyDependencies
     )
 
     try {
@@ -225,9 +223,17 @@ function Invoke-HubHealthProbe {
             $reportedStatus = $null
         }
         $successful = [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300
+        $degradedDependenciesReady = (
+            $AllowDegradedWithReadyDependencies -and
+            $reportedStatus -eq 'degraded' -and
+            $null -ne $payload -and
+            [string]$payload.database -eq 'ready' -and
+            [string]$payload.signing -eq 'ready'
+        )
         $ready = $successful -and (
             $AnySuccessfulResponse -or
-            $reportedStatus -eq 'healthy'
+            $reportedStatus -eq 'healthy' -or
+            $degradedDependenciesReady
         )
         return [pscustomobject]@{
             name = $Name
@@ -260,12 +266,6 @@ function Get-HubRuntimeStatus {
     $resolvedApiUrl = ([string]$Urls.api).TrimEnd('/')
     $resolvedGatewayUrl = ([string]$Urls.asset_gateway).TrimEnd('/')
     $resolvedWebUrl = ([string]$Urls.web).TrimEnd('/')
-    $resolvedGitnexusUrl = if ([string]::IsNullOrWhiteSpace([string]$Urls.gitnexus)) {
-        $gitnexusUrl.TrimEnd('/')
-    }
-    else {
-        ([string]$Urls.gitnexus).TrimEnd('/')
-    }
     $processes = @(
         foreach ($record in $Records) {
             [pscustomobject]@{
@@ -277,7 +277,7 @@ function Get-HubRuntimeStatus {
         }
     )
     $expectedWebProcess = if ($Mode -eq 'dev') { 'web-dev' } else { 'web' }
-    $requiredNames = @('api', 'worker', 'asset-gateway', 'gitnexus-serve', $expectedWebProcess)
+    $requiredNames = @('api', 'worker', 'asset-gateway', $expectedWebProcess)
     if (@($Records | Where-Object { [string]$_.name -eq 'wsl-keepalive' }).Count -gt 0) {
         $requiredNames += 'wsl-keepalive'
     }
@@ -289,14 +289,16 @@ function Get-HubRuntimeStatus {
     $missingProcesses = @($requiredNames | Where-Object { $_ -notin $runningNames })
     $services = @(
         Invoke-HubHealthProbe -Name 'api' -Url "$resolvedApiUrl/api/health"
-        Invoke-HubHealthProbe -Name 'asset-gateway' -Url "$resolvedGatewayUrl/health"
+        Invoke-HubHealthProbe `
+            -Name 'asset-gateway' `
+            -Url "$resolvedGatewayUrl/health" `
+            -AllowDegradedWithReadyDependencies
         if ($Mode -eq 'dev') {
             Invoke-HubHealthProbe -Name 'web-dev' -Url "$resolvedWebUrl/" -AnySuccessfulResponse
         }
         else {
             Invoke-HubHealthProbe -Name 'web' -Url "$resolvedWebUrl/health"
         }
-        Invoke-HubHealthProbe -Name 'gitnexus-serve' -Url "$resolvedGitnexusUrl/" -AnySuccessfulResponse
     )
     $ready = (
         $Records.Count -gt 0 -and
@@ -351,7 +353,6 @@ function Write-HubRuntimeStatus {
     Write-Host "  API docs:     $($Runtime.urls.api_docs)"
     Write-Host "  API health:   $($Runtime.urls.api_health)"
     Write-Host "  Asset health: $($Runtime.urls.asset_gateway_health)"
-    Write-Host "  GitNexus:     $($Runtime.urls.gitnexus)"
 }
 
 function Wait-HubReadiness {
@@ -457,7 +458,6 @@ if ($Command -in @('start', 'dev')) {
         'api',
         'worker',
         'asset-gateway',
-        'gitnexus-serve',
         $(if ($Command -eq 'start') { 'web' } else { 'web-dev' })
     )
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -520,17 +520,6 @@ if ($Command -in @('start', 'dev')) {
             exit 2
         }
     }
-    $gitnexusCommand = Get-Command gitnexus -ErrorAction SilentlyContinue
-    if (-not $gitnexusCommand) {
-        Write-Error 'GitNexus CLI was not found. Run `npm install -g gitnexus` first.'
-        exit 2
-    }
-    $gitnexusLauncher = Get-Command powershell -ErrorAction SilentlyContinue
-    if (-not $gitnexusLauncher) {
-        Write-Error 'PowerShell was not found on PATH; cannot launch the GitNexus CLI shim.'
-        exit 2
-    }
-
     if ([string]::IsNullOrWhiteSpace($env:HUB_GATEWAY_SECRET)) {
         $secretBytes = New-Object byte[] 48
         $randomGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -568,7 +557,6 @@ if ($Command -in @('start', 'dev')) {
     $env:HUB_ASSET_GATEWAY_PORT = [string]$assetGatewayPort
     $env:HUB_WEB_ORIGIN = $webUrl
     $env:HUB_GATEWAY_ORIGIN = $assetGatewayUrl
-    $env:HUB_GITNEXUS_URL = $gitnexusUrl
 
     $started = @()
     try {
@@ -608,21 +596,6 @@ if ($Command -in @('start', 'dev')) {
             -Name 'asset-gateway' `
             -FilePath $pythonPath `
             -ArgumentList @('-m', 'apps.asset_gateway.main')
-        Save-HubProcessState -Mode $Command -Processes $started
-
-        $started += Start-HubProcess `
-            -Name 'gitnexus-serve' `
-            -FilePath $gitnexusLauncher.Source `
-            -ArgumentList @(
-                '-NoProfile',
-                '-File',
-                $gitnexusCommand.Source,
-                'serve',
-                '--host',
-                '127.0.0.1',
-                '--port',
-                [string]$gitnexusPort
-            )
         Save-HubProcessState -Mode $Command -Processes $started
 
         if ($Command -eq 'start') {

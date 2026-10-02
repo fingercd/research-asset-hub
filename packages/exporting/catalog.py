@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,6 +28,10 @@ from packages.domain.models import (
     SourceRecord,
     SourceRecordAsset,
     SourceRecordVersion,
+)
+from packages.domain.serving_scope import (
+    active_representation_clause,
+    active_source_clause,
 )
 from packages.domain_portals import DomainPortalLoadError, load_domain_portal
 
@@ -172,7 +178,15 @@ def _collect_documents(session: Session) -> list[dict[str, Any]]:
     }
     links_by_asset: dict[Any, list[SourceRecordAsset]] = defaultdict(list)
     for source_link in session.scalars(
-        select(SourceRecordAsset).where(SourceRecordAsset.deleted_at.is_(None))
+        select(SourceRecordAsset)
+        .join(
+            SourceRecord,
+            SourceRecordAsset.source_record_id == SourceRecord.id,
+        )
+        .where(
+            SourceRecordAsset.deleted_at.is_(None),
+            active_source_clause(SourceRecord.source_id),
+        )
     ):
         links_by_asset[source_link.asset_id].append(source_link)
     identifiers_by_asset: dict[Any, list[ExternalIdentifierModel]] = defaultdict(list)
@@ -180,7 +194,10 @@ def _collect_documents(session: Session) -> list[dict[str, Any]]:
         identifiers_by_asset[identifier.asset_id].append(identifier)
     representations_by_asset: dict[Any, list[Representation]] = defaultdict(list)
     for representation in session.scalars(
-        select(Representation).where(Representation.deleted_at.is_(None))
+        select(Representation).where(
+            Representation.deleted_at.is_(None),
+            active_representation_clause(),
+        )
     ):
         representations_by_asset[representation.asset_id].append(representation)
     relations_by_asset: dict[Any, list[Relation]] = defaultdict(list)
@@ -401,6 +418,53 @@ def _is_domain_overview(document: dict[str, Any]) -> bool:
     )
 
 
+def _is_asset_directory(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    try:
+        UUID(path.name)
+    except ValueError:
+        return False
+    return True
+
+
+def _prune_stale_asset_directories(
+    destination: Path,
+    documents: list[dict[str, Any]],
+) -> int:
+    expected = {str(item["asset"]["asset_id"]) for item in documents}
+    expected_by_domain: dict[str, set[str]] = defaultdict(set)
+    for document in documents:
+        asset_id = str(document["asset"]["asset_id"])
+        for domain in document["asset"]["domains"] or ["unclassified"]:
+            expected_by_domain[str(domain)].add(asset_id)
+    stale: list[Path] = []
+    assets_root = destination / "assets"
+    if assets_root.is_dir():
+        stale.extend(
+            path
+            for path in assets_root.iterdir()
+            if _is_asset_directory(path) and path.name not in expected
+        )
+    domains_root = destination / "by-domain"
+    if domains_root.is_dir():
+        for domain_root in domains_root.iterdir():
+            if not domain_root.is_dir():
+                continue
+            domain_expected = expected_by_domain.get(domain_root.name, set())
+            stale.extend(
+                path
+                for path in domain_root.iterdir()
+                if _is_asset_directory(path) and path.name not in domain_expected
+            )
+    destination_resolved = destination.resolve()
+    for path in stale:
+        if destination_resolved not in path.resolve().parents:
+            raise RuntimeError(f"stale export path escaped destination: {path}")
+        shutil.rmtree(path)
+    return len(stale)
+
+
 def _domain_payload(
     slug: str,
     documents: list[dict[str, Any]],
@@ -467,6 +531,7 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
 
     generated_at = datetime.now(UTC)
     documents = _collect_documents(session)
+    stale_directories_removed = _prune_stale_asset_directories(destination, documents)
     written: list[Path] = []
     lines: list[str] = []
     crate_parts: list[dict[str, str]] = []
@@ -569,6 +634,7 @@ def export_operational_catalog(session: Session, destination: Path) -> dict[str,
         "domains": "domains.json",
         "file_count": len(written) + 1,
         "source_binaries_copied": 0,
+        "stale_directories_removed": stale_directories_removed,
         "catalog": "catalog.jsonl",
         "ro_crate": "ro-crate-metadata.json",
     }

@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
 from apps.api.config import ApiSettings
 from apps.api.database import DatabaseManager
@@ -35,8 +37,54 @@ from packages.domain.models import (
     Representation,
     Source,
 )
-from packages.extraction import ExtractionPipeline, ExtractionStatus
+from packages.domain.serving_scope import (
+    active_representation_clause,
+    representation_serving_status,
+    retired_representation_ids,
+)
 from packages.indexing import MeilisearchIndex, SearchDocument
+
+if TYPE_CHECKING:
+    from packages.extraction import ExtractionPipeline
+
+_MAX_MEILI_DOCUMENT_TEXT_CHARS = 250_000
+_MAX_MEILI_BATCH_BYTES = 4 * 1024 * 1024
+_MAX_MEILI_BATCH_DOCUMENTS = 64
+
+
+def _meili_document_batches(
+    documents: list[SearchDocument],
+) -> list[list[SearchDocument]]:
+    """Bound worker writes below Meilisearch's HTTP payload limit."""
+
+    batches: list[list[SearchDocument]] = []
+    current: list[SearchDocument] = []
+    current_bytes = 0
+    for document in documents:
+        bounded = (
+            replace(document, text=document.text[:_MAX_MEILI_DOCUMENT_TEXT_CHARS])
+            if len(document.text) > _MAX_MEILI_DOCUMENT_TEXT_CHARS
+            else document
+        )
+        estimated_bytes = (
+            len(bounded.text.encode("utf-8"))
+            + len(bounded.title.encode("utf-8"))
+            + len(json.dumps(bounded.metadata, ensure_ascii=False).encode("utf-8"))
+            + sum(len(term.encode("utf-8")) for term in bounded.exact_terms)
+            + 1024
+        )
+        if current and (
+            len(current) >= _MAX_MEILI_BATCH_DOCUMENTS
+            or current_bytes + estimated_bytes > _MAX_MEILI_BATCH_BYTES
+        ):
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(bounded)
+        current_bytes += estimated_bytes
+    if current:
+        batches.append(current)
+    return batches
 
 JobHandler = Callable[[dict[str, object]], dict[str, object]]
 _ANCHOR_KIND = {
@@ -162,9 +210,17 @@ class RuntimeHandlers:
         self.database = database
         self.settings = settings
         self.registry = registry
-        self.extraction_pipeline = extraction_pipeline or ExtractionPipeline(
-            enable_tree_sitter=settings.worker_tree_sitter_enabled
-        )
+        self._extraction_pipeline = extraction_pipeline
+
+    @property
+    def extraction_pipeline(self) -> ExtractionPipeline:
+        if self._extraction_pipeline is None:
+            from packages.extraction import ExtractionPipeline
+
+            self._extraction_pipeline = ExtractionPipeline(
+                enable_tree_sitter=self.settings.worker_tree_sitter_enabled
+            )
+        return self._extraction_pipeline
 
     def dispatch(
         self,
@@ -190,7 +246,39 @@ class RuntimeHandlers:
         runtime_parameters = dict(parameters)
         if job_id is not None:
             runtime_parameters["_job_id"] = str(job_id)
-        return handler(runtime_parameters)
+        result = handler(runtime_parameters)
+        if result.get("status") == "skipped_retired" and job_id is not None:
+            with self.database.session() as session:
+                job = session.get(Job, job_id, with_for_update=True)
+                if job is not None:
+                    job.cancel_requested = True
+                    job.error = {
+                        "type": "RepresentationRetired",
+                        "detail": "Job skipped because its source is retired.",
+                    }
+        return result
+
+    def _retirement_result(
+        self,
+        representation_id: UUID,
+    ) -> tuple[Representation | None, dict[str, object] | None]:
+        with self.database.session() as session:
+            representation = session.get(Representation, representation_id)
+            if representation is None or representation.deleted_at is not None:
+                return representation, None
+            status = representation_serving_status(session, representation)
+            if status.active:
+                session.expunge(representation)
+                return representation, None
+            return representation, {
+                "status": "skipped_retired",
+                "representation_id": str(representation.id),
+                "successor_representation_id": (
+                    str(status.successor_representation_id)
+                    if status.successor_representation_id is not None
+                    else None
+                ),
+            }
 
     def _representation_paths(
         self,
@@ -262,7 +350,12 @@ class RuntimeHandlers:
         parameters: dict[str, object],
     ) -> dict[str, object]:
         representation_id = _uuid_parameter(parameters, "representation_id")
+        _, retired_result = self._retirement_result(representation_id)
+        if retired_result is not None:
+            return retired_result
         representation, base_path, paths = self._representation_paths(representation_id)
+        from packages.extraction import ExtractionStatus
+
         with self.database.session() as session:
             activity = Activity(
                 job_id=(
@@ -456,24 +549,27 @@ class RuntimeHandlers:
                     "ocr_states": sorted({result.ocr_state.value for result in successful}),
                 }
                 stored_activity.finished_at = datetime.now(UTC)
-                dedupe_key = f"representation:{representation.id}:{representation_hash}:index"
-                existing = session.scalar(
-                    select(Job).where(
-                        Job.job_type == "index_representation",
-                        Job.dedupe_key == dedupe_key,
+                if representation_serving_status(session, representation).active:
+                    dedupe_key = (
+                        f"representation:{representation.id}:{representation_hash}:index"
                     )
-                )
-                if existing is None:
-                    session.add(
-                        Job(
-                            job_type="index_representation",
-                            parameters={
-                                "representation_id": str(representation.id),
-                            },
-                            status=JobStatus.PENDING.value,
-                            dedupe_key=dedupe_key,
+                    existing = session.scalar(
+                        select(Job).where(
+                            Job.job_type == "index_representation",
+                            Job.dedupe_key == dedupe_key,
                         )
                     )
+                    if existing is None:
+                        session.add(
+                            Job(
+                                job_type="index_representation",
+                                parameters={
+                                    "representation_id": str(representation.id),
+                                },
+                                status=JobStatus.PENDING.value,
+                                dedupe_key=dedupe_key,
+                            )
+                        )
             return {
                 "status": status.value,
                 "file_count": len(results),
@@ -502,7 +598,15 @@ class RuntimeHandlers:
             chunks = list(
                 session.scalars(
                     select(DocumentChunk)
+                    .join(
+                        Representation,
+                        DocumentChunk.representation_id == Representation.id,
+                    )
                     .where(DocumentChunk.asset_id == asset_id)
+                    .where(
+                        Representation.deleted_at.is_(None),
+                        active_representation_clause(),
+                    )
                     .order_by(DocumentChunk.chunk_index)
                 ).all()
             )
@@ -553,9 +657,25 @@ class RuntimeHandlers:
         asset_id: UUID,
         documents: list[SearchDocument],
     ) -> dict[str, object]:
+        expected_ids = {document.document_id for document in documents}
+        with self.database.session() as session:
+            all_chunk_ids = set(
+                session.scalars(
+                    select(DocumentChunk.id).where(DocumentChunk.asset_id == asset_id)
+                ).all()
+            )
+        stale_document_ids = sorted(
+            f"chunk:{chunk_id}"
+            for chunk_id in all_chunk_ids
+            if f"chunk:{chunk_id}" not in expected_ids
+        )
         transport = _MeiliWriteTransport(self.settings)
         try:
-            MeilisearchIndex(transport).upsert(documents)
+            index = MeilisearchIndex(transport)
+            if stale_document_ids:
+                index.delete(stale_document_ids)
+            for batch in _meili_document_batches(documents):
+                index.upsert(batch)
         finally:
             transport.close()
         digest = hashlib.sha256(
@@ -564,6 +684,15 @@ class RuntimeHandlers:
             ).encode("utf-8")
         ).hexdigest()
         with self.database.session() as session:
+            for previous in session.scalars(
+                select(IndexState).where(
+                    IndexState.index_name == "documents",
+                    IndexState.entity_type == "asset",
+                    IndexState.entity_id == asset_id,
+                    IndexState.status == IndexStatus.READY.value,
+                )
+            ):
+                previous.status = IndexStatus.STALE.value
             state = session.scalar(
                 select(IndexState).where(
                     IndexState.index_name == "documents",
@@ -587,7 +716,11 @@ class RuntimeHandlers:
             state.provider = "meilisearch"
             state.error = None
             state.indexed_at = datetime.now(UTC)
-        return {"indexed_documents": len(documents), "content_digest": digest}
+        return {
+            "indexed_documents": len(documents),
+            "stale_documents_removed": len(stale_document_ids),
+            "content_digest": digest,
+        }
 
     def index_representation(
         self,
@@ -599,10 +732,24 @@ class RuntimeHandlers:
             if representation is None or representation.deleted_at is not None:
                 raise FileNotFoundError(f"Representation {representation_id} does not exist.")
             asset_id = representation.asset_id
-        return self._upsert_documents(
+            serving_status = representation_serving_status(session, representation)
+        result = self._upsert_documents(
             asset_id,
             self._search_documents_for_asset(asset_id),
         )
+        if not serving_status.active:
+            result.update(
+                {
+                    "status": "skipped_retired",
+                    "representation_id": str(representation_id),
+                    "successor_representation_id": (
+                        str(serving_status.successor_representation_id)
+                        if serving_status.successor_representation_id is not None
+                        else None
+                    ),
+                }
+            )
+        return result
 
     def index_asset(self, parameters: dict[str, object]) -> dict[str, object]:
         asset_id = _uuid_parameter(parameters, "asset_id")
@@ -644,6 +791,7 @@ def dispatch_outbox_once(
 ) -> bool:
     now = datetime.now(UTC)
     with database.session() as session:
+        retired_jobs_cancelled = cancel_retired_pending_jobs(session, now=now)
         event = session.scalar(
             select(OutboxEvent)
             .where(
@@ -655,7 +803,7 @@ def dispatch_outbox_once(
             .limit(1)
         )
         if event is None:
-            return False
+            return retired_jobs_cancelled > 0
         event.status = OutboxStatus.PROCESSING.value
         event.locked_by = worker_id
         event.locked_until = now
@@ -710,3 +858,94 @@ def dispatch_outbox_once(
         event.locked_until = None
         event.error = None
         return True
+
+
+def cancel_retired_pending_jobs(
+    session: Session,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Cancel queued representation work and enqueue active-index cleanup.
+
+    The worker calls this before claiming work. Historical extraction/index jobs
+    remain auditable, while a separate asset-level rebuild removes any stale
+    retired chunks from the serving index.
+    """
+
+    current = now or datetime.now(UTC)
+    candidates = list(
+        session.scalars(
+            select(Job)
+            .where(
+                Job.status == JobStatus.PENDING.value,
+                Job.cancel_requested.is_(False),
+                Job.job_type.in_(
+                    {
+                        "extract_representation",
+                        "representation.extract",
+                        "index_representation",
+                        "representation.index",
+                    }
+                ),
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+    )
+    representation_by_job: dict[UUID, UUID] = {}
+    for job in candidates:
+        raw_id = dict(job.parameters or {}).get("representation_id")
+        try:
+            representation_by_job[job.id] = UUID(str(raw_id))
+        except (TypeError, ValueError):
+            continue
+    retired_ids = retired_representation_ids(
+        session,
+        set(representation_by_job.values()),
+    )
+    if not retired_ids:
+        return 0
+    asset_by_representation: dict[UUID, UUID] = {
+        representation_id: asset_id
+        for representation_id, asset_id in session.execute(
+            select(Representation.id, Representation.asset_id).where(
+                Representation.id.in_(retired_ids)
+            )
+        )
+    }
+    cancelled = 0
+    cleanup_asset_ids: set[UUID] = set()
+    for job in candidates:
+        representation_id = representation_by_job.get(job.id)
+        if representation_id not in retired_ids:
+            continue
+        job.cancel_requested = True
+        job.status = JobStatus.CANCELLED.value
+        job.finished_at = current
+        job.error = {
+            "type": "RepresentationRetired",
+            "detail": "Pending job cancelled because its source is retired.",
+        }
+        cancelled += 1
+        asset_id = asset_by_representation.get(representation_id)
+        if asset_id is not None:
+            cleanup_asset_ids.add(asset_id)
+    for asset_id in sorted(cleanup_asset_ids, key=str):
+        dedupe_key = f"retirement-cleanup:asset:{asset_id}"
+        existing = session.scalar(
+            select(Job.id).where(
+                Job.job_type == "index_asset",
+                Job.dedupe_key == dedupe_key,
+            )
+        )
+        if existing is None:
+            session.add(
+                Job(
+                    job_type="index_asset",
+                    parameters={"asset_id": str(asset_id)},
+                    status=JobStatus.PENDING.value,
+                    dedupe_key=dedupe_key,
+                )
+            )
+    if cancelled:
+        session.flush()
+    return cancelled

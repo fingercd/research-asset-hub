@@ -49,6 +49,33 @@ def _newest(paths: list[Path]) -> Path | None:
     return max(existing, key=lambda path: path.stat().st_mtime_ns) if existing else None
 
 
+def _discover_index_report(validation_directory: Path) -> Path | None:
+    """Choose the newest scoped index report, including dated report names.
+
+    The consolidation runner writes dated artifacts (for example,
+    ``2026-08-31-index-build-final.json``), while older runs used the
+    ``index-build*.json`` prefix.  Looking only at the latter can silently
+    publish a stale, code-inclusive report after the no-code serving index has
+    been rebuilt.
+    """
+
+    candidates = {
+        *validation_directory.glob("index-build*.json"),
+        *validation_directory.glob("*index-build*.json"),
+    }
+    scoped: list[Path] = []
+    for path in candidates:
+        try:
+            payload = load_json_report(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("scope") == "serving_active" and (
+            "keyword_counts_after" in payload or "keyword_counts" in payload
+        ):
+            scoped.append(path)
+    return _newest(scoped) or _newest(list(validation_directory.glob("index-build*.json")))
+
+
 def _discover_reports(
     validation_directory: Path,
     *,
@@ -73,7 +100,7 @@ def _discover_reports(
         ),
         "search_evaluation": validation_directory / "search-evaluation.json",
         "index_build": (
-            _newest(list(validation_directory.glob("index-build*.json")))
+            _discover_index_report(validation_directory)
         ),
         "restore_rehearsal": (
             restore_report

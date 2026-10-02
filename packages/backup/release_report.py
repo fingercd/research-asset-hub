@@ -9,6 +9,8 @@ private document text, credentials, connection strings or source-root paths.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 from collections import Counter
@@ -17,6 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
+from uuid import UUID
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -30,6 +33,12 @@ from packages.domain.models import (
     Representation,
     Source,
     SourceRecord,
+    SourceRetirement,
+    SourceRetirementMountMap,
+    SourceRetirementRecordMap,
+    SourceRetirementRepresentationMap,
+    SourceRetirementRollback,
+    SourceRetirementSuccessor,
 )
 from packages.domain.platform_models import (
     Activity,
@@ -47,8 +56,10 @@ from packages.domain.platform_models import (
     SyncRun,
     Tombstone,
 )
+from packages.domain.serving_scope import active_representation_clause
 
 GateStatus = Literal["pass", "warn", "fail"]
+ServingScope = Literal["serving_active", "all"]
 _FORMAL_IMPORT_SCHEMA_VERSION = 2
 _FORMAL_IMPORT_IDEMPOTENCY_COUNTERS = (
     "source_records_created",
@@ -107,7 +118,15 @@ _REDACTED_KEYS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class LegacyReference:
-    """The accepted six-domain v1 scope, used as a floor rather than a ceiling."""
+    """The accepted six-domain v1 scope, used as a floor rather than a ceiling.
+
+    ``known_missing_representations`` is intentionally retained as the
+    historical missing-item baseline.  Unlike the asset-count fields (which
+    are lower bounds), it is a *ceiling* for the current release: resolving a
+    previously missing representation is valid progress, while introducing a
+    new missing representation is a regression.  Keeping the historical value
+    here preserves an auditable comparison with the 2026-07 baseline.
+    """
 
     domain_count: int = 6
     source_records: int = 428
@@ -131,6 +150,36 @@ class ReleaseReportInputs:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _normalize_scope(value: str) -> ServingScope:
+    if value == "serving_active":
+        return "serving_active"
+    if value == "all":
+        return "all"
+    raise ValueError("scope must be 'serving_active' or 'all'")
+
+
+def _canonical_payload_digest(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _path_is_below(path_value: str, root: Path | None) -> bool:
+    if root is None:
+        return False
+    try:
+        Path(path_value).expanduser().resolve(strict=False).relative_to(
+            root.expanduser().resolve(strict=False)
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _count_by(values: Sequence[str]) -> dict[str, int]:
@@ -226,8 +275,277 @@ def _grouped_count(
     }
 
 
-def collect_database_snapshot(session: Session) -> dict[str, Any]:
+def _chunk_grouped_count(
+    session: Session,
+    column: Any,
+    representation_ids: set[Any],
+) -> dict[str, int]:
+    rows = session.execute(
+        select(column, func.count())
+        .select_from(DocumentChunk)
+        .where(DocumentChunk.representation_id.in_(representation_ids))
+        .group_by(column)
+    ).all()
+    return {
+        str(key): int(count)
+        for key, count in sorted(rows, key=lambda row: str(row[0]))
+    }
+
+
+def _retirement_ledger_snapshot(
+    session: Session,
+    *,
+    core_root: Path | None,
+) -> dict[str, Any]:
+    retirements = list(
+        session.scalars(select(SourceRetirement).order_by(SourceRetirement.id)).all()
+    )
+    if not retirements:
+        return {
+            "status": "passed",
+            "total": 0,
+            "active": 0,
+            "rolled_back": 0,
+            "invalid": 0,
+            "items": [],
+        }
+
+    retirement_ids = {item.id for item in retirements}
+    rollback_ids = set(
+        session.scalars(
+            select(SourceRetirementRollback.retirement_id).where(
+                SourceRetirementRollback.retirement_id.in_(retirement_ids)
+            )
+        ).all()
+    )
+    active_retired_source_ids = {
+        item.source_id for item in retirements if item.id not in rollback_ids
+    }
+    sources = {
+        item.id: item
+        for item in session.scalars(select(Source)).all()
+    }
+    backups = {
+        item.id: item
+        for item in session.scalars(
+            select(BackupRun).where(
+                BackupRun.id.in_({item.backup_id for item in retirements})
+            )
+        ).all()
+    }
+    record_maps: dict[Any, list[SourceRetirementRecordMap]] = {}
+    representation_maps: dict[Any, list[SourceRetirementRepresentationMap]] = {}
+    mount_maps: dict[Any, list[SourceRetirementMountMap]] = {}
+    successors: dict[Any, list[SourceRetirementSuccessor]] = {}
+    for record_map in session.scalars(
+        select(SourceRetirementRecordMap).where(
+            SourceRetirementRecordMap.retirement_id.in_(retirement_ids)
+        )
+    ):
+        record_maps.setdefault(record_map.retirement_id, []).append(record_map)
+    for representation_map in session.scalars(
+        select(SourceRetirementRepresentationMap).where(
+            SourceRetirementRepresentationMap.retirement_id.in_(retirement_ids)
+        )
+    ):
+        representation_maps.setdefault(
+            representation_map.retirement_id, []
+        ).append(representation_map)
+    for mount_map in session.scalars(
+        select(SourceRetirementMountMap).where(
+            SourceRetirementMountMap.retirement_id.in_(retirement_ids)
+        )
+    ):
+        mount_maps.setdefault(mount_map.retirement_id, []).append(mount_map)
+    for successor in session.scalars(
+        select(SourceRetirementSuccessor).where(
+            SourceRetirementSuccessor.retirement_id.in_(retirement_ids)
+        )
+    ):
+        successors.setdefault(successor.retirement_id, []).append(successor)
+
+    items: list[dict[str, Any]] = []
+    for retirement in retirements:
+        payload = retirement.payload if isinstance(retirement.payload, Mapping) else {}
+        active = retirement.id not in rollback_ids
+        predecessor = sources.get(retirement.source_id)
+        backup = backups.get(retirement.backup_id)
+        payload_groups = {
+            "record_mappings": payload.get("record_mappings"),
+            "representation_mappings": payload.get("representation_mappings"),
+            "mount_mappings": payload.get("mount_mappings"),
+            "successors": payload.get("successors"),
+        }
+        payload_counts = {
+            key: len(value) if isinstance(value, list) else -1
+            for key, value in payload_groups.items()
+        }
+        ledger_counts = {
+            "record_mappings": len(record_maps.get(retirement.id, [])),
+            "representation_mappings": len(
+                representation_maps.get(retirement.id, [])
+            ),
+            "mount_mappings": len(mount_maps.get(retirement.id, [])),
+            "successors": len(successors.get(retirement.id, [])),
+        }
+        payload_identifiers = {
+            "record_mappings": {
+                str(item.get("retired_source_record_id"))
+                for item in (payload_groups["record_mappings"] or [])
+                if isinstance(item, Mapping)
+            },
+            "representation_mappings": {
+                str(item.get("retired_representation_id"))
+                for item in (payload_groups["representation_mappings"] or [])
+                if isinstance(item, Mapping)
+            },
+            "mount_mappings": {
+                str(item.get("retired_mount_id"))
+                for item in (payload_groups["mount_mappings"] or [])
+                if isinstance(item, Mapping)
+            },
+            "successors": {
+                str(item.get("source_id"))
+                for item in (payload_groups["successors"] or [])
+                if isinstance(item, Mapping)
+            },
+        }
+        ledger_identifiers = {
+            "record_mappings": {
+                str(item.retired_source_record_id)
+                for item in record_maps.get(retirement.id, [])
+            },
+            "representation_mappings": {
+                str(item.retired_representation_id)
+                for item in representation_maps.get(retirement.id, [])
+            },
+            "mount_mappings": {
+                str(item.retired_mount_id)
+                for item in mount_maps.get(retirement.id, [])
+            },
+            "successors": {
+                str(item.successor_source_id)
+                for item in successors.get(retirement.id, [])
+            },
+        }
+        coverage_ok = (
+            payload_counts == ledger_counts
+            and payload_identifiers == ledger_identifiers
+        )
+        payload_digest_ok = (
+            bool(payload)
+            and _canonical_payload_digest(payload) == retirement.payload_digest
+        )
+        try:
+            signature_bytes = base64.b64decode(retirement.signature, validate=True)
+        except (binascii.Error, ValueError):
+            signature_bytes = b""
+        signature_metadata_ok = bool(
+            signature_bytes
+            and retirement.signature_algorithm
+            and retirement.signer_key_id
+        )
+        successor_rows = successors.get(retirement.id, [])
+        successor_sources = [
+            sources.get(item.successor_source_id) for item in successor_rows
+        ]
+        successor_core_paths_ok = all(
+            source is not None
+            and source.read_only
+            and _path_is_below(source.root_path, core_root)
+            for source in successor_sources
+        )
+        source_state_ok = predecessor is not None and (
+            (not predecessor.enabled)
+            if active
+            else (
+                predecessor.enabled
+                or retirement.source_id in active_retired_source_ids
+            )
+        )
+        backup_verified = bool(
+            backup is not None
+            and backup.status == "verified"
+        )
+        backup_restore_recorded = bool(
+            backup is not None and backup.restored_at is not None
+        )
+        digest_fields_ok = all(
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value.casefold())
+            for value in (
+                retirement.payload_digest,
+                retirement.frozen_manifest_sha256,
+                retirement.frozen_source_config_sha256,
+                retirement.record_set_digest,
+                retirement.representation_set_digest,
+                retirement.mount_set_digest,
+                retirement.collection_digest,
+            )
+        )
+        valid = all(
+            (
+                coverage_ok,
+                payload_digest_ok,
+                signature_metadata_ok,
+                successor_core_paths_ok,
+                source_state_ok,
+                backup_verified,
+                digest_fields_ok,
+            )
+        )
+        items.append(
+            {
+                "retirement_id": str(retirement.id),
+                "source_id": str(retirement.source_id),
+                "backup_id": str(retirement.backup_id),
+                "active": active,
+                "payload_digest": retirement.payload_digest,
+                "signature_algorithm": retirement.signature_algorithm,
+                "signer_key_id": retirement.signer_key_id,
+                "signature_sha256": (
+                    hashlib.sha256(signature_bytes).hexdigest()
+                    if signature_bytes
+                    else None
+                ),
+                "payload_counts": payload_counts,
+                "ledger_counts": ledger_counts,
+                "checks": {
+                    "ledger_coverage": coverage_ok,
+                    "payload_digest": payload_digest_ok,
+                    "signature_metadata": signature_metadata_ok,
+                    "digest_fields": digest_fields_ok,
+                    "predecessor_source_state": source_state_ok,
+                    "successor_core_paths": successor_core_paths_ok,
+                    "backup_verified": backup_verified,
+                    "backup_restore_recorded": backup_restore_recorded,
+                },
+                "valid": valid,
+            }
+        )
+    invalid = sum(not item["valid"] for item in items)
+    return {
+        "status": "passed" if invalid == 0 else "failed",
+        "total": len(items),
+        "active": sum(bool(item["active"]) for item in items),
+        "rolled_back": sum(not bool(item["active"]) for item in items),
+        "invalid": invalid,
+        "items": items,
+    }
+
+
+def collect_database_snapshot(
+    session: Session,
+    *,
+    scope: ServingScope = "serving_active",
+    core_root: Path | None = None,
+) -> dict[str, Any]:
     """Collect a privacy-safe operational snapshot from PostgreSQL or SQLite."""
+
+    normalized_scope = _normalize_scope(scope)
+    if core_root is None:
+        core_root = Path(__file__).resolve(strict=False).parents[3]
 
     assets = session.execute(
         select(Asset.id, Asset.asset_type, Asset.domain_slugs, Asset.deleted_at)
@@ -243,9 +561,11 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
 
     sources = session.execute(
         select(
+            Source.id,
             Source.alias,
             Source.read_only,
             Source.enabled,
+            Source.root_path,
             Source.config,
         ).order_by(Source.alias)
     ).all()
@@ -253,6 +573,7 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
         select(
             Representation.id,
             Representation.asset_id,
+            Representation.source_id,
             Representation.representation_type,
             Representation.availability,
             Representation.network_required,
@@ -262,7 +583,30 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             Representation.deleted_at,
         ).order_by(Representation.id)
     ).all()
-    active_representations = [row for row in representations if row.deleted_at is None]
+    registered_representations = [
+        row for row in representations if row.deleted_at is None
+    ]
+    serving_representation_ids = set(
+        session.scalars(
+            select(Representation.id).where(
+                Representation.deleted_at.is_(None),
+                active_representation_clause(),
+            )
+        ).all()
+    )
+    serving_representations = [
+        row for row in registered_representations
+        if row.id in serving_representation_ids
+    ]
+    retired_representations = [
+        row for row in registered_representations
+        if row.id not in serving_representation_ids
+    ]
+    active_representations = (
+        registered_representations
+        if normalized_scope == "all"
+        else serving_representations
+    )
     missing_representations = [
         {
             "representation_id": str(row.id),
@@ -333,6 +677,18 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             Job.error,
         ).order_by(Job.id)
     ).all()
+    retired_representation_id_strings = {
+        str(item.id) for item in retired_representations
+    }
+
+    def job_is_in_scope(row: Any) -> bool:
+        if normalized_scope == "all":
+            return True
+        parameters = row.parameters if isinstance(row.parameters, Mapping) else {}
+        representation_id = parameters.get("representation_id")
+        return str(representation_id) not in retired_representation_id_strings
+
+    scoped_jobs = [row for row in jobs if job_is_in_scope(row)]
     failed_jobs = [
         {
             "job_id": str(row.id),
@@ -343,7 +699,7 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             "entity_ids": _safe_parameter_ids(row.parameters),
             "error_code": _safe_error_code(row.error),
         }
-        for row in jobs
+        for row in scoped_jobs
         if row.status == "failed"
     ]
 
@@ -359,10 +715,17 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             Activity.result,
         )
     ).all()
+    scoped_activities = [
+        row
+        for row in activities
+        if normalized_scope == "all"
+        or row.representation_id is None
+        or row.representation_id in serving_representation_ids
+    ]
     ocr_states: Counter[str] = Counter()
     extraction_outcomes: Counter[str] = Counter()
     failed_activities: list[dict[str, Any]] = []
-    for row in activities:
+    for row in scoped_activities:
         if row.activity_type == "extraction":
             result = row.result if isinstance(row.result, Mapping) else {}
             extraction_outcomes[str(result.get("status") or row.status)] += 1
@@ -475,8 +838,39 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
     outbox_by_status = _grouped_count(session, OutboxEvent, OutboxEvent.status)
     source_outcomes = _grouped_count(session, SourceRecord, SourceRecord.outcome)
     reading_states = _grouped_count(session, ReadingState, ReadingState.status)
+    retirement_ledger = _retirement_ledger_snapshot(
+        session,
+        core_root=core_root,
+    )
+    retired_source_ids = {
+        item.source_id
+        for item in session.scalars(select(SourceRetirement)).all()
+        if item.id
+        not in set(
+            session.scalars(select(SourceRetirementRollback.retirement_id)).all()
+        )
+    }
+    source_record_scope: dict[UUID, int] = {
+        source_id: int(count)
+        for source_id, count in session.execute(
+            select(SourceRecord.source_id, func.count()).group_by(
+                SourceRecord.source_id
+            )
+        )
+    }
+    retired_source_records = 0
+    for source_id, count in source_record_scope.items():
+        if source_id in retired_source_ids:
+            retired_source_records += count
+    source_record_total = _scalar_count(session, SourceRecord)
 
     return {
+        "scope": normalized_scope,
+        "scope_counts": {
+            "registered_non_deleted": len(registered_representations),
+            "serving_active": len(serving_representations),
+            "retired_historical": len(retired_representations),
+        },
         "schema_revision": _schema_revision(session),
         "sources": {
             "count": len(sources),
@@ -493,6 +887,16 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
                 }
                 for row in sources
             ],
+            "scopes": {
+                "registered_non_deleted": len(sources),
+                "serving_active": sum(
+                    bool(row.enabled) and row.id not in retired_source_ids
+                    for row in sources
+                ),
+                "retired_historical": sum(
+                    row.id in retired_source_ids for row in sources
+                ),
+            },
         },
         "assets": {
             "total": len(assets),
@@ -503,10 +907,15 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             "domain_count": len(domains),
         },
         "source_records": {
-            "total": _scalar_count(session, SourceRecord),
+            "total": source_record_total,
             "versions": _scalar_count(session, SourceRecordVersion),
             "asset_links": _scalar_count(session, SourceRecordAsset),
             "by_outcome": source_outcomes,
+            "scopes": {
+                "registered_non_deleted": source_record_total,
+                "serving_active": source_record_total - retired_source_records,
+                "retired_historical": retired_source_records,
+            },
         },
         "representations": {
             "total": len(representations),
@@ -523,6 +932,11 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             ),
             "html_candidates": html_candidates,
             "missing": missing_representations,
+            "scopes": {
+                "registered_non_deleted": len(registered_representations),
+                "serving_active": len(serving_representations),
+                "retired_historical": len(retired_representations),
+            },
         },
         "relations": {
             "total": len(relations),
@@ -557,28 +971,45 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
             ),
         },
         "processing": {
-            "jobs_total": len(jobs),
-            "jobs_by_type": _count_by([row.job_type for row in jobs]),
-            "jobs_by_status": _count_by([row.status for row in jobs]),
+            "jobs_total": len(scoped_jobs),
+            "jobs_by_type": _count_by([row.job_type for row in scoped_jobs]),
+            "jobs_by_status": _count_by([row.status for row in scoped_jobs]),
             "extract_jobs_by_status": _count_by(
                 [
                     row.status
-                    for row in jobs
+                    for row in scoped_jobs
                     if row.job_type == "extract_representation"
                 ]
             ),
             "failed_jobs": failed_jobs,
-            "activities_total": len(activities),
-            "activities_by_status": _count_by([row.status for row in activities]),
+            "activities_total": len(scoped_activities),
+            "activities_by_status": _count_by(
+                [row.status for row in scoped_activities]
+            ),
             "extraction_outcomes": dict(sorted(extraction_outcomes.items())),
             "ocr_states": dict(sorted(ocr_states.items())),
             "failed_activities": failed_activities,
-            "chunks_total": _scalar_count(session, DocumentChunk),
-            "chunks_by_kind": _grouped_count(
-                session, DocumentChunk, DocumentChunk.chunk_kind
+            "chunks_total": int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(DocumentChunk)
+                    .where(
+                        DocumentChunk.representation_id.in_(
+                            set(item.id for item in active_representations)
+                        )
+                    )
+                )
+                or 0
             ),
-            "chunks_by_parser": _grouped_count(
-                session, DocumentChunk, DocumentChunk.parser_name
+            "chunks_by_kind": _chunk_grouped_count(
+                session,
+                DocumentChunk.chunk_kind,
+                {item.id for item in active_representations},
+            ),
+            "chunks_by_parser": _chunk_grouped_count(
+                session,
+                DocumentChunk.parser_name,
+                {item.id for item in active_representations},
             ),
         },
         "indexes": {
@@ -623,6 +1054,7 @@ def collect_database_snapshot(session: Session) -> dict[str, Any]:
                 for row in backup_runs
             ],
         },
+        "source_retirement": retirement_ledger,
         "audit": {
             "events_total": _scalar_count(session, AuditEvent),
             "by_action": audit_by_action,
@@ -759,6 +1191,7 @@ def _html_summary(document: Mapping[str, Any]) -> dict[str, Any]:
             )
     return {
         "status": document.get("status", "unavailable"),
+        "scope": document.get("scope", "serving_active"),
         "registered_candidates": _integer(selection, "registered_html_candidates"),
         "static_statuses": dict(_mapping(summary.get("static_statuses"))),
         "inferred_policies": dict(_mapping(summary.get("inferred_policies"))),
@@ -809,22 +1242,58 @@ def _source_integrity_summary(document: Mapping[str, Any]) -> dict[str, Any]:
             )
     return {
         "status": document.get("status", "unavailable"),
+        "scope": document.get("scope", "serving_active"),
         "read_only": document.get("read_only") is True,
         "counts": counts,
+        "population": {
+            str(key): int(value)
+            for key, value in _mapping(document.get("population")).items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        },
         "mismatches": mismatches,
     }
 
 
 def _index_summary(document: Mapping[str, Any]) -> dict[str, Any]:
+    selected = document.get("selected_indexes")
+    skipped = document.get("skipped_indexes")
+    raw_counts = dict(
+        _mapping(
+            document.get("keyword_counts_after")
+            or document.get("keyword_counts")
+        )
+    )
+    selected_names = {
+        str(value)
+        for value in selected
+    } if isinstance(selected, Sequence) and not isinstance(selected, (str, bytes)) else set()
+    skipped_names = {
+        str(value)
+        for value in skipped
+    } if isinstance(skipped, Sequence) and not isinstance(skipped, (str, bytes)) else set()
+    serving_counts = (
+        {key: value for key, value in raw_counts.items() if key in selected_names}
+        if selected_names
+        else raw_counts
+    )
     return {
         "status": document.get("status", "completed" if document else "unavailable"),
         "index_version": document.get("index_version"),
-        "keyword_counts": dict(
-            _mapping(
-                document.get("keyword_counts_after")
-                or document.get("keyword_counts")
-            )
+        "scope": document.get("scope", "serving_active"),
+        "selected_indexes": (
+            [str(value) for value in selected]
+            if isinstance(selected, Sequence) and not isinstance(selected, (str, bytes))
+            else []
         ),
+        "skipped_indexes": (
+            [str(value) for value in skipped]
+            if isinstance(skipped, Sequence) and not isinstance(skipped, (str, bytes))
+            else []
+        ),
+        "keyword_counts": serving_counts,
+        "skipped_keyword_counts": {
+            key: value for key, value in raw_counts.items() if key in skipped_names
+        },
     }
 
 
@@ -839,10 +1308,16 @@ def _restore_summary(document: Mapping[str, Any]) -> dict[str, Any]:
         "status": document.get("status", "unavailable"),
         "snapshot_id": document.get("snapshot_id"),
         "manifest_status": manifest.get("status"),
+        "manifest_data_scope": manifest.get("data_scope"),
+        "retirement_history_included": manifest.get(
+            "retirement_history_included"
+        ),
         "files_checked": _integer(manifest, "files_checked"),
         "database_status": validation.get("status"),
+        "retirement_ledger_equal": validation.get("retirement_ledger_equal"),
         "restored_counts": dict(_mapping(restored.get("counts"))),
         "index_rebuild_status": rebuild.get("status"),
+        "index_scope": rebuild.get("scope"),
         "fixed_query": {
             "keyword_exact_hit": _mapping(rebuild.get("fixed_query")).get(
                 "keyword_exact_hit"
@@ -920,6 +1395,8 @@ def build_release_report(
     integrations = _mapping(database.get("integrations"))
     audit = _mapping(database.get("audit"))
     sources = _mapping(database.get("sources"))
+    retirement = _mapping(database.get("source_retirement"))
+    retirement_total = _integer(retirement, "total")
 
     inventory = _inventory_summary(
         _mapping(reports.get("inventory_current")),
@@ -955,10 +1432,50 @@ def build_release_report(
         _gate(
             "migration-head",
             "数据库迁移版本",
-            "pass" if schema_revision == "0003_search_rag_integrations" else "fail",
+            "pass" if schema_revision == "0004_source_retirement" else "fail",
             observed=schema_revision,
-            expected="0003_search_rag_integrations",
+            expected="0004_source_retirement",
             detail="PostgreSQL 为正式验证目标；SQLite 仅用于测试。",
+        )
+    )
+    retirement_items = retirement.get("items")
+    normalized_retirement_items = (
+        list(retirement_items)
+        if isinstance(retirement_items, Sequence)
+        and not isinstance(retirement_items, (str, bytes))
+        else []
+    )
+    retirement_items_valid = (
+        len(normalized_retirement_items) == retirement_total
+        and all(
+            isinstance(item, Mapping) and item.get("valid") is True
+            for item in normalized_retirement_items
+        )
+    )
+    retirement_ok = retirement_total == 0 or (
+        retirement.get("status") == "passed"
+        and _integer(retirement, "invalid") == 0
+        and retirement_items_valid
+    )
+    gates.append(
+        _gate(
+            "source-retirement-ledger",
+            "来源退休账本与恢复前置条件",
+            "pass" if retirement_ok else "fail",
+            observed={
+                "total": retirement_total,
+                "active": _integer(retirement, "active"),
+                "rolled_back": _integer(retirement, "rolled_back"),
+                "invalid": _integer(retirement, "invalid"),
+                "status": retirement.get("status", "not-applicable"),
+            },
+            expected=(
+                "每个退休事件覆盖全部映射；payload/signature digest 有效；"
+                "旧 source 状态正确；successor 位于核心目录；备份已验证"
+            ),
+            detail=(
+                "恢复一致性由隔离恢复门禁验证；报告仅保留稳定 ID 和摘要，不暴露路径。"
+            ),
         )
     )
     source_read_only = bool(sources.get("all_read_only")) and bool(
@@ -1084,6 +1601,10 @@ def build_release_report(
         and _integer(integrity_counts, "mismatches") == 0
         and representations_seen == _integer(representations, "active")
         and integrity_accounted == representations_seen
+        and (
+            retirement_total == 0
+            or source_integrity.get("scope") == "serving_active"
+        )
     )
     gates.append(
         _gate(
@@ -1143,22 +1664,60 @@ def build_release_report(
             detail="新增领域记录包含在当前口径中。",
         )
     )
-    missing_ok = (
-        missing_count == _integer(
-            _mapping(representations.get("by_availability")), "missing"
-        )
-        and missing_count >= legacy.known_missing_representations
+    missing_by_availability = _integer(
+        _mapping(representations.get("by_availability")), "missing"
     )
-    gates.append(
-        _gate(
-            "missing-representations-visible",
-            "缺失表示显式可见",
-            "pass" if missing_ok else "fail",
-            observed=missing_count,
-            expected=f"清单计数一致且≥已知 {legacy.known_missing_representations} 项",
-            detail="每项只列稳定 ID、类型和净化后的登记相对路径。",
+    raw_integrity_missing = integrity_counts.get("missing_confirmed")
+    integrity_missing_count = (
+        int(raw_integrity_missing)
+        if isinstance(raw_integrity_missing, (int, float))
+        and not isinstance(raw_integrity_missing, bool)
+        else None
+    )
+    missing_counts_match = (
+        missing_count == missing_by_availability
+        and (
+            integrity_missing_count is None
+            or missing_count == integrity_missing_count
         )
     )
+    missing_regression_count = max(
+        missing_count - legacy.known_missing_representations,
+        0,
+    )
+    resolved_historical_missing_count = max(
+        legacy.known_missing_representations - missing_count,
+        0,
+    )
+    missing_ok = missing_counts_match and missing_regression_count == 0
+    missing_gate = _gate(
+        "missing-representations-visible",
+        "缺失表示显式可见",
+        "pass" if missing_ok else "fail",
+        observed=missing_count,
+        expected=(
+            "显式清单计数与数据库/来源完整性报告一致，且不得超过"
+            f"历史基线 {legacy.known_missing_representations} 项"
+            "（已解决项可减少）"
+        ),
+        detail=(
+            "每项只列稳定 ID、类型和净化后的登记相对路径；历史缺失的减少"
+            "记录为已解决，新增缺失仍阻止发布。"
+        ),
+    )
+    # Keep ``observed`` as the historical scalar for report consumers while
+    # exposing the cross-checks needed to audit a resolved or newly introduced
+    # missing item.  The explicit item list remains under ``failures`` below.
+    missing_gate["evidence"] = {
+        "listed": missing_count,
+        "database_by_availability": missing_by_availability,
+        "source_integrity_missing_confirmed": integrity_missing_count,
+        "historical_baseline": legacy.known_missing_representations,
+        "resolved_historical_count": resolved_historical_missing_count,
+        "new_missing_count": missing_regression_count,
+        "counts_match": missing_counts_match,
+    }
+    gates.append(missing_gate)
     graph_ok = (
         _integer(relations, "dangling") == 0
         and _integer(relations, "logical_duplicates") == 0
@@ -1169,7 +1728,7 @@ def build_release_report(
     gates.append(
         _gate(
             "graph-integrity",
-            "关系图谱完整性",
+            "资产关联完整性",
             "pass" if graph_ok else "fail",
             observed={
                 "dangling": _integer(relations, "dangling"),
@@ -1320,9 +1879,12 @@ def build_release_report(
         )
     )
     index_ready = bool(index_build) and bool(index_build.get("keyword_counts"))
+    index_scope_ok = (
+        retirement_total == 0 or index_build.get("scope") == "serving_active"
+    )
     if not index_ready and not index_build:
         index_status: GateStatus = "fail"
-    elif index_ready:
+    elif index_ready and index_scope_ok:
         index_status = "pass"
     else:
         index_status = "fail"
@@ -1409,6 +1971,15 @@ def build_release_report(
         and restore.get("index_rebuild_status") == "verified"
         and restore.get("cleanup_status") == "verified"
         and restore.get("active_resources_mutated") is False
+        and (
+            retirement_total == 0
+            or (
+                restore.get("retirement_ledger_equal") is True
+                and restore.get("index_scope") == "serving_active"
+                and restore.get("manifest_data_scope") == "all"
+                and restore.get("retirement_history_included") is True
+            )
+        )
     )
     gates.append(
         _gate(
@@ -1493,6 +2064,28 @@ def build_release_report(
             "fail": gate_counts["fail"],
         },
         "scope": {
+            "mode": database.get("scope", "serving_active"),
+            "registered_non_deleted": _integer(
+                _mapping(database.get("scope_counts")),
+                "registered_non_deleted",
+            ),
+            "serving_active": _integer(
+                _mapping(database.get("scope_counts")),
+                "serving_active",
+            ),
+            "retired_historical": _integer(
+                _mapping(database.get("scope_counts")),
+                "retired_historical",
+            ),
+            "populations": {
+                "sources": dict(_mapping(sources.get("scopes"))),
+                "source_records": dict(
+                    _mapping(source_records.get("scopes"))
+                ),
+                "representations": dict(
+                    _mapping(representations.get("scopes"))
+                ),
+            },
             "legacy_six_domain_reference": asdict(legacy),
             "current": {
                 "domains": domain_count,
@@ -1513,6 +2106,7 @@ def build_release_report(
             ),
         },
         "database": dict(database),
+        "source_retirement": dict(retirement),
         "source_integrity": inventory,
         "source_representation_integrity": source_integrity,
         "formal_import": {

@@ -46,6 +46,7 @@ def test_html_policy_application_is_audited_and_idempotent() -> None:
         first = apply_html_policy_inferences(session, [inference])
         session.commit()
     assert first["updated"] == 1
+    assert first["retired"] == 0
 
     with Session(engine) as session:
         stored = session.get(Representation, representation_id)

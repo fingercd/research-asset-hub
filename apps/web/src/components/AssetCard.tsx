@@ -1,4 +1,9 @@
-import { Check, GitCompareArrows } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  GitCompareArrows,
+  MoreHorizontal,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import { getAssetDomains, getReadingStatus, type Asset } from "../api/types";
 import { annotationSnippet, formatAuthors } from "../lib/format";
@@ -17,6 +22,8 @@ export function AssetCard({
   const compare = useCompare();
   const selected = compare.has(asset.id);
   const domains = getAssetDomains(asset);
+  const annotation = annotationSnippet(asset);
+  const isPaper = (asset.asset_type ?? asset.type) === "paper";
 
   return (
     <article className={`asset-card ${compact ? "is-compact" : ""}`}>
@@ -40,10 +47,12 @@ export function AssetCard({
             {asset.summary || asset.abstract || "暂无摘要。"}
           </p>
         )}
-        <p className="annotation-snippet">
-          <strong>批注：</strong>
-          {annotationSnippet(asset)}
-        </p>
+        {annotation !== "无" && (
+          <p className="annotation-snippet">
+            <strong>批注：</strong>
+            {annotation}
+          </p>
+        )}
         {!!domains.length && (
           <div className="tag-row" aria-label="所属领域">
             {domains.slice(0, 4).map((domain) => (
@@ -54,37 +63,66 @@ export function AssetCard({
           </div>
         )}
       </div>
-      <div className="asset-card-side">
-        <ReadingStatusControl
-          assetId={asset.id}
-          value={getReadingStatus(asset)}
-          compact
-        />
-        <CopyIdButton assetId={asset.id} />
-        <button
-          className={`compare-toggle ${selected ? "is-selected" : ""}`}
-          type="button"
-          aria-pressed={selected}
-          title={!selected && compare.assets.length >= 4 ? "最多对比 4 篇" : undefined}
-          onClick={() => compare.toggle(asset)}
-          disabled={!selected && compare.assets.length >= 4}
-        >
-          {selected ? (
-            <Check size={14} aria-hidden="true" />
-          ) : (
-            <GitCompareArrows size={14} aria-hidden="true" />
-          )}
-          {selected ? "已加入对比" : "加入对比"}
-        </button>
-      </div>
-      {!compact && (
-        <div className="asset-card-footer">
-          <RepresentationActions representations={asset.representations} />
-          {typeof asset.score === "number" && (
-            <span className="score">相关度 {Math.round(asset.score * 100)}%</span>
-          )}
+      <div className="asset-card-footer">
+        <div className="card-primary-actions">
+          <Link
+            className="button primary compact"
+            to={`/assets/${encodeURIComponent(asset.id)}`}
+          >
+            打开资料 <ArrowRight size={14} aria-hidden="true" />
+          </Link>
+          <details className="card-more-menu">
+            <summary className="button secondary compact" role="button">
+              <MoreHorizontal size={15} aria-hidden="true" /> 更多
+            </summary>
+            <div className="card-more-popover">
+              <div className="card-more-section">
+                <span>阅读状态</span>
+                <ReadingStatusControl
+                  assetId={asset.id}
+                  value={getReadingStatus(asset)}
+                  compact
+                />
+              </div>
+              {!compact && (
+                <div className="card-more-section">
+                  <span>打开内容</span>
+                  <RepresentationActions representations={asset.representations} />
+                </div>
+              )}
+              <div className="card-more-utilities">
+                <CopyIdButton assetId={asset.id} />
+                {isPaper && (
+                  <button
+                    className={`compare-toggle ${selected ? "is-selected" : ""}`}
+                    type="button"
+                    aria-pressed={selected}
+                    title={
+                      !selected && compare.assets.length >= 4
+                        ? "最多对比 4 篇"
+                        : undefined
+                    }
+                    onClick={() => compare.toggle(asset)}
+                    disabled={!selected && compare.assets.length >= 4}
+                  >
+                    {selected ? (
+                      <Check size={14} aria-hidden="true" />
+                    ) : (
+                      <GitCompareArrows size={14} aria-hidden="true" />
+                    )}
+                    {selected ? "已加入对比" : "加入对比"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </details>
         </div>
-      )}
+        {typeof asset.score === "number" && (
+          <span className="score">
+            {Math.round(asset.score * 100)}% 匹配
+          </span>
+        )}
+      </div>
     </article>
   );
 }

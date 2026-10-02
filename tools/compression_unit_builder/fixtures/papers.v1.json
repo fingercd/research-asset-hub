@@ -1,0 +1,15 @@
+{
+  "schema_version": "videollm.papers.v1",
+  "count": 1,
+  "papers": [
+    {
+      "id": "legacy-video-2025",
+      "title": "Legacy Video Compression",
+      "year": 2025,
+      "venue": "FixtureConf",
+      "pdf_local": "library/papers/legacy-video-2025/paper.pdf",
+      "analysis": "library/analysis/legacy-video-2025.md",
+      "analysis_html": "library/site/papers/legacy-video-2025.html"
+    }
+  ]
+}

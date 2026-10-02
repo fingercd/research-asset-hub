@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, cast
+from uuid import UUID
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -145,14 +147,19 @@ def test_filters_translate_consistently() -> None:
             "year_from": 2020,
             "year_to": 2025,
             "pdf": "true",
+            "asset_id": ["paper-1", "repository-1"],
         }
     )
     assert filters["domains"] == ["agent", "infra"]
     assert filters["asset_type"] == "paper"
     assert filters["has_pdf"] is True
+    assert filters["asset_id"] == ["paper-1", "repository-1"]
     meili = meilisearch_filter(filters)
     assert 'metadata.domains IN ["agent", "infra"]' in meili
     assert "metadata.year >= 2020" in meili
+    assert 'asset_id IN ["paper-1", "repository-1"]' in meili
+    assert not any("metadata.asset_id" in clause for clause in meili)
+    assert meilisearch_filter({"asset_id": []}) == ["asset_id IN []"]
 
 
 def test_keyword_search_protects_exact_identifier_and_filters() -> None:
@@ -184,6 +191,12 @@ def test_keyword_search_protects_exact_identifier_and_filters() -> None:
         filters={"domain": "agent"},
     )
     assert {hit.document.asset_id for hit in filtered.hits} == {exact.asset_id}
+
+    by_asset_id = service.search(
+        "10.1000/exact",
+        filters={"asset_id": semantic.asset_id},
+    )
+    assert {hit.document.asset_id for hit in by_asset_id.hits} == {semantic.asset_id}
 
 
 def test_keyword_search_can_expand_candidate_window_per_call() -> None:
@@ -299,6 +312,122 @@ class _MemorySuite:
         self.meili_transport = _MemoryTransport()
 
 
+class _GeneratedCatalog:
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.scopes: list[str] = []
+        self.max_generated_batch = 0
+
+    def iter_index_batches(
+        self,
+        _session: Session,
+        *,
+        index_name: str,
+        user_id: str,
+        scope: str,
+        batch_size: int,
+    ) -> Iterable[list[SearchDocument]]:
+        assert user_id == "local"
+        self.scopes.append(scope)
+        entity_type = {
+            "assets": "asset",
+            "documents": "chunk",
+            "code": "chunk",
+            "annotations": "annotation",
+        }[index_name]
+        identifier_offset = {
+            "assets": 0,
+            "documents": 10_000,
+            "code": 20_000,
+            "annotations": 30_000,
+        }[index_name]
+        for start in range(0, self.total, batch_size):
+            batch = [
+                SearchDocument(
+                    document_id=(
+                        f"{entity_type}:{UUID(int=identifier_offset + index + 1)}"
+                    ),
+                    asset_id=str(UUID(int=identifier_offset + index + 1)),
+                    kind=index_name.removesuffix("s"),
+                    title=f"Generated {index}",
+                    text="x" * 4096,
+                )
+                for index in range(start, min(start + batch_size, self.total))
+            ]
+            self.max_generated_batch = max(self.max_generated_batch, len(batch))
+            yield batch
+
+
+class _PagedRemoteTransport:
+    def __init__(self) -> None:
+        self.wait_for_tasks = False
+        self.documents: dict[str, set[str]] = {
+            name: set() for name in ("assets", "documents", "code", "annotations")
+        }
+        self.flush_calls = 0
+        self.fail_flush = False
+        self.max_remote_page = 0
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        del payload
+        assert method == "GET"
+        index_name = path.split("/", 3)[2]
+        query = path.partition("?")[2]
+        parameters = dict(part.split("=", 1) for part in query.split("&"))
+        limit = int(parameters["limit"])
+        offset = int(parameters["offset"])
+        values = sorted(self.documents[index_name])[offset : offset + limit]
+        self.max_remote_page = max(self.max_remote_page, len(values))
+        return {"results": [{"logical_document_id": value} for value in values]}
+
+    def flush_pending_tasks(self) -> None:
+        self.flush_calls += 1
+        if self.fail_flush:
+            raise RuntimeError("synthetic Meilisearch task failure")
+
+
+class _PagedRemoteIndex:
+    def __init__(self, transport: _PagedRemoteTransport, index_name: str) -> None:
+        self.transport = transport
+        self.index_name = index_name
+        self.max_upsert_batch = 0
+        self.max_delete_batch = 0
+
+    def upsert(self, documents: Sequence[SearchDocument]) -> None:
+        self.max_upsert_batch = max(self.max_upsert_batch, len(documents))
+        self.transport.documents[self.index_name].update(
+            document.document_id for document in documents
+        )
+
+    def delete(self, document_ids: Sequence[str]) -> None:
+        self.max_delete_batch = max(self.max_delete_batch, len(document_ids))
+        self.transport.documents[self.index_name].difference_update(document_ids)
+
+
+class _PagedRemoteAdmin:
+    def __init__(self, transport: _PagedRemoteTransport) -> None:
+        self.transport = transport
+
+    def document_count(self, index_name: str) -> int:
+        return len(self.transport.documents[index_name])
+
+
+class _PagedRemoteSuite:
+    def __init__(self) -> None:
+        self.meili_transport = _PagedRemoteTransport()
+        self.meili_admin = _PagedRemoteAdmin(self.meili_transport)
+        self.keyword_indexes = {
+            name: _PagedRemoteIndex(self.meili_transport, name)
+            for name in ("assets", "documents", "code", "annotations")
+        }
+
+
 def test_keyword_rebuild_writes_only_keyword_indexes() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -313,6 +442,38 @@ def test_keyword_rebuild_writes_only_keyword_indexes() -> None:
         "code": 1,
         "annotations": 1,
     }
+
+
+def test_keyword_rebuild_can_leave_code_index_untouched() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    memory_suite = _MemorySuite()
+    memory_suite.keyword_indexes["code"].upsert(
+        [
+            SearchDocument(
+                document_id="code:preserved",
+                asset_id="preserved",
+                kind="code",
+                title="Preserved code index",
+                text="not rebuilt",
+            )
+        ]
+    )
+    suite = cast(RemoteIndexSuite, memory_suite)
+    with Session(engine) as session:
+        _seed(session)
+        report = IndexBuilder(suite).rebuild_keywords(
+            session,
+            index_names=("assets", "documents", "annotations"),
+        )
+
+    assert report.selected_indexes == ("assets", "documents", "annotations")
+    assert report.skipped_indexes == ("code",)
+    assert report.keyword_counts_before["code"] == 1
+    assert report.keyword_counts_after["code"] == 1
+    assert report.keyword_documents_upserted["code"] == 0
+    assert report.stale_keyword_documents_removed["code"] == 0
+    assert set(memory_suite.keyword_indexes["code"].documents) == {"code:preserved"}
 
 
 def test_builder_is_idempotent_and_index_state_does_not_duplicate() -> None:
@@ -346,3 +507,99 @@ def test_builder_is_idempotent_and_index_state_does_not_duplicate() -> None:
         "code": 0,
         "annotations": 0,
     }
+
+
+def test_streaming_rebuild_bounds_batches_and_spools_stale_ids() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    suite = _PagedRemoteSuite()
+    catalog = _GeneratedCatalog(total=503)
+    stale_ids = {f"asset:{UUID(int=100_000 + index)}" for index in range(311)}
+    suite.meili_transport.documents["assets"].update(stale_ids)
+
+    with Session(engine) as session:
+        report = IndexBuilder(
+            cast(RemoteIndexSuite, suite),
+            write_batch_size=37,
+            task_flush_batch_count=3,
+            catalog=cast(PostgresIndexCatalog, catalog),
+        ).rebuild_keywords(session)
+        session.commit()
+        ready_states = session.scalar(
+            select(func.count())
+            .select_from(IndexState)
+            .where(IndexState.status == "ready")
+        )
+
+    assert report.keyword_documents_upserted == {
+        "assets": 503,
+        "documents": 503,
+        "code": 503,
+        "annotations": 503,
+    }
+    assert report.stale_keyword_documents_removed["assets"] == len(stale_ids)
+    assert report.keyword_counts_after == {
+        "assets": 503,
+        "documents": 503,
+        "code": 503,
+        "annotations": 503,
+    }
+    assert report.batch_size == 37
+    assert report.peak_buffered_documents == 37
+    assert catalog.max_generated_batch == 37
+    assert suite.keyword_indexes["assets"].max_upsert_batch == 37
+    assert suite.keyword_indexes["assets"].max_delete_batch <= 37
+    assert suite.meili_transport.max_remote_page <= 37
+    assert set(catalog.scopes) == {"serving_active"}
+    assert ready_states == 2_012
+    engine.dispose()
+
+
+def test_failed_remote_task_rolls_back_index_state_and_is_rerunnable() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    suite = _PagedRemoteSuite()
+    catalog = _GeneratedCatalog(total=5)
+    existing_id = UUID(int=900_000)
+    with Session(engine) as session:
+        session.add(
+            IndexState(
+                index_name="assets",
+                index_kind="keyword",
+                entity_type="asset",
+                entity_id=existing_id,
+                content_digest="a" * 64,
+                status="ready",
+                version="v1",
+            )
+        )
+        session.commit()
+        suite.meili_transport.fail_flush = True
+        builder = IndexBuilder(
+            cast(RemoteIndexSuite, suite),
+            write_batch_size=2,
+            task_flush_batch_count=1,
+            catalog=cast(PostgresIndexCatalog, catalog),
+        )
+        with pytest.raises(RuntimeError, match="synthetic Meilisearch task failure"):
+            builder.rebuild_keywords(session)
+        session.commit()
+        persisted = session.scalar(
+            select(IndexState).where(IndexState.entity_id == existing_id)
+        )
+        assert persisted is not None
+        assert persisted.status == "ready"
+        assert session.scalar(select(func.count()).select_from(IndexState)) == 1
+
+        suite.meili_transport.fail_flush = False
+        report = builder.rebuild_keywords(session)
+        session.commit()
+
+    assert report.keyword_counts_after == {
+        "assets": 5,
+        "documents": 5,
+        "code": 5,
+        "annotations": 5,
+    }
+    assert report.peak_buffered_documents == 2
+    engine.dispose()

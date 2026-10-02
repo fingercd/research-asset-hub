@@ -87,13 +87,19 @@ def test_signed_gateway_session_range_head_and_host_security(
     )
     assert session_response.status_code == 303
     assert "httponly" in session_response.headers["set-cookie"].casefold()
+    assert "samesite=lax" in session_response.headers["set-cookie"].casefold()
+    assert session_response.headers["location"].startswith("/session-assets/")
 
+    # Signed asset routes are intentionally independent of third-party cookies.
+    client.cookies.clear()
     served = client.get(session_response.headers["location"])
     assert served.status_code == 200
     assert served.content == page.read_bytes()
     assert "default-src" in served.headers["content-security-policy"]
     assert "script-src 'none'" in served.headers["content-security-policy"]
     assert served.headers["x-research-hub-html-policy"] == "static"
+    for origin in [settings.web_origin, *settings.desktop_origins]:
+        assert origin in served.headers["content-security-policy"]
 
     cors = client.get(
         session_response.headers["location"],
@@ -113,6 +119,19 @@ def test_signed_gateway_session_range_head_and_host_security(
     assert preflight.status_code == 200
     assert preflight.headers["access-control-allow-origin"] == settings.web_origin
 
+    desktop_origin = settings.desktop_origins[0]
+    desktop_preflight = client.options(
+        session_response.headers["location"],
+        headers={
+            "Origin": desktop_origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Range,If-Range",
+        },
+    )
+    assert desktop_preflight.status_code == 200
+    assert desktop_preflight.headers["access-control-allow-origin"] == desktop_origin
+    assert desktop_preflight.headers["access-control-allow-credentials"] == "true"
+
     partial = client.get(
         session_response.headers["location"],
         headers={"Range": "bytes=0-8"},
@@ -126,6 +145,135 @@ def test_signed_gateway_session_range_head_and_host_security(
 
     rejected_host = client.get("/health", headers={"Host": "evil.example"})
     assert rejected_host.status_code == 400
+
+
+def test_desktop_signed_routes_serve_pdf_range_and_markdown_without_cookies(
+    gateway_runtime: tuple[Any, ...],
+) -> None:
+    client, database, html_representation, page, settings = gateway_runtime
+    pdf = page.parent / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n0123456789\n%%EOF\n")
+    guide = page.parent / "guide.md"
+    guide.write_text("# Local guide\n\nNo website required.\n", encoding="utf-8")
+    with database.session() as session:
+        html_item = session.get(Representation, html_representation.id)
+        assert html_item is not None and html_item.source_id is not None
+        pdf_asset = Asset(asset_type="paper", title="PDF")
+        guide_asset = Asset(asset_type="note", title="Guide")
+        session.add_all([pdf_asset, guide_asset])
+        session.flush()
+        pdf_representation = Representation(
+            asset_id=pdf_asset.id,
+            source_id=html_item.source_id,
+            representation_type="pdf",
+            role="primary",
+            materialization_kind="file",
+            availability="available",
+            root_key="html",
+            path_ref=pdf.name,
+            mime_type="application/pdf",
+        )
+        guide_representation = Representation(
+            asset_id=guide_asset.id,
+            source_id=html_item.source_id,
+            representation_type="markdown",
+            role="guide",
+            materialization_kind="file",
+            availability="available",
+            root_key="html",
+            path_ref=guide.name,
+            mime_type="text/markdown",
+        )
+        session.add_all([pdf_representation, guide_representation])
+        session.flush()
+        pdf_id = pdf_representation.id
+        guide_id = guide_representation.id
+
+    desktop_origin = settings.desktop_origins[0]
+    pdf_token = create_gateway_token(
+        settings.gateway_secret,
+        pdf_id,
+        ttl_seconds=60,
+        nonce="desktop-pdf",
+    )
+    pdf_session = client.get(
+        f"/session/{pdf_id}",
+        params={"token": pdf_token},
+        follow_redirects=False,
+    )
+    client.cookies.clear()
+    partial = client.get(
+        pdf_session.headers["location"],
+        headers={"Origin": desktop_origin, "Range": "bytes=0-7"},
+    )
+    assert partial.status_code == 206
+    assert partial.content == pdf.read_bytes()[:8]
+    assert partial.headers["access-control-allow-origin"] == desktop_origin
+    assert partial.headers["accept-ranges"] == "bytes"
+
+    guide_token = create_gateway_token(
+        settings.gateway_secret,
+        guide_id,
+        ttl_seconds=60,
+        nonce="desktop-guide",
+    )
+    guide_session = client.get(
+        f"/session/{guide_id}",
+        params={"token": guide_token},
+        follow_redirects=False,
+    )
+    client.cookies.clear()
+    markdown = client.get(
+        guide_session.headers["location"],
+        headers={
+            "Origin": desktop_origin,
+            "Accept": "text/markdown,text/plain;q=0.9",
+        },
+    )
+    assert markdown.status_code == 200
+    assert markdown.content == guide.read_bytes()
+    assert markdown.headers["access-control-allow-origin"] == desktop_origin
+
+
+def test_gateway_health_reports_root_counts_and_degrades_for_missing_root(
+    gateway_runtime: tuple[Any, ...],
+) -> None:
+    client, database, _, page, settings = gateway_runtime
+    healthy = client.get("/health")
+    assert healthy.status_code == 200
+    assert healthy.json()["source_roots"] == {
+        "workspace_root": None,
+        "configured": 1,
+        "existing": 1,
+        "missing": 0,
+        "missing_roots": [],
+    }
+    missing_root = page.parent / "missing-root"
+    registry = SourceRegistry(
+        {
+            ("demo", "html"): page.parent.resolve(),
+            ("demo", "pdf"): missing_root.resolve(),
+        },
+        workspace_root=page.parent,
+    )
+    app = create_app(settings, database=database, registry=registry)
+    with TestClient(app) as degraded_client:
+        degraded = degraded_client.get("/health")
+
+    assert degraded.status_code == 200
+    payload = degraded.json()
+    assert payload["status"] == "degraded"
+    assert payload["registered_roots"] == 2
+    assert payload["source_roots"]["configured"] == 2
+    assert payload["source_roots"]["existing"] == 1
+    assert payload["source_roots"]["missing"] == 1
+    assert payload["source_roots"]["missing_roots"] == [
+        {
+            "source_id": "demo",
+            "root_key": "pdf",
+            "path": str(missing_root.resolve()),
+        }
+    ]
 
 
 def test_gateway_hub_presentation_injects_versioned_theme_and_preserves_source(
@@ -213,9 +361,7 @@ def test_gateway_hub_presentation_falls_back_to_original_on_injection_failure(
     assert served.status_code == 200
     assert served.content == page.read_bytes()
     assert served.headers["x-research-hub-presentation"] == "original"
-    assert served.headers["x-research-hub-theme-fallback"] == (
-        "Synthetic parser failure."
-    )
+    assert served.headers["x-research-hub-theme-fallback"] == ("Synthetic parser failure.")
 
 
 def test_gateway_hub_presentation_falls_back_when_document_csp_blocks_theme(
@@ -225,7 +371,7 @@ def test_gateway_hub_presentation_falls_back_when_document_csp_blocks_theme(
     source_content = (
         b"<!doctype html><html><head>"
         b'<meta http-equiv="Content-Security-Policy" '
-        b'content="default-src \'none\'; style-src \'none\'">'
+        b"content=\"default-src 'none'; style-src 'none'\">"
         b"<title>Strict CSP</title></head><body>Original</body></html>"
     )
     page.write_bytes(source_content)
@@ -385,7 +531,11 @@ def test_file_mount_resolves_html_children_from_parent_directory(
         follow_redirects=False,
     )
     assert session_response.status_code == 303
-    child = client.get(f"/assets/{representation.id}/site.css")
+    client.cookies.clear()
+    signed_entrypoint = session_response.headers["location"]
+    entrypoint = client.get(signed_entrypoint)
+    assert entrypoint.status_code == 200
+    child = client.get(f"{signed_entrypoint.rsplit('/', 1)[0]}/site.css")
     assert child.status_code == 200
     assert child.text == stylesheet.read_text(encoding="utf-8")
 
@@ -440,15 +590,11 @@ def test_strict_file_mount_blocks_unregistered_siblings_and_allows_explicit_moun
     assert entrypoint.status_code == 200
     assert entrypoint.content == page.read_bytes()
 
-    registered_child = client.get(
-        f"/assets/{representation.id}/static/allowed.css"
-    )
+    registered_child = client.get(f"/assets/{representation.id}/static/allowed.css")
     assert registered_child.status_code == 200
     assert registered_child.text == allowed.read_text(encoding="utf-8")
 
-    blocked_sibling = client.get(
-        f"/assets/{representation.id}/unregistered.css"
-    )
+    blocked_sibling = client.get(f"/assets/{representation.id}/unregistered.css")
     assert blocked_sibling.status_code == 404
     assert blocked_sibling.content != sibling.read_bytes()
     traversal = client.get(

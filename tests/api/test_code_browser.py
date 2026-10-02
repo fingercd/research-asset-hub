@@ -59,3 +59,14 @@ def test_file_preview_rejects_traversal_and_binary_files(tmp_path: Path) -> None
     assert binary["previewable"] is False
     with pytest.raises(CodeBrowserPathError):
         read_code_file(root, representation_id="rep-1", relative_path="../outside.py")
+
+
+@pytest.mark.parametrize("relative", [".git/config", "node_modules/pkg/main.py", ".venv/main.py"])
+def test_direct_preview_rejects_hidden_or_generated_ancestors(
+    tmp_path: Path, relative: str
+) -> None:
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text("not public source", encoding="utf-8")
+    with pytest.raises(CodeBrowserPathError):
+        read_code_file(tmp_path, representation_id="rep-1", relative_path=relative)

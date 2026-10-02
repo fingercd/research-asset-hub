@@ -18,9 +18,9 @@ fn wide(s: &str) -> Vec<u16> {
 /// 返回 true = 本实例是主实例(互斥体归我);false = 已有实例在运行,
 /// 已尝试唤起其窗口,调用方应立即退出且不得启动任何编排逻辑。
 pub fn acquire() -> bool {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
-    use windows::core::PCWSTR;
 
     let name = wide("ResearchAssetHub-SingleInstance");
     unsafe {

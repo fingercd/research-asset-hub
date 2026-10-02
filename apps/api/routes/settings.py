@@ -11,7 +11,8 @@ from apps.api.routes_v1 import (
     _load_yaml,
     router,
 )
-from packages.domain.models import Integration
+from packages.domain.models import Integration, Source
+from packages.domain.serving_scope import retired_source_ids
 
 
 @router.get("/settings")
@@ -34,6 +35,14 @@ def settings_endpoint(request: Request) -> dict[str, Any]:
         )
     readiness = _v1._database(request).check()
     with _v1._database(request).session() as session:
+        database_sources = list(session.scalars(select(Source)).all())
+        retired_ids = retired_source_ids(
+            session,
+            {item.id for item in database_sources},
+        )
+        retired_aliases = {
+            item.alias for item in database_sources if item.id in retired_ids
+        }
         integrations = [
             {
                 "id": str(item.id),
@@ -45,13 +54,13 @@ def settings_endpoint(request: Request) -> dict[str, Any]:
             }
             for item in session.scalars(select(Integration).order_by(Integration.name)).all()
         ]
+    sources = [item for item in sources if item["id"] not in retired_aliases]
     return {
         "app": {
             "mode": "local-first",
             "database_status": readiness.status,
             "database_revision": readiness.revision,
             "gateway_origin": settings.gateway_origin,
-            "gitnexus_url": settings.gitnexus_url,
         },
         "search": {
             "keyword_provider": "meilisearch",

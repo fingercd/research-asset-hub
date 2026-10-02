@@ -20,6 +20,7 @@ describe("AssetCard", () => {
             <AssetCard
               asset={{
                 id: "paper-1",
+                asset_type: "paper",
                 title: "World Models",
                 authors: ["A. Researcher"],
                 reading_status: "reading",
@@ -41,6 +42,7 @@ describe("AssetCard", () => {
     );
 
     expect(screen.getByRole("heading", { name: "World Models" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByLabelText("阅读状态")).toHaveValue("reading");
     expect(screen.getByText("重要方法笔记")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "PDF" })).toBeInTheDocument();
@@ -61,31 +63,55 @@ describe("AssetCard", () => {
       <QueryClientProvider client={client}>
         <MemoryRouter>
           <CompareProvider>
-            <AssetCard asset={{ id: "paper-copy-1", title: "Copy Paper" }} />
+            <AssetCard
+              asset={{ id: "paper-copy-1", asset_type: "paper", title: "Copy Paper" }}
+            />
           </CompareProvider>
         </MemoryRouter>
       </QueryClientProvider>,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     fireEvent.click(screen.getByRole("button", { name: "复制ID" }));
 
     expect(clipboard).toHaveBeenCalledWith("paper-copy-1");
     expect(screen.queryByText("paper-copy-1")).not.toBeInTheDocument();
   });
 
-  it("shows 无 when the asset has no annotation", () => {
+  it("does not render an empty annotation row", () => {
     window.localStorage.clear();
     const client = new QueryClient();
     render(
       <QueryClientProvider client={client}>
         <MemoryRouter>
           <CompareProvider>
-            <AssetCard asset={{ id: "paper-2", title: "No Notes" }} />
+            <AssetCard
+              asset={{ id: "paper-2", asset_type: "paper", title: "No Notes" }}
+            />
           </CompareProvider>
         </MemoryRouter>
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText("无")).toBeInTheDocument();
+    expect(screen.queryByText("无")).toBeNull();
+  });
+
+  it("never offers paper comparison for a repository", () => {
+    window.localStorage.clear();
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <CompareProvider>
+            <AssetCard
+              asset={{ id: "repo-1", asset_type: "repository", title: "Repo" }}
+            />
+          </CompareProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    expect(screen.queryByRole("button", { name: "加入对比" })).toBeNull();
   });
 });

@@ -7,10 +7,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.domain.enums import AuditAction, OutboxStatus
 from packages.domain.models import AuditEvent, OutboxEvent, Representation
+from packages.domain.serving_scope import active_representation_clause
 
 from .html_audit import HtmlAuditReport
 
@@ -52,12 +54,27 @@ def apply_html_policy_inferences(
     counters: Counter[str] = Counter()
     changed_ids: list[str] = []
     for inference in inferences:
-        representation = session.get(
-            Representation,
-            inference.representation_id,
-            with_for_update=True,
+        representation = session.scalar(
+            select(Representation)
+            .where(
+                Representation.id == inference.representation_id,
+                Representation.deleted_at.is_(None),
+                active_representation_clause(),
+            )
+            .with_for_update()
         )
-        if representation is None or representation.deleted_at is not None:
+        if representation is None:
+            inactive_id = session.scalar(
+                select(Representation.id)
+                .where(
+                    Representation.id == inference.representation_id,
+                    Representation.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if inactive_id is not None:
+                counters["retired"] += 1
+                continue
             counters["missing"] += 1
             continue
         attributes = dict(representation.attributes or {})
@@ -114,6 +131,7 @@ def apply_html_policy_inferences(
     return {
         "updated": counters["updated"],
         "unchanged": counters["unchanged"],
+        "retired": counters["retired"],
         "missing": counters["missing"],
         "policies": {
             policy: counters[f"policy_{policy}"]

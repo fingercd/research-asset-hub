@@ -62,6 +62,8 @@ from packages.domain.models import (
     SourceRecord,
     SourceRecordAsset,
     SourceRecordVersion,
+    SourceRetirement,
+    SourceRetirementRollback,
     utc_now,
 )
 from packages.domain.schemas import (
@@ -72,6 +74,7 @@ from packages.domain.schemas import (
     RepresentationMountCandidate,
     SourceConfig,
 )
+from packages.domain.scope_policy import DomainScopePolicy
 
 from .dry_run import _source_config
 from .reconciliation import (
@@ -82,6 +85,7 @@ from .reconciliation import (
     reconcile_records,
     record_fingerprint,
 )
+from .source_retirement import active_retirement_exists
 
 IMPORTER_VERSION = "1.1"
 _FROZEN_MANIFEST_SHA256 = "_frozen_manifest_sha256"
@@ -137,6 +141,134 @@ def _source_freeze_contract(source: LoadedSource) -> tuple[str, str]:
     """Return immutable manifest and source-config digests for one source."""
 
     return _sha256_file(source.manifest), _json_digest(source.raw)
+
+
+def _verify_frozen_source_contract(model: Source, loaded: LoadedSource) -> tuple[str, str]:
+    """Verify one configured source against its immutable database contract."""
+
+    manifest_sha256, config_sha256 = _source_freeze_contract(loaded)
+    config = dict(model.config or {})
+    frozen_manifest = config.get(_FROZEN_MANIFEST_SHA256)
+    frozen_config = config.get(_FROZEN_SOURCE_CONFIG_SHA256)
+    if not isinstance(frozen_manifest, str) or not isinstance(frozen_config, str):
+        raise FrozenSourceChangedError(
+            f"Source {loaded.source_id} has no complete frozen source contract"
+        )
+    if frozen_manifest != manifest_sha256:
+        raise FrozenSourceChangedError(
+            f"Frozen manifest changed for source {loaded.source_id}: "
+            f"expected {frozen_manifest}, got {manifest_sha256}"
+        )
+    if frozen_config != config_sha256:
+        raise FrozenSourceChangedError(
+            f"Frozen source configuration changed for source {loaded.source_id}: "
+            f"expected {frozen_config}, got {config_sha256}"
+        )
+    return manifest_sha256, config_sha256
+
+
+def retired_source_contracts_for_dry_run(
+    session: Session,
+    sources: Sequence[LoadedSource],
+    *,
+    require_complete: bool = True,
+) -> dict[str, dict[str, Any]]:
+    """Return active-retirement contracts without normalizing retired sources."""
+
+    loaded_aliases = {item.source_id for item in sources}
+    retired_models = session.scalars(
+        select(Source).where(active_retirement_exists(Source.id))
+    ).all()
+    unconfigured_retirements = sorted(
+        model.alias for model in retired_models if model.alias not in loaded_aliases
+    )
+    if require_complete and unconfigured_retirements:
+        raise FormalImportValidationError(
+            "Active retired sources must remain in the complete source configuration: "
+            f"{unconfigured_retirements}"
+        )
+    models = [model for model in retired_models if model.alias in loaded_aliases]
+    contracts: dict[str, dict[str, Any]] = {}
+    for model in models:
+        if model.enabled:
+            raise FormalImportValidationError(
+                f"Source {model.alias} has an active retirement but remains enabled"
+            )
+        config = dict(model.config or {})
+        rolled_back = select(SourceRetirementRollback.id).where(
+            SourceRetirementRollback.retirement_id == SourceRetirement.id
+        ).exists()
+        retirement = session.scalar(
+            select(SourceRetirement).where(
+                SourceRetirement.source_id == model.id,
+                ~rolled_back,
+            )
+        )
+        if retirement is None:
+            raise FormalImportValidationError(
+                f"Source {model.alias} retirement state changed during validation"
+            )
+        if (
+            retirement.frozen_manifest_sha256
+            != config.get(_FROZEN_MANIFEST_SHA256)
+            or retirement.frozen_source_config_sha256
+            != config.get(_FROZEN_SOURCE_CONFIG_SHA256)
+        ):
+            raise FrozenSourceChangedError(
+                f"Retirement evidence disagrees with frozen source {model.alias}"
+            )
+        contracts[model.alias] = {
+            "manifest_sha256": config.get(_FROZEN_MANIFEST_SHA256),
+            "source_config_sha256": config.get(_FROZEN_SOURCE_CONFIG_SHA256),
+            "retirement_id": str(retirement.id),
+            "historical_records_preserved": int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(SourceRecord)
+                    .where(SourceRecord.source_id == model.id)
+                )
+                or 0
+            ),
+        }
+    return contracts
+
+
+def _partition_sources_for_import(
+    session: Session,
+    sources: Sequence[LoadedSource],
+) -> tuple[list[LoadedSource], list[str], int]:
+    """Separate active sources from signed retirements and verify the latter."""
+
+    contracts = retired_source_contracts_for_dry_run(session, sources)
+    active: list[LoadedSource] = []
+    retired: list[str] = []
+    historical_records = 0
+    models = (
+        {
+            model.alias: model
+            for model in session.scalars(
+                select(Source).where(
+                    Source.alias.in_([item.source_id for item in sources])
+                )
+            ).all()
+        }
+        if sources
+        else {}
+    )
+    for loaded in sources:
+        contract = contracts.get(loaded.source_id)
+        if contract is None:
+            active.append(loaded)
+            continue
+        model = models.get(loaded.source_id)
+        if model is None:
+            raise FormalImportValidationError(
+                f"Retired source {loaded.source_id} has no database source row"
+            )
+        _verify_frozen_source_contract(model, loaded)
+        retired.append(loaded.source_id)
+        historical_records += int(contract["historical_records_preserved"])
+    return active, retired, historical_records
 
 
 @lru_cache(maxsize=4096)
@@ -222,6 +354,37 @@ def _first(records: Sequence[NormalizedRecord], field_name: str) -> Any:
     return None
 
 
+def _merged_mapping_field(
+    records: Sequence[NormalizedRecord], field_name: str
+) -> dict[str, Any]:
+    """Merge mapping-valued claims without discarding independent enrichments.
+
+    Paper metadata commonly arrives from an immutable catalog first and a later
+    release-audit sidecar second.  Selecting only the first non-empty mapping made
+    code/checkpoint evidence disappear even though both sources were retained as
+    provenance.  A deterministic recursive merge keeps the catalog fields and lets
+    the later source refine only the keys it explicitly owns.
+    """
+
+    def merge(target: dict[str, Any], incoming: Mapping[str, Any]) -> None:
+        for key, value in incoming.items():
+            normalized_key = str(key)
+            existing = target.get(normalized_key)
+            if isinstance(existing, Mapping) and isinstance(value, Mapping):
+                nested = {str(item_key): item_value for item_key, item_value in existing.items()}
+                merge(nested, value)
+                target[normalized_key] = nested
+            else:
+                target[normalized_key] = value
+
+    result: dict[str, Any] = {}
+    for record in sorted(records, key=lambda item: (item.source_id, item.source_record_id)):
+        value = getattr(record.asset, field_name)
+        if isinstance(value, Mapping):
+            merge(result, value)
+    return result
+
+
 def _merged_asset_values(records: Sequence[NormalizedRecord]) -> dict[str, Any]:
     ordered = sorted(records, key=lambda item: (item.source_id, item.source_record_id))
     return {
@@ -236,14 +399,14 @@ def _merged_asset_values(records: Sequence[NormalizedRecord]) -> dict[str, Any]:
         "abstract": _first(ordered, "abstract"),
         "summary": _first(ordered, "summary"),
         "content": _first(ordered, "content"),
-        "analysis": _first(ordered, "analysis") or {},
+        "analysis": _merged_mapping_field(ordered, "analysis"),
         "visibility": str(_first(ordered, "visibility") or "private"),
         "source_urls": _stable_union(
             [str(value) for value in record.asset.source_urls] for record in ordered
         ),
         "domain_slugs": _stable_union(record.asset.domain_slugs for record in ordered),
         "tags": _stable_union(record.asset.tags for record in ordered),
-        "attributes": _first(ordered, "attributes") or {},
+        "attributes": _merged_mapping_field(ordered, "attributes"),
     }
 
 
@@ -332,6 +495,7 @@ class ImportContext:
     sources: dict[str, LoadedSource]
     source_models: dict[str, Source]
     run: ImportRun
+    domain_scope_policy: DomainScopePolicy
     counters: ImportCounters = field(default_factory=ImportCounters)
     record_models: dict[str, SourceRecord] = field(default_factory=dict)
     record_versions: dict[str, SourceRecordVersion] = field(default_factory=dict)
@@ -489,7 +653,8 @@ def _upsert_sources(session: Session, sources: Sequence[LoadedSource]) -> dict[s
             model.root_path = _persisted_source_path(loaded.root)
             model.manifest_path = _persisted_source_path(loaded.manifest)
             model.read_only = True
-            model.enabled = True
+            # Enabled is lifecycle state. Normal ingestion must never resurrect a
+            # disabled source while refreshing its non-lifecycle fields.
             model.config = config
         result[loaded.source_id] = model
     return result
@@ -547,6 +712,11 @@ def _apply_asset_values(
 def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord]) -> Asset:
     values = _merged_asset_values(records)
     asset = _existing_asset_for_group(ctx.session, ctx.source_models, records)
+    values["domain_slugs"] = ctx.domain_scope_policy.filter_domains(
+        values["domain_slugs"],
+        asset_id=asset.id if asset is not None else None,
+        title=str(values["title"]),
+    )
     if asset is None:
         asset = Asset(**values)
         ctx.session.add(asset)
@@ -956,13 +1126,19 @@ def _upsert_repository(
         return asset
 
     details = _repository_profile(canonical_url)
+    repository_title = _repository_title(canonical_url)
+    repository_domains = ctx.domain_scope_policy.filter_domains(
+        record.asset.domain_slugs,
+        asset_id=None,
+        title=record.asset.title,
+    )
     asset = Asset(
         asset_type="repository",
-        title=_repository_title(canonical_url),
+        title=repository_title,
         authors=[],
         visibility="private",
         source_urls=[canonical_url],
-        domain_slugs=list(record.asset.domain_slugs),
+        domain_slugs=repository_domains,
         tags=[],
         analysis={},
         attributes={"logical_repository": True},
@@ -1024,8 +1200,10 @@ def _merge_repository_provenance(
         }
     )
     canonical_url = canonical_repository_url(str(candidate.url))
-    asset.domain_slugs = _stable_union(
-        (asset.domain_slugs or [], record.asset.domain_slugs)
+    asset.domain_slugs = ctx.domain_scope_policy.filter_domains(
+        _stable_union((asset.domain_slugs or [], record.asset.domain_slugs)),
+        asset_id=asset.id,
+        title=record.asset.title,
     )
     asset.source_urls = _stable_union((asset.source_urls or [], [canonical_url]))
 
@@ -1474,6 +1652,7 @@ def run_formal_import(
     sources: Sequence[LoadedSource],
     *,
     known_domain_slugs: set[str] | None = None,
+    domain_scope_policy: DomainScopePolicy | None = None,
 ) -> dict[str, Any]:
     """Import all selected sources in one database transaction.
 
@@ -1494,15 +1673,36 @@ def run_formal_import(
     known_domains = (
         load_domain_slugs() if known_domain_slugs is None else known_domain_slugs
     )
+    scope_policy = domain_scope_policy or DomainScopePolicy.load(
+        PROJECT_ROOT / "config" / "domain-scope-exclusions.yaml"
+    )
     started = datetime.now(UTC)
-    records = _load_all_records(sources)
+    active_sources, retired_sources, historical_records_preserved = (
+        _partition_sources_for_import(session, sources)
+    )
+    records = _load_all_records(active_sources)
     _validate_loaded_records(
-        sources,
+        active_sources,
         records,
         known_domain_slugs=known_domains,
     )
+    excluded_records = [
+        record
+        for record in records
+        if set(record.asset.domain_slugs).intersection(
+            scope_policy.excluded_domains(asset_id=None, title=record.asset.title)
+        )
+    ]
+    excluded_record_keys = {
+        f"{record.source_id}:{record.source_record_id}" for record in excluded_records
+    }
+    records = [
+        record
+        for record in records
+        if f"{record.source_id}:{record.source_record_id}" not in excluded_record_keys
+    ]
     groups, reconciliation = identity_groups(records)
-    source_models = _upsert_sources(session, sources)
+    source_models = _upsert_sources(session, active_sources)
     run = ImportRun(
         source_id=None,
         status=ImportStatus.RUNNING.value,
@@ -1520,6 +1720,7 @@ def run_formal_import(
         sources={source.source_id: source for source in sources},
         source_models=source_models,
         run=run,
+        domain_scope_policy=scope_policy,
     )
 
     for group in groups:
@@ -1592,6 +1793,14 @@ def run_formal_import(
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "source_roots_modified": False,
+        "retirement_state_checked": True,
+        "active_sources": [source.source_id for source in active_sources],
+        "retired_sources_verified": retired_sources,
+        "historical_records_preserved": historical_records_preserved,
+        "scope_exclusions": {
+            "source_records": len(excluded_records),
+            "record_keys": sorted(excluded_record_keys),
+        },
         "counters": counters,
         "unresolved_relation_candidates": ctx.unresolved_relations,
     }

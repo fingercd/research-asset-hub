@@ -1,0 +1,69 @@
+{
+  "schema_version": "fixture.paper-records.v1",
+  "records": [
+    {
+      "paper_id": "source-video-reuse-2025",
+      "source_record_id": "source-video-reuse-2025",
+      "canonical_paper_id": "legacy-video-2025",
+      "existing_vlm_id": "legacy-video-2025",
+      "title": "Legacy Video Compression",
+      "authors": ["Fixture Author"],
+      "year": 2025,
+      "venue": "FixtureConf",
+      "domain_slugs": ["video-llm-compression"],
+      "target_pdf_path": "{CORE_ROOT}/VLM框架3DV压缩/library/papers/legacy-video-2025/paper.pdf",
+      "pdf": {"sha256": "{LEGACY_SHA}", "size": {LEGACY_SIZE}, "page_count": 1, "version": "v1"},
+      "version_relation": {"relation_type": "same_representation_as", "canonical_paper_id": "legacy-video-2025", "existing_vlm_id": "legacy-video-2025"}
+    },
+    {
+      "paper_id": "source-video-alt-2025",
+      "source_record_id": "source-video-alt-2025",
+      "canonical_paper_id": "legacy-video-2025",
+      "existing_vlm_id": "legacy-video-2025",
+      "title": "Legacy Video Compression",
+      "authors": ["Fixture Author"],
+      "year": 2025,
+      "venue": "FixtureConf",
+      "domain_slugs": ["video-llm-compression"],
+      "target_pdf_path": "{CORE_ROOT}/VLM框架3DV压缩/library/papers/legacy-video-2025/versions/camera-ready.pdf",
+      "pdf": {"sha256": "{ALT_SHA}", "size": {ALT_SIZE}, "page_count": 1, "version": "camera-ready"},
+      "version_relation": {"relation_type": "alternate_version_of", "canonical_paper_id": "legacy-video-2025", "existing_vlm_id": "legacy-video-2025", "version_label": "camera-ready", "evidence": ["fixture decision"]}
+    },
+    {
+      "paper_id": "new-video-2026",
+      "source_record_id": "new-video-2026",
+      "canonical_paper_id": "new-video-2026",
+      "title": "New Video Compression",
+      "authors": ["Fixture Author"],
+      "year": 2026,
+      "venue": "FixtureConf",
+      "domain_slugs": ["video-llm-compression"],
+      "target_pdf_path": "{CORE_ROOT}/VLM框架3DV压缩/library/papers/new-video-2026/paper.pdf",
+      "pdf": {"sha256": "{VIDEO_SHA}", "size": {VIDEO_SIZE}, "page_count": 1, "version": "fixture"}
+    },
+    {
+      "paper_id": "embodied-compression-2026",
+      "source_record_id": "embodied-compression-2026",
+      "canonical_paper_id": "embodied-compression-2026",
+      "title": "Embodied Compression Fixture",
+      "authors": ["Fixture Author"],
+      "year": 2026,
+      "venue": "FixtureConf",
+      "domain_slugs": ["embodied-ai-compression"],
+      "target_pdf_path": "{CORE_ROOT}/具身智能压缩/library/papers/embodied-compression-2026/paper.pdf",
+      "pdf": {"sha256": "{EMBODIED_SHA}", "size": {EMBODIED_SIZE}, "page_count": 1, "version": "fixture"}
+    },
+    {
+      "paper_id": "navigation-compression-2026",
+      "source_record_id": "navigation-compression-2026",
+      "canonical_paper_id": "navigation-compression-2026",
+      "title": "Navigation Compression Fixture",
+      "authors": ["Fixture Author"],
+      "year": 2026,
+      "venue": "FixtureConf",
+      "domain_slugs": ["navigation-compression"],
+      "target_pdf_path": "{CORE_ROOT}/导航压缩/library/papers/navigation-compression-2026/paper.pdf",
+      "pdf": {"sha256": "{NAVIGATION_SHA}", "size": {NAVIGATION_SIZE}, "page_count": 1, "version": "fixture"}
+    }
+  ]
+}

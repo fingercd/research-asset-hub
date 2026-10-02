@@ -1,199 +1,170 @@
-# Research Asset Hub
+# Research Asset Hub · 研究资产库
 
-Research Asset Hub 是一个只在本机运行的个人科研数字资产平台。它把当前 10 个研究领域、11 个已登记来源中的论文、代码仓库、导读和历史 HTML 注册到统一数据库、搜索与关系图谱中，同时保持来源目录只读：不移动、不重命名、不覆盖原文件，也不复制原始大文件。
+一个在本机运行的个人科研资料管理平台，用统一入口管理论文、代码仓库、PDF、导读、笔记和历史 HTML。它记录资料之间的关系、阅读状态与批注，并提供搜索和结构化领域门户。
 
-当前已验证登记基线（2026-07-26 正式导入报告）：
+**来源文件保持原位、只读。** 平台通过来源清单、相对路径和指纹引用资料，不搬动、不覆盖原始论文和代码。Git 仓库保存应用源码、配置、迁移、测试与文档；实际资料、数据库、密钥、依赖和安装包不随仓库上传。
 
-- 10 个领域、11 个只读来源、717 条规范化来源记录
-- 651 篇论文资产、387 个代码仓库资产，另有 10 个系统隐藏的领域总览集合资产
-- 3,136 个表示候选，其中 3,127 个可用、9 个明确标记为缺失
-- 本轮新增来源记录：视觉语言导航（VLN）72、游戏强化学习 72、弱监督视频异常检测（WSVAD）45，以及 10 条领域整体 HTML 门户记录
-- 10/10 个领域整体 HTML 已验证可在 Hub 统一样式与来源原始样式之间切换
-- 未改变输入的第二次正式导入新增计数全部为 0；导入后来源完整性检查为 0 mismatch
+## 当前状态
 
-抽取、关键词索引和向量索引会随增量资料重建；当前运行状态以 `/api/health` 和 `work/validation/` 中最近一次对应报告为准，不沿用旧基线数字推断。
+本仓库保存个人工作环境的持续开发版本。2026-10-02 完成一次累计改动归档和桌面启动优化收尾；用户已认可当前启动速度，不再以“稳定 10 秒内”为验收条件。启动耗时受机器负载、缓存、数据库恢复和首次初始化影响，不作固定秒数承诺。
 
-## 功能
+现有 `config/sources.yaml` 与旁车清单面向原工作环境，包含本机来源目录和历史记录。**克隆代码不会自动得到原知识库数据，也不代表这些路径在新机器上可用。** 新环境应先配置自己的来源并执行只读校验；不要直接批量导入历史清单。
 
-- 跨领域精确、混合与语义搜索；支持题名、DOI、arXiv、作者、代码符号、批注及组合筛选。
-- 首页和领域目录从 API 动态显示全部已登记领域；领域详情默认内嵌该领域的整体 HTML，并可切换“统一样式/原始样式”。
-- 搜索卡片直接打开 PDF、代码、导读或原始 HTML，并显示阅读状态与约 60 字批语摘要；没有批注时显示“无”。
-- 统一资产详情页：元数据、阅读状态、批注、PDF、代码、导读、关系、相似论文和隔离 HTML。
-- PostgreSQL 关系图谱，支持邻居、1–3 跳、最短路径、共同邻居和状态过滤。
-- 图谱节点详情抽屉与 Ctrl/Cmd 多选并排对比；GitNexus 本地代码图谱随 Hub 启动，在站内独立页面按研究方向三列窗口展示，支持隐藏名单、当前页面直达与 Hub 自研图谱前端。
-- 2–4 篇论文并排比较、保存比较视图及 Markdown 导出。
-- Obsidian 三方同步、Zotero/Better BibTeX 审查式导入包、开放 JSONL/Markdown/RO-Crate 导出。
-- 持久作业队列、lease/heartbeat/retry/dead-letter、事务 Outbox、软删除、审计与版本冲突保护。
-- Restic 加密本机备份及独立 Compose 环境恢复演练。
+本次验证范围和已知限制见 [2026-10-02 收尾记录](docs/reports/2026-10-02-startup-and-git-handoff.md)。历史报告中的资产数量只代表当时的快照，当前数量以应用页面和 API 为准。
 
-## 文档入口
+## 能做什么
 
-- [完整使用手册](docs/USER_MANUAL.md)
-- [用户自行增加知识库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)
-- [后续 Agent 知识库增量规范](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)
-- [全部文档索引](docs/README.md)
+- **查找资料**：题名、DOI、arXiv、作者、关键词与组合筛选；从结果进入论文及其 PDF、导读和代码。
+- **浏览领域**：由结构化内容生成领域门户，涵盖定位、时间线、方法、代表工作、评测、阅读路线、目录、前沿与证据。
+- **管理阅读**：阅读状态、批注、资产详情、论文与代码关系、2–4 篇论文比较及 Markdown 导出。
+- **安全打开资料**：受控的代码目录浏览；原始 HTML 通过独立资产网关和对应策略打开。
+- **增量维护**：只读检查、导入预演、身份合并审核、来源完整性检查、后台抽取与索引重建。
+- **连接外部工具**：Obsidian 同步、Zotero 导出、开放目录导出，以及面向知识加工的 MCP 接口。各工具的配置与限制见对应文档。
 
-## 本地启动
+正常桌面启动不加载向量模型，不启动 Qdrant；向量检索及其他派生处理按配置启用。代码仓库可以浏览，代码符号索引默认关闭。
 
-先决条件：Windows PowerShell 5.1+、Python 3.11+、Node.js 20+、pnpm 11、可工作的 Docker Desktop/WSL2 后端，以及 GitNexus CLI（`npm install -g gitnexus`）。
+## 系统组成
 
-首次安装依赖：
+| 组件 | 职责 |
+| --- | --- |
+| React + TypeScript | 首页、领域门户、搜索、资产详情与阅读交互 |
+| Tauri 2 + Rust | Windows 桌面窗口、单实例、托盘、后台服务编排与退出清理 |
+| FastAPI | 业务 API，默认 `127.0.0.1:8767` |
+| 独立资产网关 | 受控文件访问与 HTML 隔离，默认 `127.0.0.1:8766` |
+| PostgreSQL | 主数据、阅读状态、审计、作业和来源记录 |
+| Meilisearch | 可重建的关键词搜索索引 |
+| Python worker | 后台抽取与作业处理 |
+
+桌面模式将 API 与网关放在同一个 Python 进程中复用依赖加载，但保留各自的应用、端口和访问策略。worker 是独立进程。数据库迁移成功后才开放服务端口。
+
+## 日常使用：Windows 桌面版
+
+已安装的桌面版直接通过快捷方式启动，无需另开终端或启动浏览器。生产安装包携带运行时；桌面界面不依赖 `8765` 网站服务。
+
+- 默认应用数据目录：`%USERPROFILE%\Documents\ResearchAssetHub`，可通过 `HUB_DATA_DIR` 指定。
+- 点击窗口右上角关闭按钮会收起到托盘；需要停止后台服务时，从托盘选择“退出”。
+- 日志在数据目录的 `logs/`：`api.log` 为 HTTP 服务日志，`startup-timing.log` 和 `desktop-timing.log` 记录启动阶段。
+- 安装目录与数据目录分开。升级或替换应用文件不等同于迁移或备份数据库。
+
+本机另有“研究资产库（快速启动）”快捷方式，指向独立的快速版目录；它是本机交付入口，不包含在 Git 仓库中。桌面构建、运行时组装和故障检查见 [desktop/README.md](desktop/README.md)。
+
+## 从源码启动
+
+以下命令从仓库根目录执行，示例使用 Windows PowerShell。
+
+### 1. 准备开发环境
+
+需要 Python 3.11+、Node.js、项目指定的 pnpm 11，以及 Docker Desktop/可用的 WSL2 容器环境。建议安装 uv，以便按 `uv.lock` 固定 Python 依赖；pnpm 版本以 `package.json` 的 `packageManager` 为准。
 
 ```powershell
+git clone https://github.com/fingercd/research-asset-hub.git
+cd research-asset-hub
+Copy-Item .env.example .env
 .\scripts\bootstrap.ps1 -StartInfrastructure
-pnpm --filter @research-asset-hub/web build
 ```
 
-启动生产构建：
+编辑本地 `.env`，按示例配置网关签名密钥等变量。不要把实际密钥提交到 Git。来源目录在 `config/sources.yaml` 中配置；在导入数据前阅读 [新增资料指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)，并执行 `preflight`、`validate` 与 `inventory`。
+
+### 2. 构建并启动 Web 版本
 
 ```powershell
+pnpm --filter @research-asset-hub/web build
 .\scripts\hub.ps1 start
 .\scripts\hub.ps1 status
 ```
 
-打开：
+| 入口 | 默认地址 |
+| --- | --- |
+| Web 界面 | http://127.0.0.1:8765 |
+| API 文档 | http://127.0.0.1:8767/docs |
+| API 健康检查 | http://127.0.0.1:8767/api/health |
+| 网关健康检查 | http://127.0.0.1:8766/health |
 
-- 网站：<http://127.0.0.1:8765>
-- API 文档：<http://127.0.0.1:8767/docs>
-- 健康检查：<http://127.0.0.1:8767/api/health>
-- 隔离资产网关：<http://127.0.0.1:8766/health>
-- GitNexus 代码图谱：<http://127.0.0.1:4747>
+前端热更新使用 `.\scripts\hub.ps1 dev`。停止使用 `.\scripts\hub.ps1 stop`；普通停止保留数据库和索引卷。
 
-`start` 只提供 `apps/web/dist` 中的构建产物；需要 Vite 热更新时使用：
+### 3. 开发或构建桌面版
+
+另需 Rust 工具链、Tauri 2 CLI 与 Windows 桌面构建依赖。生产包还需要组装 Python、PostgreSQL 和 Meilisearch 运行时，具体步骤见 [运行时组装](desktop/scripts/README.md)。
 
 ```powershell
-.\scripts\hub.ps1 dev
+# 终端 A：开发前端
+pnpm --filter @research-asset-hub/web dev
+
+# 终端 B：开发桌面壳
+cd desktop/src-tauri
+cargo tauri dev
 ```
 
-停止应用与基础设施：
+生产安装包使用 `cargo tauri build`。仅重建生产可执行文件时必须启用资源协议：
 
 ```powershell
-.\scripts\hub.ps1 stop
+cargo build --release --features custom-protocol --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
-普通停止不会删除数据库和索引卷。不要给 Compose 添加 `--volumes`，除非明确要永久删除本地状态。
+直接运行不带 `custom-protocol` 的 `cargo build --release` 会保留开发服务器访问行为，不能作为独立桌面包交付。依赖变化后必须重新组装运行时和 Python 启动归档。
 
-## 日常更新资料
+## 增加资料与维护数据
 
-完整增量导入必须按“只读检查 → 全量 dry-run → 备份 → 正式导入两次”的顺序执行：
+完整操作见 [用户指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md) 和 [Agent 操作规范](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)。基本顺序为：
 
-```powershell
-.\scripts\hub.ps1 preflight
-.\scripts\hub.ps1 validate -All -Json
-.\scripts\hub.ps1 inventory -All
-.\scripts\hub.ps1 ingest -All -DryRun
-.\.venv\Scripts\python.exe scripts\create_backup.py `
-  --report work\validation\backup-before-ingest.json
-.\scripts\hub.ps1 ingest -All
-.\scripts\hub.ps1 ingest -All
+1. 确认资料在稳定目录，建立新来源或旁车清单，保持已有来源不变。
+2. 执行只读预检、校验、盘点与导入预演。
+3. 创建可恢复备份，再执行正式导入；用相同输入再次导入验证幂等性。
+4. 完成抽取、索引和来源完整性检查，在页面中验证搜索、PDF、代码和导读。
+
+已正式登记的来源清单与原文件属于冻结证据，不能直接重写来“修复”历史数据。来源更正、退休和合并须经过已有审核流程。禁止直接改数据库来绕过导入和迁移。
+
+## 仓库结构
+
+```text
+apps/             API、资产网关、worker、MCP 服务与 React 前端
+packages/         领域模型、导入、检索、知识加工、导出与备份逻辑
+config/           来源与领域配置、旁车清单和策略
+migrations/       PostgreSQL 的 Alembic 迁移
+desktop/          Tauri 桌面壳、打包与运行时组装脚本
+scripts/          启动、维护、校验与处理入口
+tools/            特定资料加工工具及其说明
+tests/            Python 测试；前端测试位于 apps/web
+work/             本机运行、缓存和验证产物，不提交 Git
+docs/             用户、开发、架构和工作记录
 ```
 
-两次正式导入之间不得修改 manifest、来源配置或来源文件；第二次的来源记录、版本、论文、仓库、表示、关系、关系证据和字段声明新增数都应为 0。报告写入 `work/validation/`。
-
-以后由用户或 Agent 增加一篇论文及其 PDF、HTML、代码时，不修改任何已登记来源；在 `config/intake/<source-id>/manifest.json` 创建新的旁车清单，并在 `config/sources.yaml` 注册新的只读来源。普通单知识单元使用 `generic_manifest`；增加新领域时，再在 `config/taxonomy.yaml` 登记稳定领域 slug。完整示例见 [用户自行增加知识库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)。
-
-VLN、游戏强化学习、WSVAD 的确定性规范快照以及 10 个领域门户快照也位于 `config/intake/`。对应构建入口是：
+## 验证
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_canonical_snapshot.py --help
-.\.venv\Scripts\python.exe scripts\build_domain_portal_snapshot.py --help
-```
-
-前者只支持固定的 `vln`、`game_rl`、`wsvad` profile，后者只构建项目登记的 10 个领域门户；两者都不改写来源文件。当前旁车已经过正式导入并冻结，不得为“刷新”而原地重建或改写。新增普通论文也不要使用这两个批量构建器。
-
-默认领域页使用 `config/domain-portals/v2/<slug>/` 的结构化内容生成原生全页面门户，十个领域统一为“定位、时间线、能力与方法、代表工作、评测、阅读路线、目录、前沿、证据”九章节。原始领域 HTML 仍是冻结表示，只通过右上角“原始 HTML”经隔离网关打开。新增全新领域或更新领域脉络时的内容文件和验证步骤见 [用户自行增加知识库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)。
-
-重新抽取和构建正式索引：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\seed_jobs.py
-.\.venv\Scripts\python.exe -m apps.worker.main
-.\.venv\Scripts\python.exe scripts\build_indexes.py `
-  --version v1 `
-  --report work\validation\index-build.json
-```
-
-## 开放导出与外部工具
-
-生成不包含来源二进制的开放目录：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\export_catalog.py
-```
-
-输出位于 `outputs/open-catalog/`。每个资产包含稳定 `asset_id`、`asset.json`、`note.md`、表示清单、关系与溯源；原文件只以来源别名、相对路径和 hash 引用。
-
-Obsidian 默认同步到现有 Vault 的 `00_Home/Research Asset Hub`：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\sync_obsidian.py --preview-only
-.\.venv\Scripts\python.exe scripts\sync_obsidian.py
-```
-
-同步采用 base/hub/external 三方比较；同字段冲突进入网站的“同步冲突”页，不会静默覆盖。
-
-生成 Zotero 审查式导入包：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\export_zotero.py
-```
-
-在 Zotero 中安装 Better BibTeX 后，人工确认导入 `outputs/zotero/research-assets.csl.json` 或 `research-assets.bib`。平台读取 Zotero 本地 API；当前不会直接修改 Zotero SQLite。
-
-## 备份与恢复
-
-备份仓库默认为：
-
-`C:\Users\ExampleUser\Documents\ResearchAssetHubBackups`
-
-创建加密快照：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\create_backup.py `
-  --report work\validation\backup-final.json
-```
-
-恢复演练必须使用该次输出的 `snapshot_id`，并使用唯一 `run-id`：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\restore_rehearsal.py `
-  --snapshot <snapshot_id> `
-  --run-id <unique-run-id>
-```
-
-演练使用独立 Compose project、卷、数据库和端口，恢复后重建 Meilisearch 并验证固定查询，不覆盖活跃环境。当前仓库仍是同机副本，发布报告会持续标记 `local-copy-only` 风险；重要资料还应增加外置硬盘、NAS 或云端副本。
-
-## 验证与发布报告
-
-```powershell
-.\.venv\Scripts\ruff.exe check apps packages scripts tests
-.\.venv\Scripts\mypy.exe --strict apps packages scripts
+# Python 测试：部分集成测试需要对应环境
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe scripts\verify_source_integrity.py
-pnpm --filter @research-asset-hub/web lint
+
+# 前端类型、单元测试与构建
 pnpm --filter @research-asset-hub/web typecheck
-pnpm --filter @research-asset-hub/web test -- --run
-pnpm --filter @research-asset-hub/web test:e2e
+pnpm --filter @research-asset-hub/web test
 pnpm --filter @research-asset-hub/web build
+
+# 桌面 Rust 测试
+cargo test --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
-完成最终备份与恢复演练后生成发布报告：
+这些是验证入口，不代表当前所有测试都已通过。每次交付应记录实际执行范围和失败项；本次结果见 [收尾记录](docs/reports/2026-10-02-startup-and-git-handoff.md)。涉及真实来源的完整验收还需要页面抽样、来源完整性和备份恢复演练。
+
+## 备份与安全边界
+
+GitHub 私有仓库用于代码与配置版本恢复，**不能恢复实际数据库、阅读批注、原始论文或本机密钥**。数据备份使用现有脚本与独立备份介质：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\generate_release_report.py `
-  --restore-report work\restore-tests\<run-id>\report.json
+.\.venv\Scripts\python.exe scripts\create_backup.py --report work\validation\backup.json
+.\.venv\Scripts\python.exe scripts\restore_rehearsal.py --snapshot <snapshot_id> --run-id <unique-run-id>
 ```
 
-推荐交付入口：
+恢复演练使用隔离环境，实际配置和前置依赖见 [用户手册](docs/USER_MANUAL.md)。同盘或同机副本不能替代异机备份。
 
-- `outputs/release/release-report.md`
-- `outputs/release/release-report.json`
-- `outputs/open-catalog/`
+服务默认在本机监听。网关只对已登记资料签发短时访问会话，不接受任意绝对路径。原始 HTML 使用独立 origin 与对应 CSP/sandbox 策略。`deploy/cloud/` 是部署模板，不代表已经公开部署或完成公网安全验收。
 
-## 安全边界
+## 文档入口
 
-- Web、API、资产网关、PostgreSQL 和 Meilisearch 均只监听 `127.0.0.1`。
-- 网关只接受已登记 `representation_id` 的短时签名会话，不接受任意绝对路径。
-- 原始 HTML 在独立 origin 中按静态、可信本地交互或需要联网三类 CSP/sandbox 策略打开。
-- 所有业务写操作在同一事务写审计和 Outbox；删除默认是软删除，来源文件永不随 API 删除。
-- `deploy/cloud/` 只提供未来 Caddy/TLS、OIDC、secret 注入和私有存储接口模板；当前没有公开部署。
+- [完整使用手册](docs/USER_MANUAL.md)
+- [新增资料与来源管理](docs/USER_KNOWLEDGE_BASE_GUIDE.md)
+- [Agent 工作规范](AGENTS.md) / [详细维护流程](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)
+- [来源边界](docs/architecture/source-boundaries.md)
+- [桌面版开发与打包](desktop/README.md)
+- [MCP 使用说明](docs/MCP_USER_GUIDE.md)
+- [全部文档索引](docs/README.md)

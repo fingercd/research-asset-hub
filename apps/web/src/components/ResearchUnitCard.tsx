@@ -1,4 +1,10 @@
-import { Check, GitCompareArrows } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  GitCompareArrows,
+  Link2,
+  MoreHorizontal,
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import {
   getAssetDomains,
@@ -10,6 +16,7 @@ import { annotationSnippet, formatAuthors } from "../lib/format";
 import { useCompare } from "../state/CompareContext";
 import { CopyIdButton } from "./CopyIdButton";
 import { ReadingStatusControl } from "./ReadingStatusControl";
+import { ReleaseStatusBadges } from "./ReleaseStatusBadges";
 import { ResearchUnitActions } from "./ResearchUnitActions";
 
 function assetType(asset: Asset): string {
@@ -27,6 +34,11 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
   const relatedPapers = unit.matched_assets.filter(
     (asset) => asset.id !== primary.id && assetType(asset) === "paper",
   );
+  const relationCount = isRepository
+    ? relatedPapers.length
+    : unit.related_repositories.length;
+  const annotation = annotationSnippet(primary);
+  const prominentVenue = Boolean(primary.venue && !/arxiv/i.test(primary.venue));
   const percentage =
     typeof unit.score === "number"
       ? Math.round(unit.score <= 1 ? unit.score * 100 : unit.score)
@@ -49,8 +61,15 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
               {domains[0]}
             </Link>
           )}
-          {primary.year && <span>{primary.year}</span>}
-          {primary.venue && <span>{primary.venue}</span>}
+          {primary.year && !prominentVenue && <span>{primary.year}</span>}
+          {primary.venue && (
+            <span className={prominentVenue ? "research-unit-venue" : undefined}>
+              {primary.venue}
+              {prominentVenue && primary.year && !primary.venue.includes(String(primary.year))
+                ? ` ${primary.year}`
+                : ""}
+            </span>
+          )}
         </div>
         <h3>
           <Link to={`/assets/${encodeURIComponent(primary.id)}`}>
@@ -64,45 +83,27 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
         <p className="asset-summary">
           {unit.snippet || primary.summary || primary.abstract || "暂无摘要。"}
         </p>
-        <p className="annotation-snippet">
-          <strong>批注：</strong>
-          {annotationSnippet(primary)}
-        </p>
+        {!isRepository && (
+          <ReleaseStatusBadges
+            asset={primary}
+            quickActions={unit.quick_actions}
+            relatedRepositories={unit.related_repositories}
+          />
+        )}
+        {annotation !== "无" && (
+          <p className="annotation-snippet">
+            <strong>批注：</strong>
+            {annotation}
+          </p>
+        )}
 
-        {isRepository ? (
-          <div className="research-unit-relations">
-            <strong>关联论文</strong>
-            {relatedPapers.length ? (
-              <div className="related-asset-links">
-                {relatedPapers.map((paper) => (
-                  <Link
-                    to={`/assets/${encodeURIComponent(paper.id)}`}
-                    key={paper.id}
-                  >
-                    {paper.title_zh || paper.title}
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <span>暂无已确认关联论文</span>
-            )}
-          </div>
-        ) : (
-          unit.related_repositories.length > 0 && (
-            <div className="research-unit-relations">
-              <strong>关联仓库</strong>
-              <div className="related-asset-links">
-                {unit.related_repositories.map((repository) => (
-                  <Link
-                    to={`/assets/${encodeURIComponent(repository.id)}`}
-                    key={repository.id}
-                  >
-                    {repository.title_zh || repository.title}
-                  </Link>
-                ))}
-              </div>
-            </div>
-          )
+        {relationCount > 0 && (
+          <p className="research-unit-context">
+            <Link2 size={14} aria-hidden="true" />
+            {isRepository
+              ? `关联 ${relationCount} 篇论文`
+              : `关联 ${relationCount} 个代码仓库`}
+          </p>
         )}
 
         {remainingDomains.length > 0 && (
@@ -116,42 +117,73 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
         )}
       </div>
 
-      <div className="asset-card-side">
-        <ReadingStatusControl
-          assetId={primary.id}
-          value={getReadingStatus(primary)}
-          compact
-        />
-        <CopyIdButton assetId={primary.id} />
-        <button
-          className={`compare-toggle ${selected ? "is-selected" : ""}`}
-          type="button"
-          aria-pressed={selected}
-          title={!selected && compare.assets.length >= 4 ? "最多对比 4 篇" : undefined}
-          onClick={() => compare.toggle(primary)}
-          disabled={!selected && compare.assets.length >= 4}
-        >
-          {selected ? (
-            <Check size={14} aria-hidden="true" />
-          ) : (
-            <GitCompareArrows size={14} aria-hidden="true" />
-          )}
-          {selected ? "已加入对比" : "加入对比"}
-        </button>
-      </div>
-
       <div className="asset-card-footer">
-        <ResearchUnitActions
-          actions={unit.quick_actions}
-          ownerAssetId={primary.id}
-          repositoryOnly={isRepository}
-          repositoryLabel={
-            isRepository
-              ? primary.title
-              : (unit.related_repositories[0]?.title ?? primary.title)
-          }
-        />
-        {percentage !== null && <span className="score">相关度 {percentage}%</span>}
+        <div className="card-primary-actions">
+          <Link
+            className="button primary compact"
+            to={`/assets/${encodeURIComponent(primary.id)}`}
+          >
+            打开资料 <ArrowRight size={14} aria-hidden="true" />
+          </Link>
+          <details className="card-more-menu">
+            <summary className="button secondary compact" role="button">
+              <MoreHorizontal size={15} aria-hidden="true" />
+              更多
+            </summary>
+            <div className="card-more-popover">
+              <div className="card-more-section">
+                <span>阅读状态</span>
+                <ReadingStatusControl
+                  assetId={primary.id}
+                  value={getReadingStatus(primary)}
+                  compact
+                />
+              </div>
+              <div className="card-more-section">
+                <span>打开内容</span>
+                <ResearchUnitActions
+                  actions={unit.quick_actions}
+                  ownerAssetId={primary.id}
+                  repositoryOnly={isRepository}
+                  repositoryLabel={
+                    isRepository
+                      ? primary.title
+                      : (unit.related_repositories[0]?.title ?? primary.title)
+                  }
+                />
+              </div>
+              <div className="card-more-utilities">
+                <CopyIdButton assetId={primary.id} />
+                {!isRepository && (
+                  <button
+                    className={`compare-toggle ${selected ? "is-selected" : ""}`}
+                    type="button"
+                    aria-pressed={selected}
+                    title={
+                      !selected && compare.assets.length >= 4
+                        ? "最多对比 4 篇"
+                        : undefined
+                    }
+                    onClick={() => compare.toggle(primary)}
+                    disabled={!selected && compare.assets.length >= 4}
+                  >
+                    {selected ? (
+                      <Check size={14} aria-hidden="true" />
+                    ) : (
+                      <GitCompareArrows size={14} aria-hidden="true" />
+                    )}
+                    {selected ? "已加入对比" : "加入对比"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </details>
+        </div>
+        {percentage !== null && (
+          <span className="score" aria-label={`相关度 ${percentage}%`}>
+            {percentage}% 匹配
+          </span>
+        )}
       </div>
     </article>
   );

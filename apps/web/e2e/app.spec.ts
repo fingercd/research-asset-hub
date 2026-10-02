@@ -277,41 +277,6 @@ async function installApiMock(page: Page) {
     if (path === "/api/v1/assets") return json(route, list([asset]));
     if (path === "/api/v1/annotations") return json(route, list([]));
     if (path === "/api/v1/similar/paper-1") return json(route, list([secondAsset]));
-    if (path === "/api/v1/code-graph") {
-      return json(route, {
-        total_count: 2,
-        indexed_count: 2,
-        hidden_count: 1,
-        domains: [
-          {
-            slug: "agent",
-            label: "智能体系统",
-            repository_count: 2,
-            indexed_count: 2,
-            repositories: [
-              {
-                id: "repository-1",
-                title: "示例仓库",
-                paths: ["D:/code/demo"],
-                gitnexus_indexed: true,
-                gitnexus_repo_name: "demo-repository",
-              },
-            ],
-            hidden_repositories: [
-              {
-                id: "repository-hidden",
-                title: "OpenBMB/BMTools",
-                paths: ["D:/code/bmtools"],
-                gitnexus_indexed: true,
-                gitnexus_repo_name: "BMTools",
-                hidden: true,
-              },
-            ],
-            hidden_count: 1,
-          },
-        ],
-      });
-    }
     if (path === "/api/v1/search") {
       return json(
         route,
@@ -319,22 +284,6 @@ async function installApiMock(page: Page) {
           ? { ...list([researchUnit]), group_by: "paper" }
           : list([asset]),
       );
-    }
-    if (path === "/api/v1/graph/neighbors") {
-      return json(route, {
-        nodes: [
-          { id: "paper-1", title: "示例论文", asset_type: "paper" },
-          { id: "paper-2", title: "第二篇论文", asset_type: "paper" },
-        ],
-        edges: [
-          {
-            id: "relation-1",
-            source: "paper-1",
-            target: "paper-2",
-            relation_type: "related_to",
-          },
-        ],
-      });
     }
     if (path === "/api/v1/comparisons") {
       if (route.request().method() === "POST") {
@@ -352,7 +301,7 @@ async function installApiMock(page: Page) {
     if (path === "/api/v1/sync-conflicts") return json(route, list([]));
     if (path === "/api/v1/settings") {
       return json(route, {
-        app: { mode: "local", gitnexus_url: "http://127.0.0.1:4747" },
+        app: { mode: "local" },
         search: { status: "ready" },
         sources: [],
         integrations: [],
@@ -370,14 +319,41 @@ test.beforeEach(async ({ page }) => {
   await installApiMock(page);
 });
 
+test("桌面 index.html 入口进入资料库并显示导航和全局搜索", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/index.html");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("heading", { name: "今天想研究什么？" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "返回上一页" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "搜索全部资料" })).toBeVisible();
+  await page.screenshot({ path: "../../work/desktop-polish-20260926/screenshots/updated-home.png" });
+});
+
+test("桌面页面历史保留搜索条件，弹窗支持键盘退出和焦点恢复", async ({ page }) => {
+  await page.goto("/search?q=agent&domain=agent&status=reading");
+  await page.getByRole("link", { name: "打开资料" }).click();
+  await expect(page.getByRole("heading", { name: "示例论文", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回上一页" }).click();
+  await expect(page).toHaveURL(/search\?q=agent&domain=agent&status=reading$/);
+  await page.getByRole("button", { name: "前进到下一页" }).click();
+  await expect(page).toHaveURL(/assets\/paper-1$/);
+  const trigger = page.getByRole("button", { name: "搜索全部资料" });
+  await trigger.click();
+  const input = page.getByRole("searchbox", { name: "全局搜索关键词" });
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("dialog").getByRole("button", { name: "笔记" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 const routes = [
-  ["/", "你的科研资产，一处整理"],
-  ["/search", "跨领域搜索"],
+  ["/", "今天想研究什么？"],
+  ["/search", "浏览资料库"],
   ["/assets/paper-1", "示例论文"],
   ["/domains", "研究领域"],
   ["/domains/agent", "智能体系统"],
-  ["/graph", "关系图谱"],
-  ["/code-graph", "代码图谱"],
   ["/compare", "论文对比"],
   ["/annotations", "全部批注"],
   ["/jobs", "后台任务"],
@@ -392,13 +368,15 @@ for (const [path, heading] of routes) {
   });
 }
 
-test("搜索卡片提供四种快捷打开并显示空批注", async ({ page }) => {
+test("搜索卡片默认保持简洁，更多菜单提供快捷打开", async ({ page }) => {
   await page.goto("/search?q=agent");
 
   const card = page.locator(".asset-card").filter({ hasText: "示例论文" });
   await expect(card).toBeVisible();
-  await expect(card.locator(".annotation-snippet")).toContainText("批注：无");
-  for (const label of ["PDF", "HTML", "导读", "代码"]) {
+  await expect(card.locator(".annotation-snippet")).toHaveCount(0);
+  await expect(card.getByRole("link", { name: "打开资料" })).toBeVisible();
+  await card.getByRole("button", { name: "更多" }).click();
+  for (const label of ["PDF", "HTML", "代码"]) {
     await expect(card.getByRole("button", { name: label, exact: true })).toBeEnabled();
   }
   const openRequest = page.waitForRequest(
@@ -415,19 +393,19 @@ test("搜索卡片提供四种快捷打开并显示空批注", async ({ page }) 
   await page.getByLabel("起始年份").fill("2020");
   await page.getByRole("checkbox", { name: "PDF", exact: true }).click();
   await expect(page).toHaveURL(/has_pdf=true/);
-  await page.getByRole("button", { name: "应用更多筛选" }).click();
+  await page.getByRole("button", { name: "应用筛选" }).click();
   await expect(page).toHaveURL(/type=paper/);
   await expect(page).toHaveURL(/author=%E7%A0%94%E7%A9%B6%E8%80%85%E7%94%B2/);
   await expect(page).toHaveURL(/year_from=2020/);
   await expect(page).toHaveURL(/has_pdf=true/);
 });
 
-test("详情页统一标签覆盖 PDF、代码、导读、关系、相似论文和 HTML", async ({
+test("详情页统一标签覆盖 PDF、代码、导读、相似论文和 HTML", async ({
   page,
 }) => {
   await page.goto("/assets/paper-1");
 
-  for (const label of ["PDF", "代码", "导读", "关系", "相似论文", "原始 HTML"]) {
+  for (const label of ["PDF", "代码", "导读", "相似论文", "原始 HTML"]) {
     await expect(page.getByRole("tab", { name: label, exact: true })).toBeVisible();
   }
 
@@ -443,63 +421,11 @@ test("详情页统一标签覆盖 PDF、代码、导读、关系、相似论文�
   await page.getByRole("button", { name: "打开文件 README.md" }).click();
   await expect(page.locator(".code-browser-source code")).toContainText("# demo");
 
-  await page.getByRole("tab", { name: "关系", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "关系资产" })).toBeVisible();
-  await expect(page.getByText("第二篇论文")).toBeVisible();
-
   await page.getByRole("tab", { name: "相似论文", exact: true }).click();
   await expect(page.getByRole("heading", { name: "第二篇论文" })).toBeVisible();
 
   await page.getByRole("tab", { name: "原始 HTML", exact: true }).click();
   await expect(page.getByTitle("原始 HTML")).toBeVisible();
-});
-
-test("Cytoscape 渲染可交互图谱", async ({ page }) => {
-  await page.goto("/graph?asset_id=paper-1");
-  const canvas = page.locator(".cytoscape-canvas");
-  await expect(canvas).toBeVisible();
-  await expect(canvas.locator("canvas").first()).toBeVisible();
-  await expect(page.getByText("第二篇论文")).toBeVisible();
-  await expect(page.getByText("打开代码图谱")).toHaveCount(0);
-});
-
-test("代码图谱内嵌 GitNexus 并可直达仓库", async ({ page }) => {
-  await page.goto("/code-graph");
-
-  const viewer = page.locator('iframe[title="GitNexus 代码图谱"]');
-  await expect(viewer).toBeVisible();
-  await expect(viewer).toHaveAttribute("src", "http://127.0.0.1:4747");
-  await expect(page.locator(".code-graph-window-grid")).toBeVisible();
-  await expect(page.locator(".code-graph-window-scroll")).toBeVisible();
-
-  await page.getByRole("button", { name: "打开图谱" }).click();
-  await expect(viewer).toHaveAttribute(
-    "src",
-    "http://127.0.0.1:4747/?project=demo-repository",
-  );
-  await expect(page.getByText("GitNexus 官方界面")).toBeVisible();
-});
-
-test("代码图谱默认隐藏仓库并可在当前窗口打开", async ({ page }) => {
-  await page.goto("/code-graph");
-
-  await expect(page.getByText("OpenBMB/BMTools")).toHaveCount(0);
-  await page.getByRole("button", { name: /显示已隐藏仓库/ }).click();
-  await expect(
-    page.getByRole("button", { name: /OpenBMB\/BMTools/ }),
-  ).toBeVisible();
-
-  const viewer = page.locator('iframe[title="GitNexus 代码图谱"]');
-  await page
-    .locator(".code-graph-repo")
-    .filter({ hasText: "OpenBMB/BMTools" })
-    .getByRole("button", { name: "打开图谱" })
-    .click();
-  await expect(viewer).toHaveAttribute(
-    "src",
-    "http://127.0.0.1:4747/?project=BMTools",
-  );
-  await expect(page).toHaveURL(/\/code-graph$/);
 });
 
 test("比较页保存完整研究维度并导出 Markdown", async ({ page }) => {
@@ -520,7 +446,6 @@ test("比较页保存完整研究维度并导出 Markdown", async ({ page }) => 
     "限制",
     "代码",
     "个人批注",
-    "关系",
   ]) {
     await expect(page.getByRole("rowheader", { name: dimension })).toBeVisible();
   }
@@ -531,9 +456,8 @@ test("比较页保存完整研究维度并导出 Markdown", async ({ page }) => 
 
 test("核心页面没有 axe 可访问性违规", async ({ page }) => {
   const pages = [
-    ["/search?q=agent", "跨领域搜索"],
+    ["/search?q=agent", "“agent”的搜索结果"],
     ["/assets/paper-1", "示例论文"],
-    ["/graph?asset_id=paper-1", "关系图谱"],
     ["/compare", "论文对比"],
     ["/settings", "设置"],
   ] as const;

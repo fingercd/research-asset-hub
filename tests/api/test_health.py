@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from fastapi.testclient import TestClient
 
 from apps.api import health
 from apps.api.config import ApiSettings
+from apps.api.database import DatabaseManager, DatabaseReadiness
+from apps.api.main import create_app
 
 
 class FakeCursor:
@@ -125,3 +130,75 @@ async def test_database_probe_rejects_unexpected_query_result(
 
     assert result.status == "unavailable"
     assert "unexpected result" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_collect_health_exposes_only_active_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def healthy_database(_settings: ApiSettings) -> health.ComponentHealth:
+        return health.ComponentHealth(status="healthy", detail="ready")
+
+    async def healthy_http(**_kwargs: object) -> health.ComponentHealth:
+        return health.ComponentHealth(status="healthy", detail="ready")
+
+    def healthy_worker(_path: Path, _stale_after: float) -> health.ComponentHealth:
+        return health.ComponentHealth(status="healthy", detail="ready")
+
+    monkeypatch.setattr(health, "probe_database", healthy_database)
+    monkeypatch.setattr(health, "probe_http", healthy_http)
+    monkeypatch.setattr(health, "probe_worker", healthy_worker)
+
+    result = await health.collect_health(settings())
+
+    assert set(result.components) == {
+        "database",
+        "full_text_index",
+        "worker",
+    }
+    assert result.status == "healthy"
+
+
+@pytest.mark.parametrize(
+    ("readiness_status", "full_text_status", "expected_status"),
+    [
+        ("ready", "healthy", "healthy"),
+        ("ready", "unavailable", "degraded"),
+        ("unmigrated", "healthy", "degraded"),
+    ],
+)
+def test_api_health_overall_matches_final_component_states(
+    monkeypatch: pytest.MonkeyPatch,
+    readiness_status: str,
+    full_text_status: str,
+    expected_status: str,
+) -> None:
+    async def initial_health(_settings: ApiSettings) -> health.HealthResponse:
+        return health.HealthResponse(
+            status="degraded",
+            checked_at=datetime.now(UTC),
+            components={
+                "database": health.ComponentHealth(status="unavailable", detail="probe timed out"),
+                "full_text_index": health.ComponentHealth(
+                    status=full_text_status, detail="checked"
+                ),
+                "worker": health.ComponentHealth(status="healthy", detail="checked"),
+            },
+        )
+
+    class StubDatabase:
+        def check(self, *, force: bool = False) -> DatabaseReadiness:
+            assert force
+            return DatabaseReadiness(readiness_status, "schema checked")
+
+    monkeypatch.setattr("apps.api.main.collect_health", initial_health)
+    app = create_app(settings(), database=cast(DatabaseManager, StubDatabase()))
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == expected_status
+    assert payload["components"]["database"]["status"] == (
+        "healthy" if readiness_status == "ready" else "unavailable"
+    )

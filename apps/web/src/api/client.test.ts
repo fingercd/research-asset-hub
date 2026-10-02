@@ -72,6 +72,26 @@ describe("API mutation guards", () => {
   });
 });
 
+describe("health API", () => {
+  it("accepts a slow but successful database health check", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((_path: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        setTimeout(() => resolve(jsonResponse({
+          service: "research-asset-hub", status: "healthy", components: {},
+        })), 9_000);
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      }),
+    ));
+    const result = api.health().then(
+      (response) => ({ status: response.status }),
+      () => ({ status: "failed" }),
+    );
+    await vi.advanceTimersByTimeAsync(9_000);
+    await expect(result).resolves.toEqual({ status: "healthy" });
+  });
+});
+
 describe("search API", () => {
   it("sends paper grouping while allowing an empty browse query", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
@@ -87,7 +107,7 @@ describe("search API", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/search?mode=keyword&group_by=paper&domain=robotics",
+      "/api/v1/search?mode=keyword&sort=date_desc&group_by=paper&domain=robotics",
       expect.any(Object),
     );
   });

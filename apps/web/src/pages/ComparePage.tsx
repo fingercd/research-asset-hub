@@ -21,7 +21,6 @@ import {
   type Annotation,
   type Asset,
   type Comparison,
-  type GraphResponse,
 } from "../api/types";
 import { EmptyState, ErrorState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
@@ -35,7 +34,6 @@ import { useCompare } from "../state/CompareContext";
 
 interface ComparisonContext {
   annotations: Annotation[];
-  graph: GraphResponse;
 }
 
 interface ComparisonRow {
@@ -93,21 +91,6 @@ function annotationSummary(
     .map((item) => item.summary || annotationBody(item))
     .filter(Boolean);
   return notes?.length ? notes.join("；") : annotationSnippet(asset);
-}
-
-function relationSummary(
-  asset: Asset,
-  context?: ComparisonContext,
-): string {
-  if (!context) return readable(structured(asset, ["relations", "relation_summary"]));
-  const nodes = context.graph.nodes ?? [];
-  const edges = context.graph.edges ?? [];
-  const labels = nodes
-    .filter((node) => node.id !== asset.id)
-    .slice(0, 6)
-    .map((node) => node.title ?? node.label ?? node.id);
-  if (!edges.length && !labels.length) return "无";
-  return `${edges.length} 条关系${labels.length ? `：${labels.join("、")}` : ""}`;
 }
 
 function mergeAssets(comparison: Comparison, fallback: Asset[]): Asset[] {
@@ -214,13 +197,6 @@ function comparisonRows(
       label: "个人批注",
       values: assets.map((asset) =>
         annotationSummary(asset, contexts.get(asset.id)),
-      ),
-    },
-    {
-      key: "relations",
-      label: "关系",
-      values: assets.map((asset) =>
-        relationSummary(asset, contexts.get(asset.id)),
       ),
     },
     {
@@ -355,11 +331,8 @@ export function ComparePage() {
     queries: displayedAssets.map((asset) => ({
       queryKey: ["comparison-context", asset.id],
       queryFn: async ({ signal }: { signal: AbortSignal }) => {
-        const [annotations, graph] = await Promise.all([
-          api.annotations(asset.id, signal),
-          api.graphNeighbors(asset.id, 1, signal),
-        ]);
-        return { annotations: annotations.items, graph };
+        const annotations = await api.annotations(asset.id, signal);
+        return { annotations: annotations.items };
       },
       staleTime: 30_000,
       retry: false,
@@ -394,7 +367,7 @@ export function ComparePage() {
       <PageHeader
         eyebrow="并排阅读"
         title="论文对比"
-        description="选择 2–4 篇论文，对照研究问题、机制、贡献、实验、限制、代码、批注与关系。"
+        description="选择 2–4 篇论文，对照研究问题、机制、贡献、实验、限制、代码与批注。"
       />
 
       <section className="section-block compare-selection">
@@ -558,7 +531,7 @@ export function ComparePage() {
             </button>
           </div>
           {contextQueries.some((item) => item.isPending) && (
-            <p className="muted">正在补充批注与关系上下文…</p>
+            <p className="muted">正在补充批注上下文…</p>
           )}
           <ComparisonTable
             comparison={result}

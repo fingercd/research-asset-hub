@@ -1,16 +1,21 @@
-"""Build the four Meilisearch keyword indexes from PostgreSQL."""
+"""Build the serving Meilisearch keyword indexes from PostgreSQL.
+
+The code index is optional; ``--skip-code`` is the low-memory/default serving
+mode and leaves any existing code index untouched.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from packages.indexing import IndexBuilder, RemoteIndexSuite
+from packages.indexing import KEYWORD_INDEX_NAMES, IndexBuilder, RemoteIndexSuite
 from packages.indexing.builder import KeywordBuildReport
 
 DEFAULT_DATABASE_URL = (
@@ -33,6 +38,12 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--version", default="v1")
     parser.add_argument("--write-batch-size", type=int, default=256)
+    parser.add_argument("--task-flush-batches", type=int, default=16)
+    parser.add_argument(
+        "--skip-code",
+        action="store_true",
+        help="Leave the existing code index untouched and rebuild only non-code indexes.",
+    )
     parser.add_argument(
         "--report",
         type=Path,
@@ -47,24 +58,64 @@ def _sqlalchemy_url(value: str) -> str:
     return value
 
 
+def _engine_options(database_url: str) -> dict[str, object]:
+    options: dict[str, object] = {"pool_pre_ping": True}
+    if database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+        options["isolation_level"] = "REPEATABLE READ"
+    return options
+
+
+def _write_report_atomic(path: Path, report: KeywordBuildReport) -> str:
+    """Publish a success report only after the DB transaction committed."""
+
+    rendered = json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary:
+            temporary.write(rendered + "\n")
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+    return rendered
+
+
 def main() -> None:
     args = _arguments()
+    selected_indexes = tuple(
+        name
+        for name in KEYWORD_INDEX_NAMES
+        if not (args.skip_code and name == "code")
+    )
     suite = RemoteIndexSuite.connect(
         meilisearch_url=args.meilisearch_url,
         meilisearch_api_key=args.meilisearch_api_key,
+        index_names=selected_indexes,
     )
-    engine = create_engine(_sqlalchemy_url(args.database_url), pool_pre_ping=True)
+    database_url = _sqlalchemy_url(args.database_url)
+    engine = create_engine(database_url, **_engine_options(database_url))
     try:
         with Session(engine) as session:
             report: KeywordBuildReport = IndexBuilder(
                 suite,
                 version=args.version,
                 write_batch_size=args.write_batch_size,
-            ).rebuild_keywords(session)
+                task_flush_batch_count=args.task_flush_batches,
+            ).rebuild_keywords(session, index_names=selected_indexes)
             session.commit()
-        rendered = json.dumps(report.to_dict(), ensure_ascii=False, indent=2)
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(rendered + "\n", encoding="utf-8")
+        rendered = _write_report_atomic(args.report, report)
         print(rendered)
     finally:
         engine.dispose()

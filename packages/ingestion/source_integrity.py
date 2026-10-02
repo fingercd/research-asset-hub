@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -22,7 +22,11 @@ from sqlalchemy.orm import Session
 
 from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
 from packages.domain.enums import MaterializationKind, RepresentationAvailability
-from packages.domain.models import Representation, Source
+from packages.domain.models import RepositoryProfile, Representation, Source
+from packages.domain.serving_scope import active_representation_clause
+from packages.ingestion import safe_tree_policy
+
+ServingScope = Literal["serving_active", "all"]
 
 _LOCAL_KINDS = frozenset(
     {
@@ -59,7 +63,9 @@ class SourceIntegrityReport:
     """Result of one read-only source integrity pass."""
 
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    scope: ServingScope = "serving_active"
     counts: dict[str, int] = field(default_factory=dict)
+    population: dict[str, int] = field(default_factory=dict)
     mismatches: list[SourceIntegrityMismatch] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
@@ -76,9 +82,11 @@ class SourceIntegrityReport:
         counts["mismatches"] = mismatch_count
         return {
             "schema": "research-asset-hub.source-integrity/v1",
+            "scope": self.scope,
             "status": "passed" if mismatch_count == 0 else "failed",
             "generated_at": self.generated_at.isoformat(),
             "read_only": True,
+            "population": dict(self.population),
             "counts": counts,
             "mismatches": [item.to_dict() for item in self.mismatches],
         }
@@ -186,11 +194,25 @@ def _git_worktree_matches_recorded_revision(
     # reported worktree path exists, and its raw bytes equal the HEAD blob.
     paths: list[str] = []
     for entry in entries:
-        if len(entry) < 4 or entry[:2] != " M":
+        if len(entry) < 4:
             return False
         relative = entry[3:]
         reference = PurePosixPath(relative.replace("\\", "/"))
         if reference.is_absolute() or ".." in reference.parts:
+            return False
+        if entry[:2] == "??" and reference.parts[0] == ".gitnexus":
+            metadata_root = path / ".gitnexus"
+            try:
+                metadata_stat = os.lstat(metadata_root)
+            except OSError:
+                return False
+            if (
+                safe_tree_policy.is_reparse_stat(metadata_stat)
+                or not metadata_root.is_dir()
+            ):
+                return False
+            continue
+        if entry[:2] != " M":
             return False
         paths.append(reference.as_posix())
     return all(_worktree_file_matches_head_blob(path, relative) for relative in paths)
@@ -229,7 +251,7 @@ def _only_git_metadata_changed_since(path: Path, baseline: datetime) -> bool:
     try:
         for child in path.rglob("*"):
             relative = child.relative_to(path)
-            if relative.parts and relative.parts[0] == ".git":
+            if relative.parts and relative.parts[0] in {".git", ".gitnexus"}:
                 continue
             if child.stat().st_mtime_ns > threshold:
                 return False
@@ -259,6 +281,8 @@ def _mismatch(
 def verify_source_integrity(
     session: Session,
     registry: SourceRegistry,
+    *,
+    scope: ServingScope = "serving_active",
 ) -> SourceIntegrityReport:
     """Verify every active, locally materialized representation in ``session``.
 
@@ -268,18 +292,42 @@ def verify_source_integrity(
     pass, so repeated mounts do not cause repeated reads.
     """
 
-    report = SourceIntegrityReport()
+    normalized_scope = _normalize_scope(scope)
+    report = SourceIntegrityReport(scope=normalized_scope)
     resolution_cache: dict[tuple[str, str, str], Path | UnsafeAssetPath] = {}
     file_digest_cache: dict[tuple[str, int, int], str] = {}
     directory_digest_cache: dict[str, str] = {}
 
-    representations = session.execute(
+    base_statement = (
         select(Representation, Source.alias)
         .outerjoin(Source, Representation.source_id == Source.id)
         .where(Representation.deleted_at.is_(None))
         .order_by(Representation.id)
+    )
+    registered_non_deleted = session.execute(base_statement).all()
+    serving_active = session.execute(
+        base_statement.where(active_representation_clause())
     ).all()
+    representations = (
+        registered_non_deleted if normalized_scope == "all" else serving_active
+    )
+    report.population.update(
+        {
+            "registered_non_deleted": len(registered_non_deleted),
+            "serving_active": len(serving_active),
+            "retired_historical": len(registered_non_deleted) - len(serving_active),
+        }
+    )
     report.counts["representations_seen"] = len(representations)
+    repository_revisions = {
+        asset_id: str(revision)
+        for asset_id, revision in session.execute(
+            select(RepositoryProfile.asset_id, RepositoryProfile.pinned_revision).where(
+                RepositoryProfile.pinned_revision.is_not(None)
+            )
+        )
+        if revision
+    }
 
     for representation, source_alias_value in representations:
         source_alias = str(source_alias_value) if source_alias_value is not None else None
@@ -354,6 +402,10 @@ def verify_source_integrity(
             continue
 
         attributes = _source_attributes(representation)
+        if "commit" not in attributes:
+            pinned_revision = repository_revisions.get(representation.asset_id)
+            if pinned_revision:
+                attributes["commit"] = pinned_revision
         reasons: list[str] = []
         if materialization == MaterializationKind.FILE.value:
             if not path.is_file():
@@ -433,6 +485,14 @@ def verify_source_integrity(
             )
 
     return report
+
+
+def _normalize_scope(value: str) -> ServingScope:
+    if value == "serving_active":
+        return "serving_active"
+    if value == "all":
+        return "all"
+    raise ValueError("scope must be 'serving_active' or 'all'")
 
 
 __all__ = [

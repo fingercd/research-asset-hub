@@ -5,11 +5,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from alembic.config import Config as AlembicConfig
-from alembic.script import ScriptDirectory
-from alembic.script.revision import RevisionError
-from alembic.util.exc import CommandError
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +14,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from apps.api.config import PROJECT_ROOT, ApiSettings
+
+if TYPE_CHECKING:
+    from alembic.script import ScriptDirectory
 
 REQUIRED_TABLES = frozenset(
     {
@@ -96,6 +96,9 @@ class DatabaseManager:
 
     def _script_directory(self) -> ScriptDirectory:
         if self._script_directory_cached is None:
+            from alembic.config import Config as AlembicConfig
+            from alembic.script import ScriptDirectory
+
             config = AlembicConfig(str(PROJECT_ROOT / "migrations" / "alembic.ini"))
             self._script_directory_cached = ScriptDirectory.from_config(config)
         return self._script_directory_cached
@@ -107,6 +110,9 @@ class DatabaseManager:
         required = self.settings.database_required_revision
         if revision == required:
             return True
+        from alembic.script.revision import RevisionError
+        from alembic.util.exc import CommandError
+
         try:
             scripts = self._script_directory()
         except (CommandError, OSError):

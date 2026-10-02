@@ -346,6 +346,8 @@ export function DomainPortalArticle({
     { id: "recent", label: "最近更新", icon: Clock3 },
     { id: "stats", label: "统计", icon: BarChart3 },
   ];
+  const paperCount = domain.paper_count ?? 0;
+  const repositoryCount = domain.repository_count ?? 0;
   const catalog = (
     <div className="portal-catalog-summary">
       <p>{text(portal.sections.find((item) => item.id === "catalog")?.content.summary)}</p>
@@ -370,9 +372,8 @@ export function DomainPortalArticle({
         </div>
       </header>
       <dl className="domain-portal-metrics" aria-label="领域概况">
-        <div><dt>论文</dt><dd>{domain.paper_count ?? 0}</dd></div>
-        <div><dt>仓库</dt><dd>{domain.repository_count ?? 0}</dd></div>
-        <div><dt>研究单元</dt><dd>{domain.research_unit_count ?? 0}</dd></div>
+        <div><dt>论文（主口径）</dt><dd>{paperCount}</dd></div>
+        <div><dt>代码仓库（单独统计）</dt><dd>{repositoryCount}</dd></div>
         <div><dt>阅读中</dt><dd>{domain.reading_counts?.reading ?? 0}</dd></div>
       </dl>
       <nav

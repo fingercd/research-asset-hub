@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from .filters import matches_metadata, meilisearch_filter
+from .filters import canonical_filters, matches_metadata, meilisearch_filter
 from .models import (
     BackendHealth,
     BackendState,
@@ -37,6 +37,15 @@ def tokenize(value: str) -> list[str]:
 
 
 def _matches_filters(document: SearchDocument, filters: Mapping[str, Any]) -> bool:
+    asset_ids = canonical_filters(filters).pop("asset_id", None)
+    if asset_ids is not None:
+        expected = (
+            set(asset_ids)
+            if isinstance(asset_ids, Sequence) and not isinstance(asset_ids, (str, bytes))
+            else {asset_ids}
+        )
+        if document.asset_id not in expected:
+            return False
     return matches_metadata(document.metadata, filters)
 
 
@@ -305,6 +314,8 @@ class MeilisearchIndex:
         limit: int = 20,
         filters: Mapping[str, Any] | None = None,
     ) -> list[SearchHit]:
+        if canonical_filters(filters).get("asset_id") == []:
+            return []
         payload: dict[str, Any] = {
             "q": query,
             "limit": limit,

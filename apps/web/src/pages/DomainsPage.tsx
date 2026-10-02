@@ -172,8 +172,8 @@ export function DomainDetailPage() {
         </div>
         {!unitsQuery.isPending && (
           <p className="loaded-unit-summary" aria-live="polite">
-            已加载 <strong>{units.length}</strong> 个研究单元 · 覆盖{" "}
-            <strong>{coveredAssets}</strong> / {domainAssetCount} 项资产
+            已加载 <strong>{units.length}</strong> 篇论文 · 关联覆盖{" "}
+            <strong>{coveredAssets}</strong> / {domainAssetCount} 项底层资产
           </p>
         )}
       </div>
@@ -252,20 +252,20 @@ export function DomainDetailPage() {
       </div>
       <dl className="domain-stat-grid">
         <div>
-          <dt>全部资产</dt>
-          <dd>{domainAssetCount}</dd>
-        </div>
-        <div>
-          <dt>论文</dt>
+          <dt>论文（主口径）</dt>
           <dd>{data.paper_count ?? 0}</dd>
         </div>
         <div>
-          <dt>仓库</dt>
+          <dt>代码仓库（单独统计）</dt>
           <dd>{data.repository_count ?? 0}</dd>
         </div>
         <div>
-          <dt>研究单元</dt>
+          <dt>研究单元（聚合视图）</dt>
           <dd>{data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}</dd>
+        </div>
+        <div>
+          <dt>底层资产（技术统计）</dt>
+          <dd>{domainAssetCount}</dd>
         </div>
         <div>
           <dt>未读</dt>

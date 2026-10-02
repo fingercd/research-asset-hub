@@ -8,13 +8,38 @@ mod tray;
 mod updater;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
-use tauri::{Manager, WindowEvent};
+use tauri::{
+    webview::{NewWindowResponse, PageLoadEvent},
+    Manager, WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_opener::OpenerExt;
 
 use orchestrator::{Orchestrator, StartupError, StepStatus, CANCEL_DETAIL};
+
+static APP_STARTED: OnceLock<std::time::Instant> = OnceLock::new();
+
+fn log_startup_milestone(label: &str) {
+    use std::io::Write;
+    let started = APP_STARTED.get_or_init(std::time::Instant::now);
+    let logs = data_dir::data_paths().logs;
+    let _ = std::fs::create_dir_all(&logs);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs.join("desktop-timing.log"))
+    {
+        let _ = writeln!(
+            file,
+            "{} {:.3}s {label}",
+            std::process::id(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+}
 
 /// 当前编排实例与它的取消令牌:start 在 orch 的锁内执行;
 /// 退出/重试先经 cancel 无锁置位打断(等待循环 ≤500ms 察觉),再取 orch 锁清理,
@@ -28,9 +53,11 @@ pub struct OrchestratorEntry {
 pub struct AppState {
     pub force_exit: AtomicBool,
     pub orchestrator: Mutex<Option<OrchestratorEntry>>,
+    pub startup_progress: Mutex<Vec<StartupProgress>>,
+    pub startup_ready: AtomicBool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StartupProgress {
     pub step: String,
     pub status: String, // "pending" | "done" | "failed"
@@ -38,14 +65,30 @@ pub struct StartupProgress {
     pub detail: Option<String>,
 }
 
+fn remember_startup_progress(history: &mut Vec<StartupProgress>, progress: &StartupProgress) {
+    if progress.step == "预检环境" && progress.status == "pending" {
+        history.clear();
+    }
+    history.push(progress.clone());
+}
+
+fn progress_script(progress: &StartupProgress) -> tauri::Result<String> {
+    let json = serde_json::to_string(progress).map_err(|e| tauri::Error::Anyhow(e.into()))?;
+    Ok(format!(
+        "window.__hubProgress && window.__hubProgress({json});"
+    ))
+}
+
 /// 把 Rust 侧 startup-progress 事件桥接到加载页的 window.__hubProgress。
-/// 通过 eval 调用而非让加载页引 @tauri-apps/api,保持前端零依赖。
+/// 同时缓存本轮事件，加载页初始化前发出的事件会在 page load 后顺序补发。
 pub fn emit_startup_progress(
     app: &tauri::AppHandle,
     progress: &StartupProgress,
 ) -> tauri::Result<()> {
-    let json = serde_json::to_string(progress).map_err(|e| tauri::Error::Anyhow(e.into()))?;
-    let script = format!("window.__hubProgress && window.__hubProgress({json});");
+    let script = progress_script(progress)?;
+    let state = app.state::<AppState>();
+    let mut history = state.startup_progress.lock().unwrap();
+    remember_startup_progress(&mut history, progress);
     if let Some(window) = app.get_webview_window("main") {
         window.eval(&script)?;
     }
@@ -73,6 +116,10 @@ fn shutdown_orchestrator(state: &AppState) {
 /// 再取锁 shutdown 收尾(已结束的实例立即清理残留,进行中的 ≤~1s 自行返回后清理),
 /// 避免端口占用误报。
 fn run_startup(app: tauri::AppHandle) {
+    let started = std::time::Instant::now();
+    app.state::<AppState>()
+        .startup_ready
+        .store(false, Ordering::SeqCst);
     let old = {
         let state = app.state::<AppState>();
         let mut guard = state.orchestrator.lock().unwrap();
@@ -104,12 +151,33 @@ fn run_startup(app: tauri::AppHandle) {
     }
 
     let ports = orchestrator::Ports::from_env();
+    // The bundled interpreter is the active application environment. Inherit this
+    // in child shells too, so local CMD AutoRun hooks do not activate Conda on
+    // Python's platform/version probes (several seconds per service on Windows).
+    if let Some(python_dir) = paths.python.parent() {
+        std::env::set_var("VIRTUAL_ENV", python_dir);
+    }
     // meili master key 落盘目录:数据根下 secrets/(与 logs/postgres-data 同级)
     let secrets_dir = data_dir::data_root().join("secrets");
-    let _ = env::prepare(&ports, &secrets_dir);
+    let app_config_dir = paths.python_workdir.join("config");
+    let _ = env::prepare(&ports, &secrets_dir, &app_config_dir);
 
     let app_for_events = app.clone();
     let orchestrator = Orchestrator::new(paths, ports, move |event| {
+        use std::io::Write;
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir::data_paths().logs.join("startup-timing.log"))
+        {
+            let _ = writeln!(
+                log,
+                "{:.3}s {:?} {:?}",
+                started.elapsed().as_secs_f64(),
+                event.step,
+                event.status
+            );
+        }
         let _ = emit_startup_progress(
             &app_for_events,
             &StartupProgress {
@@ -150,6 +218,10 @@ fn run_startup(app: tauri::AppHandle) {
     // 不写回 Option 也就不会覆盖重试换入的更新实例。
     match result {
         Ok(()) => {
+            app.state::<AppState>()
+                .startup_ready
+                .store(true, Ordering::SeqCst);
+            log_startup_milestone("services-ready");
             // 编排完成即就绪,导航到主界面并显示窗口。
             // 窗口以 create: false 构建(就绪前不露空窗),首次启动的正常路径
             // 此前从不调用 show(),窗口永远隐藏——用户看到的只有闪现的终端与
@@ -176,6 +248,7 @@ fn run_startup(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    log_startup_milestone("process-entry");
     // 单实例保护必须在任何 Builder/setup 之前:第二个实例若进入 setup,
     // 编排器预检会把已有实例的后台服务当作"残留"清理并弹报错(实测)。
     // 此处互斥体拦截:已有实例则唤起其窗口后立即退出。
@@ -184,38 +257,81 @@ pub fn run() {
         std::process::exit(0);
     }
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             force_exit: AtomicBool::new(false),
             orchestrator: Mutex::new(None),
+            startup_progress: Mutex::new(Vec::new()),
+            startup_ready: AtomicBool::new(false),
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == PageLoadEvent::Finished && !payload.url().path().ends_with("/loading.html") {
+                log_startup_milestone("frontend-loaded");
+            }
+            if webview.label() != "main"
+                || payload.event() != PageLoadEvent::Finished
+                || !payload.url().path().ends_with("/loading.html")
+            {
+                return;
+            }
+            // 与 emit 共用锁，保证补发的旧事件不会排到新的实时事件之后。
+            let state = webview.app_handle().state::<AppState>();
+            if state.startup_ready.load(Ordering::SeqCst) {
+                let _ = webview.eval("location.replace('index.html');");
+                return;
+            }
+            let history = state.startup_progress.lock().unwrap();
+            for progress in history.iter() {
+                if let Ok(script) = progress_script(progress) {
+                    let _ = webview.eval(&script);
+                }
+            }
         })
         .setup(|app| {
+            log_startup_milestone("setup-enter");
+            // Backend imports and database startup overlap WebView creation.
+            // The loading-page callback replays progress or redirects when ready.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || run_startup(handle));
             // 桌面壳注入 API 基址;前端 resolveApiBase 优先读它(Task 2)。
             // 用 initialization script 而非 setup 内一次性 eval:初始化脚本在每次
             // 文档加载(包括 location.replace('index.html') 导航)时重新执行,
             // 一次性 eval 注入的值会随导航被清空,导致主界面 API 全部打向
             // tauri://localhost 404。窗口改为 create: false + from_config 手动创建,
             // 以便在构建时附加初始化脚本(conf 的 WindowConfig 无 initializationScript 字段)。
-            // 端口固定 8767;后续动态化时改由 Ports 拼脚本字符串再传入。
-            const API_BASE_INIT_SCRIPT: &str =
-                "window.__HUB_API_BASE__ = 'http://127.0.0.1:8767/api/v1';";
+            let api_port = orchestrator::Ports::from_env().api;
+            let api_base_init_script =
+                format!("window.__HUB_API_BASE__ = 'http://127.0.0.1:{api_port}/api/v1';");
             let window_config = app.config().app.windows.first().expect("main window config");
+            let app_for_links = app.handle().clone();
             let _main_window = tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)
                 .expect("main window config must be valid")
-                .initialization_script(API_BASE_INIT_SCRIPT)
+                .initialization_script(&api_base_init_script)
+                .on_new_window(move |url, _features| {
+                    // Wry 默认拦截 window.open；opener 插件只自动接管 a[target=_blank]。
+                    // PDF/HTML 快捷打开使用程序调用，交给系统默认浏览器处理。
+                    if matches!(url.scheme(), "http" | "https") {
+                        let app = app_for_links.clone();
+                        std::thread::spawn(move || {
+                            if let Err(error) = app.opener().open_url(url.as_str(), None::<&str>) {
+                                app.dialog()
+                                    .message(format!("无法在默认浏览器中打开链接：{error}"))
+                                    .title("打开链接失败")
+                                    .blocking_show();
+                            }
+                        });
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build()
                 .expect("main window must build");
+            log_startup_milestone("webview-created");
 
             let rx = tray::create_tray(app.handle(), true)
                 .expect("tray creation must succeed")
                 .expect("channel must be present");
+            log_startup_milestone("tray-created");
 
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -320,8 +436,6 @@ pub fn run() {
                 }
             });
 
-            let handle = app.handle().clone();
-            std::thread::spawn(move || run_startup(handle));
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -347,4 +461,32 @@ pub fn run() {
                 shutdown_orchestrator(&state);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_progress_replay_keeps_each_stage_and_resets_on_retry() {
+        let event = |step: &str, status: &str| StartupProgress {
+            step: step.into(),
+            status: status.into(),
+            detail: None,
+        };
+        let mut history = Vec::new();
+        for progress in [
+            event("预检环境", "pending"),
+            event("预检环境", "done"),
+            event("启动数据库", "pending"),
+        ] {
+            remember_startup_progress(&mut history, &progress);
+        }
+        assert_eq!(history.len(), 3, "加载后应补发此前已完成的阶段");
+        assert_eq!(history[1], event("预检环境", "done"));
+
+        remember_startup_progress(&mut history, &event("启动数据库", "failed"));
+        remember_startup_progress(&mut history, &event("预检环境", "pending"));
+        assert_eq!(history, vec![event("预检环境", "pending")]);
+    }
 }

@@ -44,6 +44,15 @@ def test_start_waits_for_health_and_cleans_a_partial_start() -> None:
     assert "Stop-HubProcesses -Records $applicationRecords" in script
 
 
+def test_start_accepts_gateway_degraded_only_when_core_dependencies_are_ready() -> None:
+    script = HUB_SCRIPT.read_text(encoding="utf-8")
+
+    assert "AllowDegradedWithReadyDependencies" in script
+    assert "[string]$payload.database -eq 'ready'" in script
+    assert "[string]$payload.signing -eq 'ready'" in script
+    assert "-AllowDegradedWithReadyDependencies" in script
+
+
 def test_stop_can_preserve_wsl_compose_infrastructure() -> None:
     script = HUB_SCRIPT.read_text(encoding="utf-8")
 
@@ -62,11 +71,9 @@ def test_status_reports_runtime_urls_and_not_bootstrap_status() -> None:
     assert "Asset health:" in script
 
 
-def test_start_manages_gitnexus_service() -> None:
+def test_start_does_not_manage_a_code_graph_service() -> None:
     script = HUB_SCRIPT.read_text(encoding="utf-8")
 
-    assert "HUB_GITNEXUS_PORT' -Default 4747" in script
-    assert "gitnexus-serve" in script
-    assert "$env:HUB_GITNEXUS_URL = $gitnexusUrl" in script
-    assert "Invoke-HubHealthProbe -Name 'gitnexus-serve'" in script
-    assert "npm install -g gitnexus" in script
+    assert "HUB_GITNEXUS_PORT" not in script
+    assert "gitnexus-serve" not in script
+    assert "HUB_GITNEXUS_URL" not in script

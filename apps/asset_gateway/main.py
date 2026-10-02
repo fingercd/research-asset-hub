@@ -6,8 +6,8 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
 from uuid import UUID
 
 from fastapi import Cookie, FastAPI, Query, Request
@@ -29,6 +29,11 @@ from apps.asset_gateway.theme import (
     theme_etag,
 )
 from packages.domain.models import Representation, RepresentationMount, Source
+from packages.domain.serving_scope import (
+    RetiredRepresentationError,
+    assert_representation_active,
+    retired_source_ids,
+)
 from packages.security.sensitive_names import SENSITIVE_FILE_NAMES
 
 COOKIE_NAME = "rah_gateway_session"
@@ -50,11 +55,47 @@ def _html_policy(representation: Representation | None) -> str:
     return "network_required" if representation.network_required else "static"
 
 
-def _content_security_policy(representation: Representation | None) -> str:
+def _normalized_origin(value: str) -> str | None:
+    candidate = value.strip().rstrip("/")
+    try:
+        parsed = urlsplit(candidate)
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https", "tauri"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return candidate
+
+
+def _browser_origins(settings: ApiSettings) -> list[str]:
+    candidates = [
+        settings.web_origin,
+        settings.web_origin.replace("127.0.0.1", "localhost"),
+        settings.web_origin.replace("localhost", "127.0.0.1"),
+        *settings.desktop_origins,
+    ]
+    origins: list[str] = []
+    for value in candidates:
+        origin = _normalized_origin(value)
+        if origin is not None and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+def _content_security_policy(
+    representation: Representation | None,
+    browser_origins: list[str],
+) -> str:
     policy = _html_policy(representation)
-    frame_ancestors = (
-        "frame-ancestors http://127.0.0.1:8765 http://localhost:8765"
-    )
+    frame_ancestors = "frame-ancestors " + " ".join(browser_origins)
     if policy == "network_required":
         return (
             "default-src 'self' data: blob: https: http:; "
@@ -82,15 +123,25 @@ def _content_security_policy(representation: Representation | None) -> str:
     )
 
 
-def _problem(status: int, title: str, detail: str, path: str) -> JSONResponse:
+def _problem(
+    status: int,
+    title: str,
+    detail: str,
+    path: str,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> JSONResponse:
+    payload: dict[str, Any] = {
+        "type": "urn:research-asset-hub:problem:asset-gateway",
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "instance": path,
+    }
+    if extra:
+        payload.update(extra)
     return JSONResponse(
-        {
-            "type": "urn:research-asset-hub:problem:asset-gateway",
-            "title": title,
-            "status": status,
-            "detail": detail,
-            "instance": path,
-        },
+        payload,
         status_code=status,
         media_type="application/problem+json",
     )
@@ -135,6 +186,7 @@ def _resolve_registered_file(
         representation = session.get(Representation, representation_id)
         if representation is None or representation.deleted_at is not None:
             raise FileNotFoundError("Unknown representation.")
+        assert_representation_active(session, representation)
         strict_mounts = _attribute_enabled(representation, "strict_mounts")
         mounts = list(
             session.scalars(
@@ -144,11 +196,17 @@ def _resolve_registered_file(
                 )
             ).all()
         )
+        retired_mount_sources = retired_source_ids(
+            session,
+            {mount.source_id for mount in mounts},
+        )
         mounts.sort(
             key=lambda item: (item.priority, len(item.mount_path)),
             reverse=True,
         )
         for mount in mounts:
+            if mount.source_id in retired_mount_sources:
+                continue
             remainder = _mount_match(mount.mount_path, request_path)
             if remainder is None:
                 continue
@@ -206,9 +264,7 @@ def _resolve_registered_file(
                     candidate = index_candidate
             return representation, candidate
         if strict_mounts:
-            raise FileNotFoundError(
-                "Strict-mount representation does not expose this asset path."
-            )
+            raise FileNotFoundError("Strict-mount representation does not expose this asset path.")
         if representation.source_id is None or representation.path_ref is None:
             raise FileNotFoundError("Representation has no registered local source.")
         source = session.get(Source, representation.source_id)
@@ -260,6 +316,7 @@ def _directory_listing(
     representation_id: UUID,
     directory: Path,
     asset_path: str,
+    route_prefix: str,
 ) -> HTMLResponse:
     entries = [
         entry
@@ -267,7 +324,7 @@ def _directory_listing(
         if not entry.name.startswith(".") and not _is_sensitive_path(entry)
     ]
     entries.sort(key=lambda entry: (not entry.is_dir(), entry.name.casefold()))
-    prefix = f"/assets/{representation_id}/"
+    prefix = route_prefix.rstrip("/") + "/"
     normalized_path = asset_path.strip("/")
     parent_link = ""
     if normalized_path:
@@ -302,10 +359,7 @@ def _etag_matches(request: Request, etag: str) -> bool:
     supplied = request.headers.get("if-none-match")
     if supplied is None:
         return False
-    return any(
-        candidate.strip() in {"*", etag, f"W/{etag}"}
-        for candidate in supplied.split(",")
-    )
+    return any(candidate.strip() in {"*", etag, f"W/{etag}"} for candidate in supplied.split(","))
 
 
 def _themed_html_response(file_path: Path, request: Request) -> Response:
@@ -357,19 +411,24 @@ def create_app(
     application.state.settings = app_settings
     application.state.database = database_manager
     application.state.registry = source_registry
+    browser_origins = _browser_origins(app_settings)
     application.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            app_settings.web_origin,
-            app_settings.web_origin.replace("127.0.0.1", "localhost"),
-        ],
+        allow_origins=browser_origins,
         allow_credentials=True,
         allow_methods=["GET", "HEAD", "OPTIONS"],
-        allow_headers=["Range", "If-None-Match", "If-Modified-Since"],
+        allow_headers=[
+            "Accept",
+            "Cache-Control",
+            "If-Modified-Since",
+            "If-None-Match",
+            "If-Range",
+            "Range",
+        ],
         expose_headers=[
             "Accept-Ranges",
             "Content-Length",
@@ -399,12 +458,11 @@ def create_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["Content-Security-Policy"] = _content_security_policy(
-            representation if isinstance(representation, Representation) else None
+            representation if isinstance(representation, Representation) else None,
+            browser_origins,
         )
         if isinstance(representation, Representation):
-            response.headers["X-Research-Hub-HTML-Policy"] = _html_policy(
-                representation
-            )
+            response.headers["X-Research-Hub-HTML-Policy"] = _html_policy(representation)
         presentation = getattr(request.state, "presentation", None)
         if presentation in {"hub", "original"}:
             response.headers["X-Research-Hub-Presentation"] = presentation
@@ -417,13 +475,20 @@ def create_app(
     def health() -> dict[str, Any]:
         readiness = database_manager.check(force=True)
         secret_ready = len(app_settings.gateway_secret) >= 32
-        status = "healthy" if readiness.status == "ready" and secret_ready else "degraded"
+        root_status = source_registry.root_status()
+        roots_ready = root_status["actionable_missing"] == 0 and not root_status["invalid_roots"]
+        status = (
+            "healthy"
+            if readiness.status == "ready" and secret_ready and roots_ready
+            else "degraded"
+        )
         return {
             "service": "research-asset-hub-asset-gateway",
             "status": status,
             "database": readiness.status,
             "signing": "ready" if secret_ready else "unconfigured",
-            "registered_roots": len(source_registry.describe()),
+            "registered_roots": root_status["configured"],
+            "source_roots": root_status,
         }
 
     @application.get("/")
@@ -466,6 +531,23 @@ def create_app(
                 representation = session.get(Representation, representation_id)
                 if representation is None or representation.deleted_at is not None:
                     raise FileNotFoundError
+                assert_representation_active(session, representation)
+        except RetiredRepresentationError as error:
+            return _problem(
+                410,
+                "表示层已退出服务",
+                "The requested representation belongs to a retired source and is "
+                "retained only as audit provenance.",
+                request.url.path,
+                extra={
+                    "code": "representation_retired",
+                    "successor_representation_id": (
+                        str(error.successor_representation_id)
+                        if error.successor_representation_id is not None
+                        else None
+                    ),
+                },
+            )
         except FileNotFoundError:
             return _problem(
                 404,
@@ -480,15 +562,21 @@ def create_app(
                 "Only representations with availability=available can start a session.",
                 request.url.path,
             )
-        target = f"/assets/{representation_id}/"
+        # Tauri's custom origin and the loopback gateway are cross-site. WebView2
+        # may therefore withhold or entirely block the HttpOnly session cookie.
+        # Keep the signed grant in the route prefix so PDF Range requests,
+        # Markdown fetches and relative HTML subresources never depend on a
+        # third-party-cookie exception.
+        session_prefix = (
+            f"/session-assets/{quote(token, safe='')}/{presentation}/{representation_id}"
+        )
+        target = f"{session_prefix}/"
         if (
             representation.materialization_kind == "file"
             and representation.representation_type in _HTML_REPRESENTATION_TYPES
             and representation.path_ref
         ):
-            virtual_path = PurePosixPath(
-                representation.path_ref.replace("\\", "/")
-            )
+            virtual_path = PurePosixPath(representation.path_ref.replace("\\", "/"))
             if virtual_path.is_absolute() or ".." in virtual_path.parts:
                 return _problem(
                     403,
@@ -496,10 +584,7 @@ def create_app(
                     "The registered representation path is unsafe.",
                     request.url.path,
                 )
-            target = (
-                f"/assets/{representation_id}/"
-                f"{quote(virtual_path.as_posix(), safe='/')}"
-            )
+            target = f"{session_prefix}/{quote(virtual_path.as_posix(), safe='/')}"
         response = RedirectResponse(url=target, status_code=303)
         response.set_cookie(
             COOKIE_NAME,
@@ -507,7 +592,7 @@ def create_app(
             max_age=app_settings.gateway_session_seconds,
             httponly=True,
             secure=False,
-            samesite="strict",
+            samesite="lax",
             path=f"/assets/{representation_id}",
         )
         response.set_cookie(
@@ -516,7 +601,7 @@ def create_app(
             max_age=app_settings.gateway_session_seconds,
             httponly=True,
             secure=False,
-            samesite="strict",
+            samesite="lax",
             path=f"/assets/{representation_id}",
         )
         return response
@@ -527,6 +612,10 @@ def create_app(
         asset_path: str,
         gateway_session: str | None,
         gateway_presentation: str | None,
+        *,
+        route_token: str | None = None,
+        route_presentation: str | None = None,
+        route_prefix: str | None = None,
     ) -> Response:
         if request.method not in {"GET", "HEAD"}:
             return _problem(
@@ -536,11 +625,12 @@ def create_app(
                 request.url.path,
             )
         try:
-            if gateway_session is None:
+            access_token = route_token or gateway_session
+            if access_token is None:
                 raise InvalidGatewayToken("A signed gateway session is required.")
             verify_gateway_token(
                 app_settings.gateway_secret,
-                gateway_session,
+                access_token,
                 representation_id=representation_id,
             )
             representation, file_path = _resolve_registered_file(
@@ -551,14 +641,17 @@ def create_app(
             )
             request.state.representation = representation
             requested_presentation = (
-                gateway_presentation
-                if gateway_presentation in {"hub", "original"}
-                else "original"
+                route_presentation
+                if route_presentation in {"hub", "original"}
+                else (
+                    gateway_presentation
+                    if gateway_presentation in {"hub", "original"}
+                    else "original"
+                )
             )
             if (
                 requested_presentation == "hub"
-                and representation.representation_type
-                not in _HTML_REPRESENTATION_TYPES
+                and representation.representation_type not in _HTML_REPRESENTATION_TYPES
             ):
                 request.state.presentation = "original"
                 request.state.theme_fallback = (
@@ -568,6 +661,22 @@ def create_app(
                 request.state.presentation = requested_presentation
         except InvalidGatewayToken as error:
             return _problem(403, "资产访问会话无效", str(error), request.url.path)
+        except RetiredRepresentationError as error:
+            return _problem(
+                410,
+                "表示层已退出服务",
+                "The requested representation belongs to a retired source and is "
+                "retained only as audit provenance.",
+                request.url.path,
+                extra={
+                    "code": "representation_retired",
+                    "successor_representation_id": (
+                        str(error.successor_representation_id)
+                        if error.successor_representation_id is not None
+                        else None
+                    ),
+                },
+            )
         except UnsafeAssetPath as error:
             return _problem(403, "资产路径被拒绝", str(error), request.url.path)
         except FileNotFoundError:
@@ -604,6 +713,7 @@ def create_app(
                     representation_id,
                     file_path,
                     asset_path,
+                    route_prefix or f"/assets/{representation_id}",
                 )
             except OSError:
                 return _problem(
@@ -638,6 +748,57 @@ def create_app(
             media_type=media_type,
             filename=None,
             content_disposition_type="inline",
+        )
+
+    @application.api_route(
+        "/session-assets/{route_token}/{route_presentation}/{representation_id}",
+        methods=["GET", "HEAD"],
+    )
+    async def signed_asset_root(
+        route_token: str,
+        route_presentation: Literal["hub", "original"],
+        representation_id: UUID,
+        request: Request,
+    ) -> Response:
+        route_prefix = (
+            f"/session-assets/{quote(route_token, safe='')}/"
+            f"{route_presentation}/{representation_id}"
+        )
+        return await serve_asset(
+            representation_id,
+            request,
+            "",
+            None,
+            None,
+            route_token=route_token,
+            route_presentation=route_presentation,
+            route_prefix=route_prefix,
+        )
+
+    @application.api_route(
+        "/session-assets/{route_token}/{route_presentation}/{representation_id}/{asset_path:path}",
+        methods=["GET", "HEAD"],
+    )
+    async def signed_asset_child(
+        route_token: str,
+        route_presentation: Literal["hub", "original"],
+        representation_id: UUID,
+        asset_path: str,
+        request: Request,
+    ) -> Response:
+        route_prefix = (
+            f"/session-assets/{quote(route_token, safe='')}/"
+            f"{route_presentation}/{representation_id}"
+        )
+        return await serve_asset(
+            representation_id,
+            request,
+            asset_path,
+            None,
+            None,
+            route_token=route_token,
+            route_presentation=route_presentation,
+            route_prefix=route_prefix,
         )
 
     @application.api_route(

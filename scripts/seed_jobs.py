@@ -11,7 +11,7 @@ from sqlalchemy import select
 from apps.api.config import get_settings
 from apps.api.database import DatabaseManager
 from packages.domain.enums import JobStatus
-from packages.domain.models import Asset, Job, Representation
+from packages.domain.models import Asset, Job, Representation, Source
 
 
 def _representation_fingerprint(representation: Representation) -> str:
@@ -33,9 +33,17 @@ def seed_jobs(
     max_representations: int | None,
     representation_types: frozenset[str] | None = None,
     generation: str = "v1",
+    source_alias: str | None = None,
 ) -> Counter[str]:
+    if source_alias is not None and (include_assets or not include_representations):
+        raise ValueError("--source requires --only representations.")
     counters: Counter[str] = Counter()
     with database.session() as session:
+        source_id = None
+        if source_alias is not None:
+            source_id = session.scalar(select(Source.id).where(Source.alias == source_alias))
+            if source_id is None:
+                raise ValueError(f"Unknown source alias: {source_alias!r}.")
         if include_assets:
             assets = list(
                 session.scalars(
@@ -82,6 +90,8 @@ def seed_jobs(
                 statement = statement.where(
                     Representation.representation_type.in_(representation_types)
                 )
+            if source_id is not None:
+                statement = statement.where(Representation.source_id == source_id)
             if max_representations is not None:
                 statement = statement.limit(max_representations)
             representations = list(session.scalars(statement).all())
@@ -132,6 +142,11 @@ def main() -> int:
     )
     parser.add_argument("--max-representations", type=int, default=None)
     parser.add_argument(
+        "--source",
+        default=None,
+        help="Exact source alias; requires --only representations.",
+    )
+    parser.add_argument(
         "--types",
         default="",
         help="Comma-separated representation types to extract.",
@@ -142,19 +157,25 @@ def main() -> int:
         help="Dedupe generation; bump only when parser semantics change.",
     )
     args = parser.parse_args()
+    if args.source is not None and args.only != "representations":
+        parser.error("--source requires --only representations.")
     representation_types = frozenset(
         item.strip()
         for item in args.types.split(",")
         if item.strip()
     )
-    counters = seed_jobs(
-        DatabaseManager(get_settings()),
-        include_assets=args.only in {"assets", "all"},
-        include_representations=args.only in {"representations", "all"},
-        max_representations=args.max_representations,
-        representation_types=representation_types or None,
-        generation=args.generation,
-    )
+    try:
+        counters = seed_jobs(
+            DatabaseManager(get_settings()),
+            include_assets=args.only in {"assets", "all"},
+            include_representations=args.only in {"representations", "all"},
+            max_representations=args.max_representations,
+            representation_types=representation_types or None,
+            generation=args.generation,
+            source_alias=args.source,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     for key, value in sorted(counters.items()):
         print(f"{key}={value}")
     return 0
