@@ -4,7 +4,7 @@ param([switch]$Restart)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
-$apiUrl = 'http://127.0.0.1:8877/api/v1/knowledge/status'
+$apiUrl = 'http://127.0.0.1:8877/api/v1/knowledge/ready'
 $statePath = Join-Path $projectRoot 'work\state\knowledge-api.json'
 if ($Restart -and (Test-Path -LiteralPath $statePath)) {
     $record = Get-Content -LiteralPath $statePath -Encoding UTF8 -Raw | ConvertFrom-Json

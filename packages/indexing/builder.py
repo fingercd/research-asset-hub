@@ -92,6 +92,7 @@ class RemoteIndexSuite:
         meilisearch_api_key: str | None,
         index_names: Sequence[str] | None = None,
         initialize_indexes: bool = True,
+        request_timeout: float = 30,
     ) -> RemoteIndexSuite:
         selected_indexes = tuple(
             dict.fromkeys(KEYWORD_INDEX_NAMES if index_names is None else index_names)
@@ -104,7 +105,7 @@ class RemoteIndexSuite:
         meili_transport = HttpxJSONTransport(
             meilisearch_url,
             api_key=meilisearch_api_key,
-            timeout=30,
+            timeout=request_timeout,
         )
         meili_admin = MeilisearchAdmin(meili_transport)
         if initialize_indexes:

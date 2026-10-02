@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -170,10 +171,17 @@ class KnowledgeService:
                     if value is not None
                 }
                 searched_queries = list(plan.queries)
-                results = [
-                    search.search(value, filters=filters, limit=40, candidate_limit=40)
-                    for value in searched_queries
-                ]
+                # Only remote keyword reads run concurrently; the SQLAlchemy
+                # session remains exclusively on this request's main thread.
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    results = list(
+                        executor.map(
+                            lambda value: search.search(
+                                value, filters=filters, limit=40, candidate_limit=40
+                            ),
+                            searched_queries,
+                        )
+                    )
                 if all(not result.degraded for result in results):
                     # Preserve different evidence hits until live source checks finish.
                     unique: dict[str, SearchHit] = {}

@@ -57,6 +57,7 @@ def test_runtime_selects_configured_keyword_indexes(
 
     def fake_connect(**kwargs: object) -> _FakeSuite:
         assert kwargs["initialize_indexes"] is False
+        assert kwargs["request_timeout"] == 3
         captured.append(tuple(kwargs["index_names"]))  # type: ignore[arg-type]
         return suite
 
@@ -65,9 +66,7 @@ def test_runtime_selects_configured_keyword_indexes(
         fake_connect,
     )
 
-    runtime = SearchRuntime.connect(
-        ApiSettings(search_code_index_enabled=code_enabled)
-    )
+    runtime = SearchRuntime.connect(ApiSettings(search_code_index_enabled=code_enabled))
 
     assert captured == [expected]
     runtime.close()

@@ -9,6 +9,7 @@ from uuid import UUID
 
 from fastapi import Query, Request, Response
 from pydantic import Field
+from sqlalchemy import select
 
 from apps.api import routes_v1 as _v1
 from apps.api.config import PROJECT_ROOT
@@ -146,3 +147,18 @@ def knowledge_status(request: Request, domain: str | None = None) -> dict[str, o
             settings,
             domain=selected,
         )
+
+
+@_v1.router.get("/knowledge/ready")
+def knowledge_ready(request: Request) -> dict[str, object]:
+    """Startup probe: verify this API, its database and source configuration only."""
+    with _service(request) as service:
+        service.session.scalar(select(1))
+        return {
+            "read_only": True,
+            "schema_version": 2,
+            "service": "research-asset-hub-knowledge",
+            "status": "ready",
+            "checks": ["database_query", "source_configuration"],
+            "remote_index_verified": False,
+        }

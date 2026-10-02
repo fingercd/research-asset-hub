@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+V3_DATASET = PROJECT_ROOT / "config" / "keyword-knowledge-evaluation-v3.json"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -66,16 +67,16 @@ class _Client:
 
 
 def test_dataset_hash_and_frozen_inputs_are_valid() -> None:
-    dataset = evaluation.read_json(evaluation.DEFAULT_DATASET)
+    dataset = evaluation.read_json(V3_DATASET)
     evaluation.validate_dataset(dataset)
-    digest = evaluation.sha256_file(evaluation.DEFAULT_DATASET)
-    expected = hashlib.sha256(evaluation.DEFAULT_DATASET.read_bytes()).hexdigest()
+    digest = evaluation.sha256_file(V3_DATASET)
+    expected = hashlib.sha256(V3_DATASET.read_bytes()).hexdigest()
     assert digest == expected
     assert len(digest) == 64
 
 
 def test_dev_selection_does_not_include_holdout() -> None:
-    dataset = evaluation.read_json(evaluation.DEFAULT_DATASET)
+    dataset = evaluation.read_json(V3_DATASET)
     dev = evaluation.questions_for_split(dataset, "dev")
     holdout = evaluation.questions_for_split(dataset, "holdout")
     dev_ids = {question["id"] for question in dev}
@@ -83,6 +84,36 @@ def test_dev_selection_does_not_include_holdout() -> None:
     assert len(dev) == 24
     assert len(holdout) == 16
     assert dev_ids.isdisjoint(holdout_ids)
+
+
+def test_v3_revises_only_mechanism_queries_and_preserves_v2_labels() -> None:
+    v2 = evaluation.read_json(PROJECT_ROOT / "config" / "keyword-knowledge-evaluation-v2.json")
+    v3 = evaluation.read_json(V3_DATASET)
+    old_questions = {question["id"]: question for question in v2["questions"]}
+    new_questions = {question["id"]: question for question in v3["questions"]}
+    revised_ids = {
+        question["id"] for question in v3["questions"] if question["category"] == "zh_mechanism"
+    }
+    if len(revised_ids) != 8 or set(old_questions) != set(new_questions):
+        raise AssertionError("The revision must keep 40 question IDs and eight mechanism items.")
+    for question_id in set(old_questions) - revised_ids:
+        if old_questions[question_id] != new_questions[question_id]:
+            raise AssertionError(f"A non-mechanism item changed: {question_id}")
+    for question_id in revised_ids:
+        old_question = {
+            key: value for key, value in old_questions[question_id].items() if key != "query"
+        }
+        new_question = {
+            key: value for key, value in new_questions[question_id].items() if key != "query"
+        }
+        if old_question != new_question:
+            raise AssertionError(f"Labels, split, or evidence changed: {question_id}")
+        if not new_questions[question_id]["query"]:
+            raise AssertionError(f"Mechanism query is empty: {question_id}")
+        if any(char.isascii() and char.isalnum() for char in new_questions[question_id]["query"]):
+            raise AssertionError(
+                f"Mechanism query contains an ASCII name, acronym, or number: {question_id}"
+            )
 
 
 def test_evaluate_sends_only_dev_queries_with_fixed_read_only_contract(monkeypatch: Any) -> None:

@@ -30,6 +30,7 @@ class SearchRuntime:
             meilisearch_api_key=settings.meilisearch_api_key,
             index_names=index_names,
             initialize_indexes=False,
+            request_timeout=3,
         )
         return cls(
             suite=suite,

@@ -301,11 +301,11 @@ def build_report(
         "evaluator_sha256": evaluator_sha256,
         "labels_complete": False,
         "label_caveat": (
-            "每題 1–3 篇為人工預標的已知相關論文，不代表全庫穷盡；"
+            "每题 1–3 篇由独立 Agent 依据来源预标，未经过人工金标准审核；不代表全库穷尽；"
             "未標論文不視為不相關。部分或錯誤響應不計入召回率。"
         ),
         "negative_probe_caveat": (
-            "负例仅探测本次候选结果；有结果时须人工判断是否含实质证据，"
+            "负例仅探测本次候选结果；有结果时须结合原文审核是否含实质证据，"
             "零结果只表示本次未返回候选，不证明库外不存在。"
         ),
         "summary": summarize(rows, planned_count=len(planned)),

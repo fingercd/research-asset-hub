@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .query_terms import IDENTIFIER, QueryPlan, contains, normalize
+from .query_terms import BROAD_CONCEPTS, IDENTIFIER, QueryPlan, contains, normalize
 
 
 def _text(value: Any) -> str:
@@ -39,9 +39,9 @@ def lexical_rank(
     matches: list[dict[str, Any]] = []
     score = 0.0
     for key in ("title", "title_zh"):
-        if normalize(plan.original) and normalize(plan.original) == normalize(
-            _text(asset_metadata.get(key))
-        ):
+        if normalize(_text(asset_metadata.get(key))) in {
+            normalize(title) for title in (plan.original, *plan.exact_titles) if normalize(title)
+        }:
             score += 2000
             matches.append({"kind": "exact_title", "field": key, "weight": 2000})
             break
@@ -61,6 +61,8 @@ def lexical_rank(
         ):
             matched = next((term for term in group.terms if contains(text, term)), None)
             if matched:
+                if group.name in BROAD_CONCEPTS or group.name == "proof":
+                    weight = max(1, weight // 2)
                 score += weight
                 covered += field != "snippet"
                 matches.append(
@@ -80,7 +82,7 @@ def lexical_rank(
         matched = next(
             (term for term in condition.terms if contains(title + " " + tags, term)), None
         )
-        weight = (-2 if condition.polarity == "exclude" else 4) if matched else 0
+        weight = (4 if condition.polarity == "require" else -2) if matched else 0
         score += weight
         condition_matches.append(
             {

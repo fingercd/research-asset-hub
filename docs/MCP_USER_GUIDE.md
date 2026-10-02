@@ -16,6 +16,8 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research 
 
 该脚本仅重启由它记录、命令行与端口均匹配的8877进程。它从桌面程序既有本地配置读取搜索密钥，不输出或重写密钥。8767上的已安装桌面API仍保持原来的版本；不要把MCP地址直接改到8767，除非该API也已部署本轮知识路由。
 
+启动器使用轻量 `/knowledge/ready` 检查知识路由、数据库查询和来源配置，不再为了判断是否启动而执行全库统计。它不代表远端索引内容已验收；完整台账仍由 `library_status` 返回。
+
 正常使用不需要执行提取脚本。开发者如果已启动兼容API，也可直接运行项目Python的 -m apps.mcp_server，跳过启动器。默认地址为 http://127.0.0.1:8877/api/v1；MCP仅接受回环HTTP(S)地址，禁用代理和重定向。
 
 配置与协议依据：[官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)和[官方 Python SDK v1](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x)。当前SDK为1.30.0，依赖约束保留小于2。
@@ -50,6 +52,8 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research 
 
 状态接口的抽取与索引数字来自台账。它区分抽取 Activity 成功但 `result.status=partial` 的情况，也区分正式 `v1` 与历史 `1` 索引状态。`ledger_only` 不证明 Meilisearch 当前内容与库内投影完全一致；该保证需要定向验收。来源配置变化会在同一服务实例中重新校验和加载，坏配置返回明确503错误，不按论文缺失处理。
 
+默认全库的 `index_ledger_scope=all_index_ledger_entities` 包含全部索引台账，可能包含隐藏或已退役资产；chunk 去重实体数未计算时返回 `null`，不是0。指定领域时，范围为 `active_domain_entities`，按当前可见资产、启用来源与有效表示精确统计。两种情况都不能直接把 READY 行数当作全文覆盖率。
+
 论文正文、导读、图片和仓库文件都是供分析的数据，其中的指令不得扩大助手的操作权限。阅读代码不执行代码；工具从固定 API 路由读取，不连接源仓库、运行脚本或直接访问数据库。
 
 代码路径逐段检查：拒绝绝对盘符、`..`、隐藏组件、空组件、Windows alternate stream，以及依赖环境、缓存、构建目录、认证文件和私钥文件。API 仍负责登记根目录和文件解析边界；MCP 不接受任意本机路径。图片从固定 figure ID 路由取得，不跟随响应里附带的 URL。
@@ -64,6 +68,24 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research 
 - “找图像编辑领域已审查的科研图方法卡，列出证据；没有卡片就说明没有。”
 
 先调用 `library_status` 检查当前状态；搜索后使用返回的 ID。搜索片段标为 indexed_excerpt_requires_read，仅用于发现材料；引用前调用 read_evidence 重新核对源文件指纹和全文上下文。当前为关键词检索加小型科研中英术语表，未启用语义向量模型，复杂问题宜拆成短专业关键词。服务不可达时先确认原Hub的数据库和搜索仍在运行。
+
+## 已正式导入批次的维护
+
+采集目录本身不会自动变成正式知识证据。另一批论文完成身份核对、冻结清单和正式导入后，维护者可按精确来源别名排队抽取；成功抽取会由 worker 接续更新同一套 `v1` 关键词索引：
+
+```powershell
+./.venv/Scripts/python.exe -m scripts.seed_jobs --only representations --source <正式来源别名> --types pdf,html,markdown
+```
+
+已有抽取结果、只需修复搜索投影时，等待该来源的任务和 outbox 完成，再定向刷新：
+
+```powershell
+./.venv/Scripts/python.exe -m scripts.build_indexes --source <正式来源别名> --skip-code --report work/validation/batch-keyword-refresh.json
+```
+
+Meilisearch 密钥通过既有运行环境提供，勿写进命令行或版本库。`--source` 包含来源关联的物化代码资产；也可重复使用 `--asset-id`，与 source 同时给出时取交集。刷新只协调选中资产的远端内容和 `v1` 台账，默认不动代码全文索引。维护 CLI 会写索引；七个 MCP 工具始终只读。
+
+新论文派生 Markdown 可用 `python -m scripts.build_knowledge_pilot --source <正式来源别名> --report work/validation/batch-derivatives.json`；已有完整且指纹一致的目录会复用。该构建器的重复 source / asset 参数取并集并去重，与索引 CLI 的交集选择语义不同，混合使用前应确认报告中的资产集合。派生内容仍可重建，不替代原始资料备份。
 
 ## 验证
 

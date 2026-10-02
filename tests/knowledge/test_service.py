@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ from packages.indexing.keyword import KeywordSearchService
 from packages.indexing.meili import InMemoryKeywordIndex
 from packages.indexing.models import SearchDocument
 from packages.knowledge.documents import document_from_chunks, text_hash
+from packages.knowledge.query_terms import QueryPlan
 from packages.knowledge.service import KnowledgeError, KnowledgeService, representation_source_type
 
 
@@ -315,6 +317,10 @@ def test_http_routes_validate_limits_and_return_json(library):
         )
         assert evidence.status_code == 200 and evidence.json()["text"] == "first page text"
         assert client.get("/api/v1/knowledge/status").json()["read_only"] is True
+        ready = client.get("/api/v1/knowledge/ready")
+        assert ready.status_code == 200
+        assert ready.json()["checks"] == ["database_query", "source_configuration"]
+        assert ready.json()["remote_index_verified"] is False
         assert client.get(f"/api/v1/knowledge/papers/{uuid4()}").status_code == 404
         assert client.post("/api/v1/knowledge/search").status_code == 405
         assert (
@@ -373,6 +379,59 @@ def test_source_configuration_failure_is_not_metadata_degradation(library):
     service.keyword_search = invalid_config
     with pytest.raises(SourceConfigurationError):
         service.search_assets("Evidence")
+
+
+def test_query_variants_run_concurrently_but_database_stays_on_request_thread(library, monkeypatch):
+    service, asset, *_ = library
+    request_thread = threading.get_ident()
+    started_threads = set()
+    lock = threading.Lock()
+    all_started = threading.Event()
+
+    class ConcurrentIndex(InMemoryKeywordIndex):
+        def search(self, query, **kwargs):
+            with lock:
+                started_threads.add(threading.get_ident())
+                if len(started_threads) == 3:
+                    all_started.set()
+            assert all_started.wait(5), "Independent query variants must start together"
+            return super().search(query, **kwargs)
+
+    index = ConcurrentIndex()
+    index.upsert(
+        [
+            SearchDocument(
+                document_id="asset:" + str(asset.id),
+                asset_id=str(asset.id),
+                kind="asset",
+                title=asset.title,
+                text="alpha beta gamma",
+            )
+        ]
+    )
+    service.keyword_search = lambda: KeywordSearchService({"assets": index})
+    monkeypatch.setattr(
+        "packages.knowledge.service.plan_query",
+        lambda *a, **kw: QueryPlan(
+            queries=("alpha", "beta", "gamma"),
+            original="example",
+            concept_groups=(),
+            conditions=(),
+            named_terms=(),
+            unmapped=(),
+        ),
+    )
+
+    def sql_thread(conn, cursor, statement, parameters, context, executemany):
+        assert threading.get_ident() == request_thread
+
+    event.listen(service.session.bind, "before_cursor_execute", sql_thread)
+    try:
+        result = service.search_assets("example")
+    finally:
+        event.remove(service.session.bind, "before_cursor_execute", sql_thread)
+    assert result["degraded"] is False and result["total"] == 1
+    assert len(started_threads) == 3 and request_thread not in started_threads
 
 
 def test_http_bad_source_configuration_is_503(library, monkeypatch):

@@ -80,3 +80,19 @@ def test_year_and_condition_only_offer_evidence_hints():
     assert reasons["year_weight"] == 4
     assert reasons["needs_evidence_verification"]
     assert all(condition["needs_evidence_verification"] for condition in reasons["conditions"])
+
+
+def test_wrapped_explicit_title_gets_exact_title_weight():
+    title = "A New Graph Partition Algorithm: Experiments and Analysis"
+    plan = plan_query("按英文题名检索：" + title + "。")
+    exact, reasons = lexical_rank(plan, {"title": title})
+    generic, _ = lexical_rank(plan, {"title": "Graph Partition Algorithm"})
+    assert exact > generic + 1000
+    assert reasons["matches"][0]["kind"] == "exact_title"
+
+
+def test_generic_title_case_words_cannot_outscore_multiple_scientific_topics():
+    plan = plan_query("Theorem-Provers Self-Correction 随机优化中的证明义务")
+    task_only, _ = lexical_rank(plan, {"title": "Theorem-Provers Self-Correction"})
+    science, _ = lexical_rank(plan, {"title": "Stochastic Optimization and Proof Obligations"})
+    assert science > task_only
