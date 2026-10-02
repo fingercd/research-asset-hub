@@ -17,6 +17,7 @@ from packages.knowledge.figures import (
     EXTRACTOR_NAME,
     EXTRACTOR_VERSION,
     SourceHashMismatch,
+    apply_cached_figure_corrections,
     apply_caption_review_warnings,
     extract_pdf_figures,
     sha256_file,
@@ -129,6 +130,37 @@ def _corrections_for_entry(
             for figure_id, row in raw.items()
         }
     raise ValueError("Correction file figures must be an array or object.")
+
+
+def _additions_for_entry(
+    payload: dict[str, Any] | None, entry: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if payload is None:
+        return []
+    if (
+        "papers" not in payload
+        and payload.get("asset_id")
+        and str(payload["asset_id"]) != str(entry["asset_id"])
+    ):
+        return []
+    paper = (
+        payload.get("papers", {}).get(str(entry["asset_id"]), {})
+        if "papers" in payload
+        else payload
+    )
+    additions = paper.get("add_figures", [])
+    if not additions:
+        return []
+    if paper.get("source_hash") != entry["source_hash"]:
+        raise ValueError("add_figures requires the matching original PDF source_hash.")
+    return [
+        {
+            "reviewer": paper.get("reviewer", payload.get("reviewer")),
+            "human_reviewed": paper.get("human_reviewed", payload.get("human_reviewed", False)),
+            **dict(row),
+        }
+        for row in additions
+    ]
 
 
 def _run_pdffigures2(
@@ -282,11 +314,22 @@ def main() -> int:
                 raise SourceHashMismatch("Pilot source_hash does not match the PDF bytes.")
             output_directory = arguments.output_root / entry["asset_id"]
             manifest_path = output_directory / "figures.json"
-            cached = _cached_manifest(
-                manifest_path,
-                source_hash,
-                force=arguments.force or bool(_corrections_for_entry(corrections_payload, entry)),
-            )
+            corrections = _corrections_for_entry(corrections_payload, entry)
+            additions = _additions_for_entry(corrections_payload, entry)
+            cached: dict[str, Any] | None
+            if manifest_path.exists() and not arguments.force and (corrections or additions):
+                cached = apply_cached_figure_corrections(
+                    pdf_path,
+                    output_directory,
+                    source_hash=source_hash,
+                    corrections=corrections,
+                    add_figures=additions,
+                    dpi=arguments.dpi,
+                    preview_dpi=arguments.preview_dpi,
+                    mark_corrected_reviewed=arguments.mark_reviewed,
+                )
+            else:
+                cached = _cached_manifest(manifest_path, source_hash, force=arguments.force)
             if cached is not None:
                 paper_results.append(
                     {
@@ -313,6 +356,7 @@ def main() -> int:
                     "source_hash": source_hash,
                     "output_directory": output_directory,
                     "corrections": _corrections_for_entry(corrections_payload, entry),
+                    "add_figures": additions,
                 }
             )
         except Exception as error:
@@ -366,6 +410,7 @@ def main() -> int:
                     dpi=arguments.dpi,
                     preview_dpi=arguments.preview_dpi,
                     corrections=corrections,
+                    add_figures=job["add_figures"],
                     mark_corrected_reviewed=arguments.mark_reviewed,
                     pdffigures2_results=rows,
                     run_pymupdf_heuristic=False,
@@ -382,6 +427,7 @@ def main() -> int:
                     dpi=arguments.dpi,
                     preview_dpi=arguments.preview_dpi,
                     corrections=corrections,
+                    add_figures=job["add_figures"],
                     mark_corrected_reviewed=arguments.mark_reviewed,
                 )
             paper_row = {

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import Lock
 
 import yaml
 
-from packages.domain.path_exclusions import OperationalPathExclusions
+from packages.domain.path_exclusions import POLICY_FILENAME, OperationalPathExclusions
 
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
@@ -16,11 +18,24 @@ class UnsafeAssetPath(ValueError):
     """Raised when a registered path would escape its configured source root."""
 
 
+class SourceConfigurationError(ValueError):
+    """The current source configuration could not replace the last valid snapshot."""
+
+
 @dataclass(frozen=True, slots=True)
 class SourceRoot:
     source_id: str
     root_key: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _RegistrySnapshot:
+    roots: dict[tuple[str, str], Path]
+    workspace_root: Path | None
+    exclusions: OperationalPathExclusions
+    signature: tuple[object, ...] | None = None
+    config_sha256: str | None = None
 
 
 class SourceRegistry:
@@ -33,15 +48,51 @@ class SourceRegistry:
         workspace_root: Path | None = None,
         operational_exclusions: OperationalPathExclusions | None = None,
     ) -> None:
-        self._roots = roots
-        self._workspace_root = workspace_root
-        self.operational_exclusions = operational_exclusions or OperationalPathExclusions.empty()
-        if self.operational_exclusions.enabled:
-            self.operational_exclusions.validate_roots(roots)
+        exclusions = operational_exclusions or OperationalPathExclusions.empty()
+        if exclusions.enabled:
+            exclusions.validate_roots(roots)
+        self._snapshot = _RegistrySnapshot(dict(roots), workspace_root, exclusions)
+        self._config_path: Path | None = None
+        self._reload_lock = Lock()
+
+    @property
+    def operational_exclusions(self) -> OperationalPathExclusions:
+        self.refresh_if_changed()
+        return self._snapshot.exclusions
+
+    @property
+    def config_path(self) -> Path | None:
+        """Actual runtime configuration, which may be an installed copy."""
+        return self._config_path
+
+    @staticmethod
+    def _signature(config_path: Path) -> tuple[object, ...]:
+        def file_signature(path: Path) -> tuple[int, int, int] | None:
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                return None
+            return info.st_mtime_ns, info.st_ctime_ns, info.st_size
+
+        return (
+            file_signature(config_path),
+            file_signature(config_path.parent / POLICY_FILENAME),
+            os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip(),
+        )
 
     @classmethod
     def load(cls, config_path: Path) -> SourceRegistry:
-        document = yaml.load(config_path.read_text(encoding="utf-8"), Loader=_YAML_LOADER) or {}
+        registry = cls({})
+        registry._config_path = config_path.expanduser().resolve()
+        registry.refresh_if_changed()
+        return registry
+
+    @classmethod
+    def _read_snapshot(cls, config_path: Path, signature: tuple[object, ...]) -> _RegistrySnapshot:
+        raw = config_path.read_bytes()
+        document = yaml.load(raw.decode("utf-8"), Loader=_YAML_LOADER)
+        if not isinstance(document, dict) or not isinstance(document.get("sources"), list):
+            raise ValueError("Source configuration must contain a sources list.")
         config_dir = config_path.parent
         host_workspace_root = os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip()
         if host_workspace_root:
@@ -51,24 +102,89 @@ class SourceRegistry:
         roots: dict[tuple[str, str], Path] = {}
         for raw_source in document.get("sources", []):
             if not isinstance(raw_source, dict):
-                continue
+                raise ValueError("Each source must be a mapping.")
             source_id = str(raw_source.get("id", "")).strip()
+            if not source_id or (source_id, "source") in roots:
+                raise ValueError("Source identifiers must be non-empty and unique.")
+            if raw_source.get("read_only", True) is not True:
+                raise ValueError("Registered sources must be read-only.")
+            if not isinstance(raw_source.get("root"), str) or not raw_source["root"]:
+                raise ValueError("Each source must declare a root path.")
             source_base = (workspace_root / str(raw_source.get("root", "."))).resolve()
             roots[(source_id, "source")] = source_base
             asset_roots = raw_source.get("asset_roots", {})
             if not isinstance(asset_roots, dict):
-                continue
+                raise ValueError("Source asset_roots must be a mapping.")
             for root_key, relative in asset_roots.items():
+                if not isinstance(root_key, str) or not root_key or root_key == "source":
+                    raise ValueError("Asset root keys must be non-empty and cannot replace source.")
+                if not isinstance(relative, str) or not relative or "\0" in relative:
+                    raise ValueError("Asset roots must declare valid paths.")
                 roots[(source_id, str(root_key))] = (source_base / str(relative)).resolve()
-        return cls(
-            roots,
-            workspace_root=workspace_root,
-            operational_exclusions=OperationalPathExclusions.for_sources_config(config_path),
+        exclusions = OperationalPathExclusions.for_sources_config(config_path)
+        if exclusions.enabled:
+            exclusions.validate_roots(roots)
+        return _RegistrySnapshot(
+            roots, workspace_root, exclusions, signature, hashlib.sha256(raw).hexdigest()
         )
 
-    def root_for(self, source_id: str, root_key: str) -> Path:
+    def refresh_if_changed(self) -> bool:
+        """Replace one complete snapshot in place; retain it and fail clearly on errors.
+
+        Ordinary resolution only stats the two small configuration files. Parsing,
+        validation and locking happen when either configuration has changed.
+        """
+        if self._config_path is None:
+            return False
         try:
-            return self._roots[(source_id, root_key)]
+            signature = self._signature(self._config_path)
+            if signature == self._snapshot.signature:
+                return False
+            with self._reload_lock:
+                signature = self._signature(self._config_path)
+                if signature == self._snapshot.signature:
+                    return False
+                candidate = self._read_snapshot(self._config_path, signature)
+                if self._signature(self._config_path) != signature:
+                    raise ValueError(
+                        "Source configuration changed during reload; retry the request."
+                    )
+                self._snapshot = candidate
+            return True
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            # Do not expose host paths, parser excerpts or source configuration.
+            raise SourceConfigurationError(
+                "Source configuration reload failed; the previous complete registry is retained."
+            ) from error
+
+    def configuration_status(self) -> dict[str, object]:
+        """A path-free fingerprint allows clients to compare runtime configurations."""
+        self.refresh_if_changed()
+        snapshot = self._snapshot
+        return {
+            "hot_refresh_enabled": self._config_path is not None,
+            "configuration_sha256": snapshot.config_sha256,
+            "configuration_locator_sha256": (
+                hashlib.sha256(str(self._config_path).encode("utf-8")).hexdigest()
+                if self._config_path
+                else None
+            ),
+            "configuration_filename": self._config_path.name if self._config_path else None,
+            "operational_exclusions_sha256": snapshot.exclusions.summary()["sha256"],
+            "resolved_roots_sha256": hashlib.sha256(
+                "\n".join(
+                    f"{source_id}\0{root_key}\0{path}"
+                    for (source_id, root_key), path in sorted(snapshot.roots.items())
+                ).encode("utf-8")
+            ).hexdigest(),
+            "loaded_configuration_current": True if self._config_path else None,
+            "repository_copy_consistency": "not_verified",
+        }
+
+    def root_for(self, source_id: str, root_key: str) -> Path:
+        self.refresh_if_changed()
+        try:
+            return self._snapshot.roots[(source_id, root_key)]
         except KeyError as error:
             raise UnsafeAssetPath(
                 f"Unknown registered source root {source_id!r}/{root_key!r}."
@@ -87,14 +203,20 @@ class SourceRegistry:
         return candidate
 
     def describe(self) -> list[SourceRoot]:
+        self.refresh_if_changed()
         return [
             SourceRoot(source_id=source_id, root_key=root_key, path=path)
-            for (source_id, root_key), path in sorted(self._roots.items())
+            for (source_id, root_key), path in sorted(self._snapshot.roots.items())
         ]
 
     def root_status(self) -> dict[str, object]:
         """Return a small diagnostic summary without probing any source contents."""
-        configured = self.describe()
+        self.refresh_if_changed()
+        snapshot = self._snapshot
+        configured = [
+            SourceRoot(source_id, root_key, path)
+            for (source_id, root_key), path in sorted(snapshot.roots.items())
+        ]
         missing: list[SourceRoot] = []
         invalid: list[dict[str, str]] = []
         for item in configured:
@@ -118,9 +240,7 @@ class SourceRegistry:
         ignored = []
         applied: set[str] = set()
         for item in missing:
-            rule = self.operational_exclusions.active_root(
-                item.source_id, item.root_key, self._roots
-            )
+            rule = snapshot.exclusions.active_root(item.source_id, item.root_key, snapshot.roots)
             if rule is not None:
                 applied.add(rule.id)
                 ignored.append(
@@ -134,7 +254,7 @@ class SourceRegistry:
                 )
         return {
             "workspace_root": (
-                str(self._workspace_root) if self._workspace_root is not None else None
+                str(snapshot.workspace_root) if snapshot.workspace_root is not None else None
             ),
             "configured": len(configured),
             "existing": len(configured) - len(missing) - len(invalid),
@@ -143,7 +263,7 @@ class SourceRegistry:
             "actionable_missing": len(missing) - len(ignored),
             "invalid_roots": invalid,
             "ignored_missing_roots": ignored,
-            "operational_exclusions": self.operational_exclusions.summary(applied),
+            "operational_exclusions": snapshot.exclusions.summary(applied),
             "missing_roots": [
                 {
                     "source_id": item.source_id,

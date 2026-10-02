@@ -12,7 +12,8 @@ from uuid import UUID
 from sqlalchemy import String, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
-from apps.asset_gateway.registry import SourceRegistry, UnsafeAssetPath
+from apps.api.domain_views import annotate_presentation_domains, presentation_domains
+from apps.asset_gateway.registry import SourceConfigurationError, SourceRegistry, UnsafeAssetPath
 from packages.domain.models import (
     Activity,
     Asset,
@@ -31,7 +32,9 @@ from packages.indexing.keyword import KeywordSearchService
 from packages.indexing.models import SearchHit
 
 from .documents import document_from_chunks, page_evidence_id, text_hash
-from .query_terms import query_variants
+from .domains import matches_domain, normalize_domain, source_domain_candidates
+from .query_terms import QueryPlan, plan_query
+from .ranking import lexical_rank
 
 MAX_CHARS = 16_000
 MAX_RESULTS = 20
@@ -80,6 +83,7 @@ class KnowledgeService:
         asset_loader: Callable[[Session, UUID], Asset] | None = None,
         hidden_asset: Callable[[Asset], bool] | None = None,
         keyword_search: Callable[[], KeywordSearchService] | None = None,
+        taxonomy_path: Path | None = None,
     ) -> None:
         self.session = session
         self.registry = registry
@@ -87,6 +91,7 @@ class KnowledgeService:
         self.asset_loader = asset_loader
         self.hidden_asset = hidden_asset or self._hidden
         self.keyword_search = keyword_search
+        self.taxonomy_path = taxonomy_path
 
     @staticmethod
     def _hidden(asset: Asset) -> bool:
@@ -112,7 +117,8 @@ class KnowledgeService:
             "authors": asset.authors,
             "year": asset.year,
             "venue": asset.venue,
-            "domains": asset.domain_slugs,
+            "domains": presentation_domains(asset),
+            "source_domains": asset.domain_slugs,
             "tags": asset.tags,
             "source_urls": asset.source_urls,
         }
@@ -125,14 +131,25 @@ class KnowledgeService:
         asset_type: str | None = None,
         source_type: str | None = None,
         limit: int = MAX_RESULTS,
+        keywords: Sequence[str] = (),
+        constraints: Sequence[str] = (),
     ) -> dict[str, Any]:
         if not 1 <= limit <= MAX_RESULTS:
             raise KnowledgeError("invalid_limit", "limit must be between 1 and 20.", 422)
         if source_type not in {None, "original", "analysis"}:
             raise KnowledgeError("invalid_source_type", "Unknown evidence source type.", 422)
         query = query.strip()
+        try:
+            domain = normalize_domain(domain, self.taxonomy_path)
+            plan = (
+                plan_query(query, keywords=keywords, constraints=constraints)
+                if query or keywords
+                else None
+            )
+        except ValueError as error:
+            raise KnowledgeError("invalid_query", str(error), 422) from error
         errors: list[str] = []
-        if query and self.keyword_search:
+        if plan is not None and self.keyword_search:
             try:
                 runtime = self.keyword_search()
                 # Annotations are user state, and the code index has its own safe browser.
@@ -145,52 +162,65 @@ class KnowledgeService:
                 )
                 filters = {
                     key: value
-                    for key, value in {"domain": domain, "type": asset_type}.items()
+                    for key, value in {
+                        "domain": list(source_domain_candidates(domain)) or None,
+                        "type": asset_type,
+                        "year": plan.year,
+                    }.items()
                     if value is not None
                 }
-                variants = query_variants(query)
-                # Long CJK questions make the keyword engine expand many common
-                # characters. Prefer bounded scientific terms, preserving the
-                # original question and making the transformation explicit.
-                searched_queries = [variants[-1]]
+                searched_queries = list(plan.queries)
                 results = [
-                    search.search(
-                        searched_queries[0], filters=filters, limit=100, candidate_limit=100
-                    )
+                    search.search(value, filters=filters, limit=40, candidate_limit=40)
+                    for value in searched_queries
                 ]
-                if not results[0].hits and len(variants) > 1:
-                    searched_queries.append(query)
-                    results = [
-                        search.search(query, filters=filters, limit=100, candidate_limit=100)
-                    ]
                 if all(not result.degraded for result in results):
+                    # Preserve different evidence hits until live source checks finish.
+                    unique: dict[str, SearchHit] = {}
+                    for result in results:
+                        for hit in result.hits:
+                            prior = unique.get(hit.document.document_id)
+                            if prior is None or (hit.exact_match, hit.score) > (
+                                prior.exact_match,
+                                prior.score,
+                            ):
+                                unique[hit.document.document_id] = hit
                     payload = self._indexed_results(
                         query,
-                        results[0].hits,
+                        list(unique.values()),
                         domain=domain,
                         asset_type=asset_type,
                         source_type=source_type,
                         limit=limit,
+                        plan=plan,
                     )
-                    payload["query_variants"] = variants
+                    payload["query_variants"] = list(plan.queries)
                     payload["searched_queries"] = searched_queries
-                    payload["query_expansion"] = (
-                        "bilingual_terminology" if len(variants) > 1 else None
-                    )
+                    payload["query_plan"] = plan.to_dict()
+                    payload["query_expansion"] = "lexical_terms_and_constraints"
                     return payload
                 for result in results:
                     errors.extend(result.errors or ("keyword_backend_degraded",))
+            except SourceConfigurationError:
+                raise
             except Exception as error:
                 errors.append("keyword_runtime:" + type(error).__name__)
         metadata = self._metadata_search_assets(
-            query, domain=domain, asset_type=asset_type, source_type=source_type, limit=limit
+            query or " ".join(keywords),
+            domain=domain,
+            asset_type=asset_type,
+            source_type=source_type,
+            limit=limit,
+            year=plan.year if plan else None,
         )
         metadata.update(
-            degraded=bool(query),
-            errors=errors or (["keyword_backend_not_configured"] if query else []),
+            degraded=plan is not None,
+            errors=errors or (["keyword_backend_not_configured"] if plan else []),
             mode="metadata",
-            total_is_lower_bound=False,
+            total_is_lower_bound=metadata.get("total_is_lower_bound", False),
         )
+        if plan is not None:
+            metadata["query_plan"] = plan.to_dict()
         return metadata
 
     def _indexed_results(
@@ -202,6 +232,7 @@ class KnowledgeService:
         asset_type: str | None,
         source_type: str | None,
         limit: int,
+        plan: QueryPlan | None = None,
     ) -> dict[str, Any]:
         asset_ids = set()
         for hit in hits:
@@ -217,10 +248,45 @@ class KnowledgeService:
                     Asset.deleted_at.is_(None),
                 )
             )
-            if not self.hidden_asset(a)
-            and (not domain or domain in a.domain_slugs)
-            and (not asset_type or a.asset_type == asset_type)
+            if not self.hidden_asset(a) and (not asset_type or a.asset_type == asset_type)
         }
+        annotate_presentation_domains(self.session, list(assets.values()))
+        assets = {
+            key: asset
+            for key, asset in assets.items()
+            if matches_domain(asset, domain)
+            and (plan is None or plan.year is None or asset.year == plan.year)
+        }
+        ranking: dict[str, tuple[float, dict[str, Any]]] = {}
+        if plan is not None:
+            assets_by_string = {str(key): value for key, value in assets.items()}
+            identifiers: dict[str, list[str]] = {}
+            for owner, identifier in self.session.execute(
+                select(ExternalIdentifierModel.asset_id, ExternalIdentifierModel.canonical).where(
+                    ExternalIdentifierModel.asset_id.in_(assets)
+                )
+            ):
+                identifiers.setdefault(str(owner), []).append(identifier)
+            for hit in hits:
+                asset = assets_by_string.get(hit.document.asset_id)
+                if asset is None:
+                    continue
+                ranking[hit.document.document_id] = lexical_rank(
+                    plan,
+                    {
+                        **self._asset_payload(asset),
+                        "abstract": asset.abstract,
+                        "summary": asset.summary,
+                        "identifiers": identifiers.get(str(asset.id), []),
+                    },
+                    snippet=hit.document.text,
+                    backend_score=hit.score,
+                )
+            hits = sorted(
+                hits,
+                key=lambda h: ranking.get(h.document.document_id, (float("-inf"), {}))[0],
+                reverse=True,
+            )
         reps = list(
             self.session.scalars(
                 select(Representation)
@@ -238,6 +304,7 @@ class KnowledgeService:
         for candidate_rep in reps:
             by_asset.setdefault(candidate_rep.asset_id, []).append(candidate_rep)
         items = []
+        returned_assets: set[UUID] = set()
         rejected = 0
         for hit in hits:
             try:
@@ -246,6 +313,8 @@ class KnowledgeService:
                 continue
             if asset is None:
                 rejected += 1
+                continue
+            if asset.id in returned_assets:
                 continue
             if source_type and not any(
                 representation_source_type(r) == source_type for r in by_asset.get(asset.id, [])
@@ -311,7 +380,11 @@ class KnowledgeService:
                 rejected += 1
                 continue
             payload.update(score=hit.score, rank=hit.rank)
+            if asset_key := ranking.get(hit.document.document_id):
+                payload["keyword_score"], payload["match_reasons"] = asset_key
+                payload["constraints_need_evidence_verification"] = True
             items.append(payload)
+            returned_assets.add(asset.id)
             if len(items) == limit:
                 break
         return {
@@ -323,7 +396,7 @@ class KnowledgeService:
             "mode": "keyword",
             "degraded": False,
             "errors": [],
-            "candidate_limit": 100,
+            "candidate_limit": 120,
             "rejected_candidates": rejected,
             "total_is_lower_bound": True,
         }
@@ -336,6 +409,7 @@ class KnowledgeService:
         asset_type: str | None = None,
         source_type: str | None = None,
         limit: int = MAX_RESULTS,
+        year: int | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= MAX_RESULTS:
             raise KnowledgeError("invalid_limit", "limit must be between 1 and 20.", 422)
@@ -373,14 +447,27 @@ class KnowledgeService:
             )
         if asset_type:
             statement = statement.where(Asset.asset_type == asset_type)
-        if domain:
-            encoded_domain = json.dumps(domain, ensure_ascii=False)
-            pattern = (
+        if year is not None:
+            statement = statement.where(Asset.year == year)
+        candidates = source_domain_candidates(domain)
+        if candidates:
+            patterns = [
                 "%"
-                + encoded_domain.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                + json.dumps(item, ensure_ascii=False)
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
                 + "%"
+                for item in candidates
+            ]
+            statement = statement.where(
+                or_(
+                    *[
+                        cast(Asset.domain_slugs, String).like(pattern, escape="\\")
+                        for pattern in patterns
+                    ]
+                )
             )
-            statement = statement.where(cast(Asset.domain_slugs, String).like(pattern, escape="\\"))
         if source_type:
             original = and_(
                 Representation.representation_type == "pdf",
@@ -406,15 +493,24 @@ class KnowledgeService:
                 )
             )
         total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
-        assets = self.session.scalars(
-            statement.order_by(Asset.year.desc().nullslast(), Asset.title, Asset.id).limit(limit)
+        assets = list(
+            self.session.scalars(
+                statement.order_by(Asset.year.desc().nullslast(), Asset.title, Asset.id).limit(
+                    100 if len(candidates) > 1 else limit
+                )
+            )
         )
+        if len(candidates) > 1:
+            annotate_presentation_domains(self.session, assets)
+            assets = [asset for asset in assets if matches_domain(asset, domain)][:limit]
+            total = len(assets)
         return {
             "items": [self._asset_payload(asset) for asset in assets],
             "total": total,
             "limit": limit,
             "query": query,
             "backend": "postgresql_metadata",
+            "total_is_lower_bound": len(candidates) > 1,
         }
 
     def _active_representations(self, asset_id: UUID) -> list[Representation]:
@@ -455,6 +551,8 @@ class KnowledgeService:
                 raise KnowledgeError(
                     "source_unavailable", "The registered source file is missing.", 410
                 )
+        except SourceConfigurationError:
+            raise
         except (UnsafeAssetPath, OSError, ValueError) as error:
             raise KnowledgeError(
                 "source_unavailable", "The registered source cannot be resolved safely.", 410
@@ -610,6 +708,7 @@ class KnowledgeService:
         from .derived import DerivativeStore
 
         asset = self._asset(asset_id)
+        annotate_presentation_domains(self.session, [asset])
         representations = []
         figures = []
         has_analysis_markdown = False
@@ -804,17 +903,4 @@ class KnowledgeService:
             "has_more": end < len(full_text),
             "total_chars": len(full_text),
             "anchor_precision": "page" if all(p["page"] for p in selected) else "document",
-        }
-
-    def status(self) -> dict[str, Any]:
-        return {
-            "read_only": True,
-            "schema_version": 1,
-            "backend": "postgresql_metadata",
-            "search_backend": "meilisearch",
-            "search_fallback": "postgresql_metadata",
-            "cache_available": self.cache_root.is_dir(),
-            "document_chunks": self.session.scalar(select(func.count(DocumentChunk.id))) or 0,
-            "limits": {"search_results": MAX_RESULTS, "evidence_chars": MAX_CHARS},
-            "ocr_on_read": False,
         }

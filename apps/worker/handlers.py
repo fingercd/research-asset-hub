@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -21,70 +18,27 @@ from apps.asset_gateway.registry import SourceRegistry
 from packages.domain.enums import (
     ActivityStatus,
     AnchorStatus,
-    IndexKind,
-    IndexStatus,
     JobStatus,
     OutboxStatus,
 )
 from packages.domain.models import (
     Activity,
     Annotation,
-    Asset,
     DocumentChunk,
-    IndexState,
     Job,
     OutboxEvent,
     Representation,
     Source,
 )
 from packages.domain.serving_scope import (
-    active_representation_clause,
     representation_serving_status,
     retired_representation_ids,
 )
-from packages.indexing import MeilisearchIndex, SearchDocument
+from packages.indexing import IndexBuilder, RemoteIndexSuite
+from packages.indexing.builder import DEFAULT_REFRESH_INDEX_NAMES, KEYWORD_INDEX_NAMES
 
 if TYPE_CHECKING:
     from packages.extraction import ExtractionPipeline
-
-_MAX_MEILI_DOCUMENT_TEXT_CHARS = 250_000
-_MAX_MEILI_BATCH_BYTES = 4 * 1024 * 1024
-_MAX_MEILI_BATCH_DOCUMENTS = 64
-
-
-def _meili_document_batches(
-    documents: list[SearchDocument],
-) -> list[list[SearchDocument]]:
-    """Bound worker writes below Meilisearch's HTTP payload limit."""
-
-    batches: list[list[SearchDocument]] = []
-    current: list[SearchDocument] = []
-    current_bytes = 0
-    for document in documents:
-        bounded = (
-            replace(document, text=document.text[:_MAX_MEILI_DOCUMENT_TEXT_CHARS])
-            if len(document.text) > _MAX_MEILI_DOCUMENT_TEXT_CHARS
-            else document
-        )
-        estimated_bytes = (
-            len(bounded.text.encode("utf-8"))
-            + len(bounded.title.encode("utf-8"))
-            + len(json.dumps(bounded.metadata, ensure_ascii=False).encode("utf-8"))
-            + sum(len(term.encode("utf-8")) for term in bounded.exact_terms)
-            + 1024
-        )
-        if current and (
-            len(current) >= _MAX_MEILI_BATCH_DOCUMENTS
-            or current_bytes + estimated_bytes > _MAX_MEILI_BATCH_BYTES
-        ):
-            batches.append(current)
-            current = []
-            current_bytes = 0
-        current.append(bounded)
-        current_bytes += estimated_bytes
-    if current:
-        batches.append(current)
-    return batches
 
 JobHandler = Callable[[dict[str, object]], dict[str, object]]
 _ANCHOR_KIND = {
@@ -108,78 +62,6 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
         "vendor",
     }
 )
-
-
-class _MeiliWriteTransport:
-    """Adapt the generic index contract to Meilisearch's array write payloads."""
-
-    def __init__(self, settings: ApiSettings) -> None:
-        self.client = httpx.Client(
-            base_url=settings.meilisearch_url,
-            headers={"Authorization": f"Bearer {settings.meilisearch_api_key}"},
-            timeout=10,
-        )
-        self._known_indexes: set[str] = set()
-
-    def close(self) -> None:
-        self.client.close()
-
-    def _wait_for_task(self, document: Mapping[str, Any]) -> None:
-        task_uid = document.get("taskUid")
-        if task_uid is None:
-            return
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            response = self.client.get(f"/tasks/{task_uid}")
-            response.raise_for_status()
-            task = response.json()
-            status = task.get("status") if isinstance(task, dict) else None
-            if status == "succeeded":
-                return
-            if status in {"failed", "canceled"}:
-                raise RuntimeError(f"Meilisearch task {task_uid} ended with {status}.")
-            time.sleep(0.05)
-        raise TimeoutError(f"Meilisearch task {task_uid} did not finish within 30 seconds.")
-
-    def _ensure_index(self, index_name: str) -> None:
-        if index_name in self._known_indexes:
-            return
-        response = self.client.get(f"/indexes/{index_name}")
-        if response.status_code == 404:
-            created = self.client.post(
-                "/indexes",
-                json={"uid": index_name, "primaryKey": "document_id"},
-            )
-            created.raise_for_status()
-            value = created.json()
-            if isinstance(value, dict):
-                self._wait_for_task(value)
-        else:
-            response.raise_for_status()
-        self._known_indexes.add(index_name)
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        *,
-        payload: Mapping[str, Any] | None = None,
-    ) -> Mapping[str, Any]:
-        parts = path.strip("/").split("/")
-        if len(parts) >= 2 and parts[0] == "indexes":
-            self._ensure_index(parts[1])
-        body: Any = dict(payload or {})
-        if path.endswith("/documents") and isinstance(body.get("documents"), list):
-            body = body["documents"]
-        elif path.endswith("/documents/delete-batch") and isinstance(body.get("ids"), list):
-            body = body["ids"]
-        response = self.client.request(method, path, json=body if payload is not None else None)
-        response.raise_for_status()
-        raw = response.json()
-        if not isinstance(raw, Mapping):
-            raise TypeError("Expected a JSON object response from Meilisearch.")
-        self._wait_for_task(raw)
-        return raw
 
 
 def _uuid_parameter(parameters: dict[str, object], name: str) -> UUID:
@@ -550,9 +432,7 @@ class RuntimeHandlers:
                 }
                 stored_activity.finished_at = datetime.now(UTC)
                 if representation_serving_status(session, representation).active:
-                    dedupe_key = (
-                        f"representation:{representation.id}:{representation_hash}:index"
-                    )
+                    dedupe_key = f"representation:{representation.id}:{representation_hash}:index"
                     existing = session.scalar(
                         select(Job).where(
                             Job.job_type == "index_representation",
@@ -590,137 +470,31 @@ class RuntimeHandlers:
                     }
             raise
 
-    def _search_documents_for_asset(self, asset_id: UUID) -> list[SearchDocument]:
-        with self.database.session() as session:
-            asset = session.get(Asset, asset_id)
-            if asset is None or asset.deleted_at is not None:
-                raise FileNotFoundError(f"Asset {asset_id} does not exist.")
-            chunks = list(
-                session.scalars(
-                    select(DocumentChunk)
-                    .join(
-                        Representation,
-                        DocumentChunk.representation_id == Representation.id,
-                    )
-                    .where(DocumentChunk.asset_id == asset_id)
-                    .where(
-                        Representation.deleted_at.is_(None),
-                        active_representation_clause(),
-                    )
-                    .order_by(DocumentChunk.chunk_index)
-                ).all()
-            )
-            metadata = {
-                "domains": list(asset.domain_slugs or []),
-                "tags": list(asset.tags or []),
-                "year": asset.year,
-                "asset_type": asset.asset_type,
-            }
-            exact_terms = tuple(
-                value
-                for value in [asset.title, asset.title_zh, *list(asset.authors or [])]
-                if value
-            )
-            documents = [
-                SearchDocument(
-                    document_id=f"asset:{asset.id}",
-                    asset_id=str(asset.id),
-                    kind="asset",
-                    title=asset.title,
-                    text="\n".join(
-                        value for value in [asset.abstract, asset.summary, asset.content] if value
-                    ),
-                    metadata=metadata,
-                    exact_terms=exact_terms,
-                )
-            ]
-            documents.extend(
-                SearchDocument(
-                    document_id=f"chunk:{chunk.id}",
-                    asset_id=str(asset.id),
-                    kind=chunk.chunk_kind,
-                    title=asset.title,
-                    text=chunk.text_content,
-                    metadata={
-                        **metadata,
-                        "representation_id": str(chunk.representation_id),
-                        "chunk_index": chunk.chunk_index,
-                    },
-                    exact_terms=exact_terms,
-                )
-                for chunk in chunks
-            )
-            return documents
-
-    def _upsert_documents(
-        self,
-        asset_id: UUID,
-        documents: list[SearchDocument],
-    ) -> dict[str, object]:
-        expected_ids = {document.document_id for document in documents}
-        with self.database.session() as session:
-            all_chunk_ids = set(
-                session.scalars(
-                    select(DocumentChunk.id).where(DocumentChunk.asset_id == asset_id)
-                ).all()
-            )
-        stale_document_ids = sorted(
-            f"chunk:{chunk_id}"
-            for chunk_id in all_chunk_ids
-            if f"chunk:{chunk_id}" not in expected_ids
+    def _refresh_asset_keywords(self, asset_id: UUID) -> dict[str, object]:
+        index_names = (
+            KEYWORD_INDEX_NAMES
+            if self.settings.search_code_index_enabled
+            else DEFAULT_REFRESH_INDEX_NAMES
         )
-        transport = _MeiliWriteTransport(self.settings)
+        suite = RemoteIndexSuite.connect(
+            meilisearch_url=self.settings.meilisearch_url,
+            meilisearch_api_key=self.settings.meilisearch_api_key,
+            index_names=index_names,
+        )
         try:
-            index = MeilisearchIndex(transport)
-            if stale_document_ids:
-                index.delete(stale_document_ids)
-            for batch in _meili_document_batches(documents):
-                index.upsert(batch)
+            with self.database.engine.connect() as connection:
+                if connection.dialect.name == "postgresql":
+                    connection = connection.execution_options(isolation_level="REPEATABLE READ")
+                with Session(connection) as session:
+                    report = IndexBuilder(suite).refresh_keywords(
+                        session,
+                        asset_ids=(asset_id,),
+                        index_names=index_names,
+                    )
+                    session.commit()
+            return report.to_dict()
         finally:
-            transport.close()
-        digest = hashlib.sha256(
-            "\n".join(
-                f"{document.document_id}:{document.title}:{document.text}" for document in documents
-            ).encode("utf-8")
-        ).hexdigest()
-        with self.database.session() as session:
-            for previous in session.scalars(
-                select(IndexState).where(
-                    IndexState.index_name == "documents",
-                    IndexState.entity_type == "asset",
-                    IndexState.entity_id == asset_id,
-                    IndexState.status == IndexStatus.READY.value,
-                )
-            ):
-                previous.status = IndexStatus.STALE.value
-            state = session.scalar(
-                select(IndexState).where(
-                    IndexState.index_name == "documents",
-                    IndexState.entity_type == "asset",
-                    IndexState.entity_id == asset_id,
-                    IndexState.content_digest == digest,
-                    IndexState.version == "1",
-                )
-            )
-            if state is None:
-                state = IndexState(
-                    index_name="documents",
-                    index_kind=IndexKind.KEYWORD.value,
-                    entity_type="asset",
-                    entity_id=asset_id,
-                    content_digest=digest,
-                    version="1",
-                )
-                session.add(state)
-            state.status = IndexStatus.READY.value
-            state.provider = "meilisearch"
-            state.error = None
-            state.indexed_at = datetime.now(UTC)
-        return {
-            "indexed_documents": len(documents),
-            "stale_documents_removed": len(stale_document_ids),
-            "content_digest": digest,
-        }
+            suite.close()
 
     def index_representation(
         self,
@@ -729,18 +503,16 @@ class RuntimeHandlers:
         representation_id = _uuid_parameter(parameters, "representation_id")
         with self.database.session() as session:
             representation = session.get(Representation, representation_id)
-            if representation is None or representation.deleted_at is not None:
+            if representation is None:
                 raise FileNotFoundError(f"Representation {representation_id} does not exist.")
             asset_id = representation.asset_id
             serving_status = representation_serving_status(session, representation)
-        result = self._upsert_documents(
-            asset_id,
-            self._search_documents_for_asset(asset_id),
-        )
-        if not serving_status.active:
+            deleted = representation.deleted_at is not None
+        result = self._refresh_asset_keywords(asset_id)
+        if deleted or not serving_status.active:
             result.update(
                 {
-                    "status": "skipped_retired",
+                    "status": "skipped_deleted" if deleted else "skipped_retired",
                     "representation_id": str(representation_id),
                     "successor_representation_id": (
                         str(serving_status.successor_representation_id)
@@ -752,36 +524,10 @@ class RuntimeHandlers:
         return result
 
     def index_asset(self, parameters: dict[str, object]) -> dict[str, object]:
-        asset_id = _uuid_parameter(parameters, "asset_id")
-        return self._upsert_documents(
-            asset_id,
-            self._search_documents_for_asset(asset_id),
-        )
+        return self._refresh_asset_keywords(_uuid_parameter(parameters, "asset_id"))
 
     def delete_asset_index(self, parameters: dict[str, object]) -> dict[str, object]:
-        asset_id = _uuid_parameter(parameters, "asset_id")
-        with self.database.session() as session:
-            chunk_ids = list(
-                session.scalars(
-                    select(DocumentChunk.id).where(DocumentChunk.asset_id == asset_id)
-                ).all()
-            )
-        document_ids = [f"asset:{asset_id}", *[f"chunk:{item}" for item in chunk_ids]]
-        transport = _MeiliWriteTransport(self.settings)
-        try:
-            MeilisearchIndex(transport).delete(document_ids)
-        finally:
-            transport.close()
-        with self.database.session() as session:
-            states = session.scalars(
-                select(IndexState).where(
-                    IndexState.entity_type == "asset",
-                    IndexState.entity_id == asset_id,
-                )
-            ).all()
-            for state in states:
-                state.status = IndexStatus.STALE.value
-        return {"deleted_documents": len(document_ids)}
+        return self._refresh_asset_keywords(_uuid_parameter(parameters, "asset_id"))
 
 
 def dispatch_outbox_once(

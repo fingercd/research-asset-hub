@@ -13,7 +13,7 @@ from sqlalchemy import select
 from apps.api.config import ApiSettings
 from apps.api.database import DatabaseManager, create_database_engine
 from apps.asset_gateway.registry import SourceRegistry
-from apps.worker.handlers import RuntimeHandlers, _meili_document_batches
+from apps.worker.handlers import RuntimeHandlers
 from apps.worker.lease import (
     ClaimedJob,
     claim_next_job,
@@ -33,26 +33,7 @@ from packages.domain.models import (
     Representation,
     Source,
 )
-from packages.indexing import SearchDocument
-
-
-def test_worker_batches_and_bounds_meilisearch_documents() -> None:
-    documents = [
-        SearchDocument(
-            document_id=f"chunk:{index}",
-            asset_id="paper-1",
-            kind="document",
-            title="Large paper",
-            text="x" * 300_000,
-        )
-        for index in range(20)
-    ]
-
-    batches = _meili_document_batches(documents)
-
-    assert len(batches) >= 2
-    assert sum(len(batch) for batch in batches) == len(documents)
-    assert max(len(item.text) for batch in batches for item in batch) == 250_000
+from packages.indexing.builder import KeywordBuildReport
 
 
 @pytest.fixture
@@ -66,6 +47,99 @@ def database() -> Iterator[DatabaseManager]:
     manager = DatabaseManager(settings, engine=engine, require_migrations=False)
     yield manager
     engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "job_type",
+    [
+        "index_asset",
+        "asset.index",
+        "index_representation",
+        "representation.index",
+        "delete_asset_index",
+        "asset.index-delete",
+    ],
+)
+@pytest.mark.parametrize("code_enabled", [False, True])
+def test_worker_index_jobs_use_shared_scoped_builder(
+    database: DatabaseManager,
+    monkeypatch: pytest.MonkeyPatch,
+    job_type: str,
+    code_enabled: bool,
+) -> None:
+    with database.session() as session:
+        asset = Asset(asset_type="paper", title="Scoped worker")
+        session.add(asset)
+        session.flush()
+        representation = Representation(
+            asset_id=asset.id,
+            representation_type="markdown",
+            role="original",
+            availability="available",
+            path_ref="paper.md",
+        )
+        session.add(representation)
+        session.flush()
+        asset_id, representation_id = asset.id, representation.id
+    selected_indexes = (
+        ("assets", "documents", "code", "annotations")
+        if code_enabled
+        else (
+            "assets",
+            "documents",
+            "annotations",
+        )
+    )
+    captured: list[dict[str, Any]] = []
+
+    class Suite:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    suite = Suite()
+
+    class Builder:
+        def __init__(self, actual_suite: Any) -> None:
+            assert actual_suite is suite
+
+        def refresh_keywords(self, session: Any, **kwargs: Any) -> KeywordBuildReport:
+            assert session.get(Asset, asset_id) is not None
+            captured.append(kwargs)
+            counts = {name: 1 for name in selected_indexes}
+            return KeywordBuildReport(
+                index_version="v1",
+                keyword_counts_before=counts,
+                keyword_counts_after=counts,
+                keyword_documents_upserted=counts,
+                stale_keyword_documents_removed=counts,
+                asset_ids=(str(asset_id),),
+                operation="refresh",
+                selected_indexes=selected_indexes,
+            )
+
+    def connect(**kwargs: Any) -> Suite:
+        assert kwargs["index_names"] == selected_indexes
+        return suite
+
+    monkeypatch.setattr("apps.worker.handlers.RemoteIndexSuite.connect", connect)
+    monkeypatch.setattr("apps.worker.handlers.IndexBuilder", Builder)
+    handlers = RuntimeHandlers(
+        database,
+        database.settings.model_copy(update={"search_code_index_enabled": code_enabled}),
+        SourceRegistry({}),
+    )
+    parameters: dict[str, object] = (
+        {"representation_id": str(representation_id)}
+        if "representation" in job_type
+        else {"asset_id": str(asset_id)}
+    )
+    result = handlers.dispatch(job_type, parameters)
+    assert captured == [{"asset_ids": (asset_id,), "index_names": selected_indexes}]
+    assert result["index_version"] == "v1"
+    assert result["operation"] == "refresh"
+    assert suite.closed is True
 
 
 def test_job_claim_renew_finish_and_retry(database: DatabaseManager) -> None:

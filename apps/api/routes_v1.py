@@ -1844,16 +1844,16 @@ def _domains_with_counts(
         else [asset for asset in assets if not _is_system_hidden_asset(asset)]
     )
     states, summaries = asset_context or _asset_context(session, content_assets)
-    annotation_counts = dict(
-        session.execute(
+    annotation_counts = {
+        asset_id: count for asset_id, count in session.execute(
             select(Annotation.asset_id, func.count(Annotation.id))
             .where(
                 Annotation.asset_id.in_([asset.id for asset in content_assets]),
                 Annotation.deleted_at.is_(None),
             )
             .group_by(Annotation.asset_id)
-        ).all()
-    )
+        )
+    }
     overviews = _domain_overviews(session, portal_assets)
     confirmed_repository_ids = set(
         session.scalars(

@@ -303,7 +303,7 @@ def dashboard(request: Request) -> dict[str, Any]:
             session,
             _v1._settings(request),
             assets,
-            all_assets=all_assets,
+            all_assets=list(all_assets),
             asset_context=(states, summaries),
         )
         relation_count = (

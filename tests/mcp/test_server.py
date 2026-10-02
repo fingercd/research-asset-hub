@@ -108,6 +108,39 @@ async def test_search_preserves_provenance_and_uses_get_only() -> None:
     assert seen[0].url.params["source_type"] == "analysis"
 
 
+async def test_search_serializes_keywords_constraints_and_domain_alias() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.params["domain"] == "形式化数学"
+        assert request.url.params.get_list("keywords") == ["Lean", "theorem proving"]
+        assert request.url.params.get_list("constraints") == ["无需重新训练", "not distillation"]
+        return httpx.Response(200, json={"items": [], "query_plan": {"mode": "literal_keywords"}})
+
+    result = await invoke(
+        server_for(handler),
+        "search_assets",
+        {
+            "query": "形式化证明",
+            "domain": "形式化数学",
+            "keywords": ["Lean", "theorem proving"],
+            "constraints": ["无需重新训练", "not distillation"],
+        },
+    )
+    assert result["query_plan"]["mode"] == "literal_keywords"
+
+
+async def test_library_status_passes_optional_domain() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/v1/knowledge/status"
+        assert request.url.params["domain"] == "数学人工智能"
+        return httpx.Response(200, json={"schema_version": 2, "read_only": True})
+
+    assert (await invoke(server_for(handler), "library_status", {"domain": "数学人工智能"}))[
+        "read_only"
+    ]
+
+
 @pytest.mark.parametrize("asset_type", ["figure", "writing_pattern", "code_pattern"])
 async def test_search_derived_assets_uses_the_same_knowledge_route(asset_type: str) -> None:
     payload = {"items": [{"asset_type": asset_type, "quality_status": "pending_review"}]}
@@ -142,7 +175,10 @@ async def test_search_derived_assets_uses_the_same_knowledge_route(asset_type: s
         ("read_evidence", {"paper_id": ASSET, "offset": -1}),
         ("read_code", {"asset_id": ASSET, "path": "x" * 513}),
         ("read_code", {"asset_id": ASSET, "line_start": 3, "line_end": 1}),
-        ("get_methodology", {"domain": "../bad", "kind": "writing"}),
+        ("get_methodology", {"domain": "x" * 65, "kind": "writing"}),
+        ("search_assets", {"query": "x", "keywords": ["x"] * 9}),
+        ("search_assets", {"query": "x", "constraints": ["x"] * 7}),
+        ("search_assets", {"query": "x", "keywords": ["x" * 81]}),
     ],
 )
 async def test_invalid_arguments_fail_before_http(tool: str, arguments: dict[str, Any]) -> None:

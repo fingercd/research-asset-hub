@@ -528,8 +528,8 @@ def _pdffigures2_candidates(
             caption_boundary = row.get("captionBoundary")
             caption_bbox = None
             if isinstance(caption_boundary, Mapping):
-                caption_bbox = _clamp_bbox(
-                    normalize_bbox(
+                try:
+                    normalized_caption = normalize_bbox(
                         [
                             caption_boundary["x1"],
                             caption_boundary["y1"],
@@ -539,15 +539,22 @@ def _pdffigures2_candidates(
                         page_width=width,
                         page_height=height,
                         coordinate_system="pdffigures2_72dpi_top_left",
-                    ),
-                    width,
-                    height,
-                )
-            caption = (
-                _Caption(number, caption_text, caption_bbox)
-                if caption_text and caption_bbox is not None
-                else None
-            )
+                    )
+                    if normalized_caption != _clamp_bbox(normalized_caption, width, height):
+                        raise ValueError("Caption bbox lies outside the visible page.")
+                    caption_bbox = normalized_caption
+                except (ValueError, KeyError, TypeError) as error:
+                    warnings.append(
+                        {
+                            "code": "pdffigures2_invalid_caption_bbox",
+                            "page_index": page_index,
+                            "figure_number": number,
+                            "raw_caption_boundary": dict(caption_boundary),
+                            "message": f"Figure region retained; caption bbox omitted: {error}",
+                            "requires_review": True,
+                        }
+                    )
+            caption = _Caption(number, caption_text, caption_bbox or bbox) if caption_text else None
             by_page[page_index].append(
                 _Candidate(
                     page_index=page_index,
@@ -657,7 +664,11 @@ def apply_caption_review_warnings(manifest: dict[str, Any]) -> None:
     for figure in manifest["figures"]:
         labels = list(dict.fromkeys(_caption_labels(figure.get("caption") or "")))
         ambiguous = len(labels) > 1
-        figure["requires_review"] = ambiguous
+        figure["requires_review"] = (
+            ambiguous
+            or bool(figure.get("source_clipped"))
+            or bool(figure.get("caption_bbox_invalid"))
+        )
         if not ambiguous:
             continue
         figure["quality_status"] = "candidate"
@@ -769,6 +780,202 @@ def _build_correction_map(
     return normalized
 
 
+def _added_candidates(
+    additions: Sequence[Mapping[str, Any]],
+    *,
+    page_sizes: Mapping[int, tuple[float, float]],
+    page_rotations: Mapping[int, int],
+    existing: Sequence[tuple[int, str | None]],
+) -> list[tuple[_Candidate, Mapping[str, Any]]]:
+    added: list[tuple[_Candidate, Mapping[str, Any]]] = []
+    seen: set[tuple[int, str]] = set()
+    for row in additions:
+        page_index = int(row["page_index"])
+        number = str(row["figure_number"]).strip()
+        caption = str(row["caption"]).strip()
+        if page_index not in page_sizes:
+            raise ValueError("Added figure page_index is outside the PDF.")
+        if not number or not caption or len(_caption_labels(caption)) > 1:
+            raise ValueError("Added figures require one figure number and an unambiguous caption.")
+        key = (page_index, number)
+        if key in seen:
+            raise ValueError("Duplicate logical figure in add_figures.")
+        seen.add(key)
+        width, height = page_sizes[page_index]
+        bbox = normalize_bbox(
+            row["bbox"],
+            page_width=width,
+            page_height=height,
+            coordinate_system=row.get("coordinate_system", COORDINATE_SYSTEM),
+            page_rotation=page_rotations[page_index],
+            dpi=row.get("dpi"),
+        )
+        if bbox != _clamp_bbox(bbox, width, height):
+            raise ValueError("Added figure bbox must stay within the unrotated CropBox.")
+        caption_bbox = None
+        if row.get("caption_bbox") is not None:
+            caption_bbox = _validate_bbox(row["caption_bbox"])
+            if caption_bbox != _clamp_bbox(caption_bbox, width, height):
+                raise ValueError("Added caption bbox must stay within the unrotated CropBox.")
+        if key in existing:
+            continue
+        added.append(
+            (
+                _Candidate(
+                    page_index=page_index,
+                    bbox=bbox,
+                    caption=_Caption(number, caption, caption_bbox or bbox),
+                    caption_bbox=caption_bbox,
+                    figure_number=number,
+                    source_kind="manual_addition",
+                    note=str(
+                        row.get("review_notes") or "Explicit figure addition; review required."
+                    ),
+                ),
+                row,
+            )
+        )
+    return added
+
+
+def apply_cached_figure_corrections(
+    pdf_path: Path,
+    asset_directory: Path,
+    *,
+    source_hash: str,
+    corrections: Mapping[str, Mapping[str, Any]] | None = None,
+    add_figures: Sequence[Mapping[str, Any]] = (),
+    dpi: int = 220,
+    preview_dpi: int = 90,
+    mark_corrected_reviewed: bool = False,
+) -> dict[str, Any]:
+    """Apply explicit corrections to cached crops, rendering only changed pages."""
+    manifest_path = asset_directory / "figures.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if sha256_file(pdf_path) != source_hash or manifest["source_hash"] != source_hash:
+        raise SourceHashMismatch("Cached correction requires the original PDF hash.")
+    if dpi < 72 or preview_dpi < 36:
+        raise ValueError("dpi must be at least 72 and preview_dpi at least 36.")
+    records = manifest["figures"]
+    by_id = {record["figure_id"]: record for record in records}
+    if len(by_id) != len(records):
+        raise ValueError("Cached figure IDs are not unique.")
+    with pymupdf.open(pdf_path) as document:  # type: ignore[no-untyped-call]
+        sizes = {i: (p.cropbox.width, p.cropbox.height) for i, p in enumerate(document)}
+        rotations = {i: p.rotation for i, p in enumerate(document)}
+        changes: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
+        for figure_id, correction in (corrections or {}).items():
+            if "split_figures" in correction:
+                # An already applied split is safe to re-import without duplicating children.
+                children = correction["split_figures"]
+                if all(
+                    any(
+                        r["page_index"] == c["page_index"]
+                        and r["figure_number"] == c["figure_number"]
+                        for r in records
+                    )
+                    for c in children
+                ):
+                    continue
+                raise ValueError("Unapplied splits require extraction from original candidates.")
+            if figure_id not in by_id:
+                raise ValueError(f"Unknown cached correction figure: {figure_id}")
+            record = by_id[figure_id]
+            if int(correction["page_index"]) != record["page_index"]:
+                raise ValueError("A bbox correction must use its figure's page_index.")
+            cmap = _build_correction_map(
+                {figure_id: correction}, page_sizes=sizes, page_rotations=rotations
+            )
+            record["bbox"] = list(cmap[figure_id][0])
+            changes.append((record, correction))
+        for candidate, row in _added_candidates(
+            add_figures,
+            page_sizes=sizes,
+            page_rotations=rotations,
+            existing=[(r["page_index"], r["figure_number"]) for r in records],
+        ):
+            figure_id = _figure_id(manifest["asset_id"], candidate, 0)
+            if figure_id in by_id:
+                raise ValueError("Added figure ID collides with a cached figure.")
+            width, height = sizes[candidate.page_index]
+            record = dict(
+                figure_id=figure_id,
+                figure_number=candidate.figure_number,
+                caption=candidate.caption.text if candidate.caption else None,
+                page=candidate.page_index + 1,
+                page_index=candidate.page_index,
+                bbox=list(candidate.bbox),
+                caption_bbox=candidate.caption_bbox,
+                coordinate_system=COORDINATE_SYSTEM,
+                page_width=width,
+                page_height=height,
+                rotation=rotations[candidate.page_index],
+                image_path=f"figures/images/{figure_id}.png",
+                preview_path=f"figures/previews/{figure_id}.png",
+                overlay_path=f"figures/overlays/page-{candidate.page_index + 1:04d}.png",
+                detection_source="manual_addition",
+            )
+            records.append(record)
+            by_id[figure_id] = record
+            changes.append((record, row))
+        changed_pages = set()
+        for record, row in changes:
+            page = document[record["page_index"]]
+            bbox = _validate_bbox(record["bbox"])
+            _save_png(_render_crop(page, bbox, dpi), asset_directory / record["image_path"])
+            record["preview_bytes"] = _save_png(
+                _render_crop(page, bbox, preview_dpi),
+                asset_directory / record["preview_path"],
+                max_bytes=PREVIEW_MAX_BYTES,
+            )
+            record["review_notes"] = str(row.get("review_notes") or "Explicit bbox correction.")
+            record["correction_provenance"] = {
+                "reviewer": row.get("reviewer"),
+                "human_reviewed": row.get("human_reviewed", False),
+                "confidence": row.get("confidence"),
+                "review_id": row.get("review_id"),
+            }
+            human = bool(row.get("human_reviewed", False))
+            record["quality_status"] = (
+                "reviewed"
+                if human and mark_corrected_reviewed
+                else "agent_visual_review"
+                if row.get("reviewer") == "agent-visual-review"
+                else "candidate"
+            )
+            record["source_clipped"] = bool(row.get("source_clipped", False))
+            if record["source_clipped"]:
+                record["quality_status"] = "source_clipped_candidate"
+            changed_pages.add(record["page_index"])
+        overlays = {r["page_index"]: r for r in manifest.get("review_overlays", [])}
+        for pi in changed_pages:
+            entries = [
+                (str(r["figure_number"]), _validate_bbox(r["bbox"]))
+                for r in records
+                if r["page_index"] == pi
+            ]
+            relative = f"figures/overlays/page-{pi + 1:04d}.png"
+            size = _save_png(
+                _render_overlay(document[pi], entries, preview_dpi),
+                asset_directory / relative,
+                max_bytes=PREVIEW_MAX_BYTES,
+            )
+            overlays[pi] = dict(
+                page=pi + 1, page_index=pi, path=relative, candidate_count=len(entries), bytes=size
+            )
+        manifest["review_overlays"] = list(overlays.values())
+        manifest["last_correction_run"] = dict(
+            changed_figures=len(changes), changed_pages=sorted(changed_pages)
+        )
+    apply_caption_review_warnings(manifest)
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(manifest_path)
+    return cast(dict[str, Any], manifest)
+
+
 def extract_pdf_figures(
     pdf_path: Path,
     asset_directory: Path,
@@ -780,6 +987,7 @@ def extract_pdf_figures(
     dpi: int = 220,
     preview_dpi: int = 90,
     corrections: Mapping[str, Mapping[str, Any]] | None = None,
+    add_figures: Sequence[Mapping[str, Any]] = (),
     mark_corrected_reviewed: bool = False,
     pdffigures2_results: Sequence[Mapping[str, Any]] | None = None,
     run_pymupdf_heuristic: bool = True,
@@ -942,6 +1150,14 @@ def extract_pdf_figures(
             page_sizes=page_sizes,
             page_rotations=page_rotations,
         )
+        for candidate, row in _added_candidates(
+            add_figures,
+            page_sizes=page_sizes,
+            page_rotations=page_rotations,
+            existing=[(c.page_index, c.figure_number) for c in all_candidates],
+        ):
+            all_candidates.append(candidate)
+            expanded_corrections[_figure_id(asset_id, candidate, 0)] = row
         correction_map = _build_correction_map(
             expanded_corrections,
             page_sizes=page_sizes,
@@ -1019,10 +1235,26 @@ def extract_pdf_figures(
                     "preview_path": preview_rel.as_posix(),
                     "overlay_path": page_overlay_rel.as_posix(),
                     "preview_bytes": preview_size,
-                    "quality_status": "reviewed"
-                    if mark_corrected_reviewed and figure_id in used_corrections
-                    else "candidate",
+                    "quality_status": (
+                        "source_clipped_candidate"
+                        if figure_id in used_corrections
+                        and expanded_corrections[figure_id].get("source_clipped", False)
+                        else "agent_visual_review"
+                        if figure_id in used_corrections
+                        and expanded_corrections[figure_id].get("reviewer") == "agent-visual-review"
+                        and not expanded_corrections[figure_id].get("human_reviewed", False)
+                        else "reviewed"
+                        if mark_corrected_reviewed and figure_id in used_corrections
+                        else "candidate"
+                    ),
                     "review_notes": review_notes,
+                    "source_clipped": bool((correction or {}).get("source_clipped", False)),
+                    "caption_bbox_invalid": any(
+                        warning["code"] == "pdffigures2_invalid_caption_bbox"
+                        and warning["page_index"] == candidate.page_index
+                        and warning.get("figure_number") == candidate.figure_number
+                        for warning in warnings
+                    ),
                     "detection_source": candidate.source_kind,
                     "correction_provenance": (
                         {
@@ -1030,6 +1262,8 @@ def extract_pdf_figures(
                             "human_reviewed": expanded_corrections[figure_id].get(
                                 "human_reviewed", False
                             ),
+                            "confidence": expanded_corrections[figure_id].get("confidence"),
+                            "review_id": expanded_corrections[figure_id].get("review_id"),
                         }
                         if figure_id in used_corrections
                         else None

@@ -15,7 +15,11 @@ from pydantic import Field
 from apps.mcp_server.client import HubClient
 
 Query = Annotated[str, Field(min_length=1, max_length=500)]
-Domain = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")]
+Domain = Annotated[str, Field(min_length=1, max_length=64)]
+KeywordTerm = Annotated[str, Field(min_length=1, max_length=80)]
+Keywords = Annotated[list[KeywordTerm], Field(max_length=8)]
+QueryConstraint = Annotated[str, Field(min_length=1, max_length=160)]
+Constraints = Annotated[list[QueryConstraint], Field(max_length=6)]
 Limit = Annotated[int, Field(ge=1, le=20)]
 Page = Annotated[int, Field(ge=1, le=10000)]
 Line = Annotated[int, Field(ge=1, le=100000)]
@@ -134,11 +138,15 @@ def create_server(client: HubClient | None = None) -> FastMCP:
         | None = None,
         source_type: Literal["original", "analysis"] | None = None,
         limit: Limit = 10,
+        keywords: Keywords | None = None,
+        constraints: Constraints | None = None,
     ) -> dict[str, Any]:
         """搜索论文、代码、科研图和模式卡 / Search research assets and evidence-backed patterns.
         figure=科研图，writing_pattern=写作模式，code_pattern=代码模式。
         original=原始证据，analysis=派生分析；保留来源、引用与 pending_review 状态。最多20条。
-        使用简短科研关键词或方法名；复杂问题可拆成中英专业术语查询。
+        复杂问题可把主题放入keywords(最多8个)，必须条件或排除条件放入constraints(最多6个)。
+        服务只做关键词/别名检索，不建向量；条件命中不是结论，必须读原文核实。
+        domain接受注册领域slug、名称或无歧义别名，library_status可列出领域。
         搜索片段仅用于发现材料，引用论文结论前必须read_evidence核对原文与版本。
         """
         if not query.strip():
@@ -151,6 +159,8 @@ def create_server(client: HubClient | None = None) -> FastMCP:
                     "domain": domain,
                     "asset_type": asset_type,
                     "source_type": source_type,
+                    "keywords": keywords,
+                    "constraints": constraints,
                 }.items()
                 if v is not None
             }
@@ -271,10 +281,13 @@ def create_server(client: HubClient | None = None) -> FastMCP:
         q: Annotated[str, Field(max_length=500)] = "",
         limit: Limit = 10,
         include_candidates: bool = False,
+        keywords: Keywords | None = None,
+        constraints: Constraints | None = None,
     ) -> dict[str, Any]:
         """查询已审查的方法卡 / Retrieve reviewed writing, figure or code methodology with evidence.
         默认仅reviewed；include_candidates=true可查看candidate/pending_review，候选未经核验。
         方法必须附来源证据，不存在时不编造。writing=写作，figure=科研图，code=代码实践。
+        可选keywords/constraints与search_assets相同，条件须结合原文核对。
         """
         return await hub.get_json(
             "knowledge/methodology",
@@ -284,14 +297,17 @@ def create_server(client: HubClient | None = None) -> FastMCP:
                 "q": q,
                 "limit": limit,
                 "include_candidates": str(include_candidates).lower(),
+                **({"keywords": keywords} if keywords else {}),
+                **({"constraints": constraints} if constraints else {}),
             },
         )
 
     @server.tool(annotations=READ_ONLY)
-    async def library_status() -> dict[str, Any]:
+    async def library_status(domain: Domain | None = None) -> dict[str, Any]:
         """查询知识库当前可用性、抽取和索引状态 / Read current library health and readiness.
-        状态来自运行中的Hub；失败、缺失和pending_review不可视为已完成。本工具不会启动服务。
+        可按领域查询。领域与抽取/索引数字来自台账，未验证远端或原文件时会明确标注。
+        失败、缺失、partial和pending_review不可视为已完成。本工具不会启动服务。
         """
-        return await hub.get_json("knowledge/status")
+        return await hub.get_json("knowledge/status", {"domain": domain} if domain else None)
 
     return server

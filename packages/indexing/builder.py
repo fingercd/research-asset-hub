@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select, tuple_, update
+from sqlalchemy import and_, exists, func, or_, select, tuple_, union, update
 from sqlalchemy.orm import Session
 
 from packages.domain.enums import IndexKind, IndexStatus, ReadingStatus
@@ -24,6 +24,9 @@ from packages.domain.models import (
     IndexState,
     ReadingState,
     Representation,
+    Source,
+    SourceRecord,
+    SourceRecordAsset,
 )
 from packages.domain.serving_scope import active_representation_clause
 
@@ -32,6 +35,7 @@ from .meili import HttpxJSONTransport, KeywordIndex, MeilisearchAdmin, Meilisear
 from .models import SearchDocument
 
 KEYWORD_INDEX_NAMES = ("assets", "documents", "code", "annotations")
+DEFAULT_REFRESH_INDEX_NAMES = ("assets", "documents", "annotations")
 DEFAULT_INDEX_VERSION = "v1"
 DEFAULT_TASK_FLUSH_BATCHES = 16
 T = TypeVar("T")
@@ -62,6 +66,10 @@ class KeywordBuildReport:
     task_flush_batch_count: int = DEFAULT_TASK_FLUSH_BATCHES
     selected_indexes: tuple[str, ...] = KEYWORD_INDEX_NAMES
     skipped_indexes: tuple[str, ...] = ()
+    asset_ids: tuple[str, ...] = ()
+    operation: str = "rebuild"
+    scoped_keyword_counts_before: Mapping[str, int] | None = None
+    scoped_keyword_counts_after: Mapping[str, int] | None = None
     buffering_strategy: str = (
         "uuid_keyset_pages; bounded_meili_task_groups; stale_ids_spooled_to_disk"
     )
@@ -135,10 +143,12 @@ class PostgresIndexCatalog:
         *,
         user_id: str = "local",
         scope: ServingScope = "serving_active",
+        asset_ids: Iterable[UUID] | None = None,
     ) -> IndexCatalog:
         """Materialize a catalog for compatibility; production uses the iterator."""
 
         normalized_scope = _normalize_scope(scope)
+        selected_asset_ids = None if asset_ids is None else tuple(set(asset_ids))
         return IndexCatalog(
             keyword_documents={
                 index_name: tuple(
@@ -149,6 +159,7 @@ class PostgresIndexCatalog:
                         user_id=user_id,
                         scope=normalized_scope,
                         batch_size=256,
+                        asset_ids=selected_asset_ids,
                     )
                     for document in batch
                 )
@@ -164,16 +175,24 @@ class PostgresIndexCatalog:
         user_id: str = "local",
         scope: ServingScope = "serving_active",
         batch_size: int = 256,
+        asset_ids: Iterable[UUID] | None = None,
     ) -> Iterable[list[SearchDocument]]:
         """Yield one index in UUID order without retaining prior pages."""
 
         if index_name not in KEYWORD_INDEX_NAMES:
             raise ValueError(f"Unknown keyword index: {index_name}")
         normalized_scope = _normalize_scope(scope)
+        selected_asset_ids = None if asset_ids is None else tuple(set(asset_ids))
+        if selected_asset_ids == ():
+            return
         size = max(1, batch_size)
         if index_name == "assets":
             yield from self._iter_asset_batches(
-                session, user_id=user_id, scope=normalized_scope, batch_size=size
+                session,
+                user_id=user_id,
+                scope=normalized_scope,
+                batch_size=size,
+                asset_ids=selected_asset_ids,
             )
         elif index_name in {"documents", "code"}:
             yield from self._iter_chunk_batches(
@@ -182,10 +201,15 @@ class PostgresIndexCatalog:
                 user_id=user_id,
                 scope=normalized_scope,
                 batch_size=size,
+                asset_ids=selected_asset_ids,
             )
         else:
             yield from self._iter_annotation_batches(
-                session, user_id=user_id, scope=normalized_scope, batch_size=size
+                session,
+                user_id=user_id,
+                scope=normalized_scope,
+                batch_size=size,
+                asset_ids=selected_asset_ids,
             )
 
     def _iter_asset_batches(
@@ -195,10 +219,13 @@ class PostgresIndexCatalog:
         user_id: str,
         scope: ServingScope,
         batch_size: int,
+        asset_ids: tuple[UUID, ...] | None,
     ) -> Iterable[list[SearchDocument]]:
         cursor: UUID | None = None
         while True:
             statement = select(Asset).where(Asset.deleted_at.is_(None))
+            if asset_ids is not None:
+                statement = statement.where(Asset.id.in_(asset_ids))
             if cursor is not None:
                 statement = statement.where(Asset.id > cursor)
             assets = list(session.scalars(statement.order_by(Asset.id).limit(batch_size)).all())
@@ -221,6 +248,7 @@ class PostgresIndexCatalog:
         user_id: str,
         scope: ServingScope,
         batch_size: int,
+        asset_ids: tuple[UUID, ...] | None,
     ) -> Iterable[list[SearchDocument]]:
         cursor: UUID | None = None
         code_clause = func.coalesce(
@@ -250,6 +278,8 @@ class PostgresIndexCatalog:
             )
             if scope == "serving_active":
                 statement = statement.where(active_representation_clause())
+            if asset_ids is not None:
+                statement = statement.where(DocumentChunk.asset_id.in_(asset_ids))
             if cursor is not None:
                 statement = statement.where(DocumentChunk.id > cursor)
             rows = list(
@@ -308,6 +338,7 @@ class PostgresIndexCatalog:
         user_id: str,
         scope: ServingScope,
         batch_size: int,
+        asset_ids: tuple[UUID, ...] | None,
     ) -> Iterable[list[SearchDocument]]:
         cursor: UUID | None = None
         active_annotation_representation = exists(
@@ -330,6 +361,8 @@ class PostgresIndexCatalog:
                         active_annotation_representation,
                     )
                 )
+            if asset_ids is not None:
+                statement = statement.where(Annotation.asset_id.in_(asset_ids))
             if cursor is not None:
                 statement = statement.where(Annotation.id > cursor)
             annotations = list(
@@ -392,9 +425,7 @@ class PostgresIndexCatalog:
             return {}
         assets = list(
             session.scalars(
-                select(Asset).where(
-                    Asset.id.in_(asset_ids), Asset.deleted_at.is_(None)
-                )
+                select(Asset).where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None))
             ).all()
         )
         identifiers: defaultdict[UUID, list[str]] = defaultdict(list)
@@ -418,9 +449,9 @@ class PostgresIndexCatalog:
         representation_types: defaultdict[UUID, set[str]] = defaultdict(set)
         available_representation_types: defaultdict[UUID, set[str]] = defaultdict(set)
         representation_availability: defaultdict[UUID, set[str]] = defaultdict(set)
-        representation_digest_by_asset: defaultdict[
-            UUID, dict[UUID, str | None]
-        ] = defaultdict(dict)
+        representation_digest_by_asset: defaultdict[UUID, dict[UUID, str | None]] = defaultdict(
+            dict
+        )
         representation_statement = select(
             Representation.id,
             Representation.asset_id,
@@ -464,9 +495,7 @@ class PostgresIndexCatalog:
                     asset,
                     reading_status=reading_status.get(asset.id, ReadingStatus.UNREAD.value),
                     representation_types=sorted(representation_types[asset.id]),
-                    available_representation_types=sorted(
-                        available_representation_types[asset.id]
-                    ),
+                    available_representation_types=sorted(available_representation_types[asset.id]),
                     availability=sorted(representation_availability[asset.id]),
                 ),
                 identifiers=tuple(identifiers[asset.id]),
@@ -523,6 +552,142 @@ class IndexBuilder:
         self.task_flush_batch_count = max(1, task_flush_batch_count)
         self.catalog = catalog or PostgresIndexCatalog()
 
+    def refresh_keywords(
+        self,
+        session: Session,
+        *,
+        asset_ids: Iterable[UUID],
+        user_id: str = "local",
+        scope: ServingScope = "serving_active",
+        index_names: Sequence[str] = DEFAULT_REFRESH_INDEX_NAMES,
+    ) -> KeywordBuildReport:
+        """Reconcile only these assets, including remote chunks already deleted locally.
+
+        All remote reads carry an asset filter. Old logical IDs are spooled before
+        writes so offset pagination cannot drift, and index states use the same
+        projection, digest and version as the full builder.
+        """
+
+        selected_assets = tuple(sorted(set(asset_ids), key=str))
+        if not selected_assets:
+            raise ValueError("asset_ids must contain at least one asset UUID")
+        selected_indexes = tuple(dict.fromkeys(index_names))
+        if not selected_indexes or set(selected_indexes) - set(KEYWORD_INDEX_NAMES):
+            raise ValueError("index_names must contain known keyword indexes")
+        normalized_scope = _normalize_scope(scope)
+        _require_repeatable_read_snapshot(session)
+        counts_before = {
+            name: self.suite.meili_admin.document_count(name) for name in selected_indexes
+        }
+        upserted = dict.fromkeys(selected_indexes, 0)
+        removed = dict.fromkeys(selected_indexes, 0)
+        scoped_before = dict.fromkeys(selected_indexes, 0)
+        scoped_after = dict.fromkeys(selected_indexes, 0)
+        peak_buffered_documents = 0
+        indexed_at = datetime.now(UTC)
+        previous_wait_mode = self.suite.meili_transport.wait_for_tasks
+        self.suite.meili_transport.wait_for_tasks = False
+        try:
+            with session.begin_nested():
+                self._mark_previous_states_stale(
+                    session,
+                    indexed_at=indexed_at,
+                    index_names=selected_indexes,
+                    asset_ids=selected_assets,
+                )
+                for index_name in selected_indexes:
+                    with tempfile.TemporaryFile(
+                        mode="w+t", encoding="utf-8", newline="\n"
+                    ) as spool:
+                        for old_ids in self.suite.meili_admin.iter_asset_document_id_batches(
+                            index_name, asset_ids=selected_assets, batch_size=self.write_batch_size
+                        ):
+                            scoped_before[index_name] += len(old_ids)
+                            self._mark_remote_states_stale(
+                                session,
+                                index_name=index_name,
+                                document_ids=old_ids,
+                                indexed_at=indexed_at,
+                            )
+                            for document_id in old_ids:
+                                spool.write(json.dumps(document_id) + "\n")
+                        queued_batches = 0
+                        for batch in self.catalog.iter_index_batches(
+                            session,
+                            index_name=index_name,
+                            user_id=user_id,
+                            scope=normalized_scope,
+                            batch_size=self.write_batch_size,
+                            asset_ids=selected_assets,
+                        ):
+                            peak_buffered_documents = max(peak_buffered_documents, len(batch))
+                            self.suite.keyword_indexes[index_name].upsert(batch)
+                            self._record_index_state_batch(
+                                session,
+                                index_name=index_name,
+                                documents=batch,
+                                indexed_at=indexed_at,
+                            )
+                            upserted[index_name] += len(batch)
+                            queued_batches += 1
+                            if queued_batches >= self.task_flush_batch_count:
+                                self.suite.meili_transport.flush_pending_tasks()
+                                queued_batches = 0
+                        self.suite.meili_transport.flush_pending_tasks()
+                        spool.seek(0)
+                        queued_batches = 0
+                        while old_ids := [
+                            json.loads(line) for line in _take_lines(spool, self.write_batch_size)
+                        ]:
+                            current_ids = self._current_document_ids(
+                                session, index_name=index_name, document_ids=old_ids
+                            )
+                            stale_ids = [value for value in old_ids if value not in current_ids]
+                            if stale_ids:
+                                self.suite.keyword_indexes[index_name].delete(stale_ids)
+                                removed[index_name] += len(stale_ids)
+                                queued_batches += 1
+                                if queued_batches >= self.task_flush_batch_count:
+                                    self.suite.meili_transport.flush_pending_tasks()
+                                    queued_batches = 0
+                        self.suite.meili_transport.flush_pending_tasks()
+                    scoped_after[index_name] = sum(
+                        len(batch)
+                        for batch in self.suite.meili_admin.iter_asset_document_id_batches(
+                            index_name, asset_ids=selected_assets, batch_size=self.write_batch_size
+                        )
+                    )
+                    if scoped_after[index_name] != upserted[index_name]:
+                        raise RuntimeError(
+                            f"Index {index_name!r} scoped count mismatch: "
+                            f"expected {upserted[index_name]}, got {scoped_after[index_name]}"
+                        )
+                session.flush()
+                counts_after = {
+                    name: self.suite.meili_admin.document_count(name) for name in selected_indexes
+                }
+        finally:
+            self.suite.meili_transport.wait_for_tasks = previous_wait_mode
+        return KeywordBuildReport(
+            index_version=self.version,
+            keyword_counts_before=counts_before,
+            keyword_counts_after=counts_after,
+            keyword_documents_upserted=upserted,
+            stale_keyword_documents_removed=removed,
+            scope=normalized_scope,
+            batch_size=self.write_batch_size,
+            peak_buffered_documents=peak_buffered_documents,
+            task_flush_batch_count=self.task_flush_batch_count,
+            selected_indexes=selected_indexes,
+            skipped_indexes=tuple(
+                name for name in KEYWORD_INDEX_NAMES if name not in selected_indexes
+            ),
+            asset_ids=tuple(str(value) for value in selected_assets),
+            operation="refresh",
+            scoped_keyword_counts_before=scoped_before,
+            scoped_keyword_counts_after=scoped_after,
+        )
+
     def rebuild_keywords(
         self,
         session: Session,
@@ -547,8 +712,7 @@ class IndexBuilder:
         )
         _require_repeatable_read_snapshot(session)
         counts_before = {
-            name: self.suite.meili_admin.document_count(name)
-            for name in KEYWORD_INDEX_NAMES
+            name: self.suite.meili_admin.document_count(name) for name in KEYWORD_INDEX_NAMES
         }
         removed = dict.fromkeys(KEYWORD_INDEX_NAMES, 0)
         upserted = dict.fromkeys(KEYWORD_INDEX_NAMES, 0)
@@ -626,20 +790,63 @@ class IndexBuilder:
         *,
         indexed_at: datetime,
         index_names: Sequence[str] = KEYWORD_INDEX_NAMES,
+        asset_ids: Sequence[UUID] | None = None,
     ) -> None:
+        statement = update(IndexState)
+        if asset_ids is not None:
+            statement = statement.where(
+                or_(
+                    and_(IndexState.entity_type == "asset", IndexState.entity_id.in_(asset_ids)),
+                    and_(
+                        IndexState.entity_type == "chunk",
+                        IndexState.entity_id.in_(
+                            select(DocumentChunk.id).where(DocumentChunk.asset_id.in_(asset_ids))
+                        ),
+                    ),
+                    and_(
+                        IndexState.entity_type == "annotation",
+                        IndexState.entity_id.in_(
+                            select(Annotation.id).where(Annotation.asset_id.in_(asset_ids))
+                        ),
+                    ),
+                )
+            )
         session.execute(
-            update(IndexState)
-            .where(
+            statement.where(
                 IndexState.version == self.version,
                 IndexState.index_name.in_(tuple(index_names)),
                 IndexState.status == IndexStatus.READY.value,
-            )
-            .values(
+            ).values(
                 status=IndexStatus.STALE.value,
                 updated_at=indexed_at,
                 row_version=IndexState.row_version + 1,
             )
         )
+
+    def _mark_remote_states_stale(
+        self,
+        session: Session,
+        *,
+        index_name: str,
+        document_ids: Sequence[str],
+        indexed_at: datetime,
+    ) -> None:
+        pairs = _logical_document_pairs(document_ids)
+        if pairs:
+            session.execute(
+                update(IndexState)
+                .where(
+                    IndexState.version == self.version,
+                    IndexState.index_name == index_name,
+                    IndexState.status == IndexStatus.READY.value,
+                    tuple_(IndexState.entity_type, IndexState.entity_id).in_(pairs),
+                )
+                .values(
+                    status=IndexStatus.STALE.value,
+                    updated_at=indexed_at,
+                    row_version=IndexState.row_version + 1,
+                )
+            )
 
     def _record_index_state_batch(
         self,
@@ -669,8 +876,7 @@ class IndexBuilder:
             ).all()
         )
         by_key = {
-            (state.entity_type, state.entity_id, state.content_digest): state
-            for state in existing
+            (state.entity_type, state.entity_id, state.content_digest): state for state in existing
         }
         index_kind = IndexKind.CODE.value if index_name == "code" else IndexKind.KEYWORD.value
         for entity_type, entity_id, digest in current:
@@ -722,9 +928,7 @@ class IndexBuilder:
             self.suite.meili_transport.flush_pending_tasks()
         return removed
 
-    def _iter_remote_document_id_batches(
-        self, index_name: str
-    ) -> Iterable[list[str]]:
+    def _iter_remote_document_id_batches(self, index_name: str) -> Iterable[list[str]]:
         """Read stable remote pages before any delete mutates their offsets."""
 
         transport = getattr(self.suite.meili_admin, "transport", None)
@@ -766,18 +970,7 @@ class IndexBuilder:
         index_name: str,
         document_ids: Sequence[str],
     ) -> set[str]:
-        canonical_by_pair: dict[tuple[str, UUID], str] = {}
-        for document_id in document_ids:
-            entity_type, separator, raw_id = document_id.partition(":")
-            if not separator:
-                continue
-            try:
-                entity_id = UUID(raw_id)
-            except ValueError:
-                continue
-            canonical = f"{entity_type}:{entity_id}"
-            if canonical == document_id:
-                canonical_by_pair[(entity_type, entity_id)] = document_id
+        canonical_by_pair = _logical_document_pairs(document_ids)
         if not canonical_by_pair:
             return set()
         ready_pairs = set(
@@ -793,10 +986,56 @@ class IndexBuilder:
             ).all()
         )
         return {
-            document_id
-            for pair, document_id in canonical_by_pair.items()
-            if pair in ready_pairs
+            document_id for pair, document_id in canonical_by_pair.items() if pair in ready_pairs
         }
+
+
+def resolve_asset_scope(
+    session: Session,
+    *,
+    asset_ids: Iterable[UUID] | None = None,
+    source_alias: str | None = None,
+) -> tuple[UUID, ...] | None:
+    """Resolve a source's primary and materialized assets; combine filters by intersection.
+
+    Historical/deleted assets remain in scope so refresh can remove their remote
+    documents. ``None`` means no restriction; an empty tuple means no matching assets.
+    """
+
+    selected = None if asset_ids is None else set(asset_ids)
+    if source_alias is not None:
+        source_id = session.scalar(select(Source.id).where(Source.alias == source_alias))
+        if source_id is None:
+            raise ValueError(f"Unknown source alias: {source_alias!r}.")
+        source_assets: set[UUID] = set(
+            session.scalars(
+                union(
+                    select(SourceRecord.asset_id).where(
+                        SourceRecord.source_id == source_id, SourceRecord.asset_id.is_not(None)
+                    ),
+                    select(SourceRecordAsset.asset_id)
+                    .join(SourceRecord, SourceRecord.id == SourceRecordAsset.source_record_id)
+                    .where(SourceRecord.source_id == source_id),
+                )
+            ).all()
+        )
+        selected = source_assets if selected is None else selected.intersection(source_assets)
+    return None if selected is None else tuple(sorted(selected, key=str))
+
+
+def _logical_document_pairs(document_ids: Sequence[str]) -> dict[tuple[str, UUID], str]:
+    pairs: dict[tuple[str, UUID], str] = {}
+    for document_id in document_ids:
+        entity_type, separator, raw_id = document_id.partition(":")
+        if not separator:
+            continue
+        try:
+            entity_id = UUID(raw_id)
+        except ValueError:
+            continue
+        if f"{entity_type}:{entity_id}" == document_id:
+            pairs[(entity_type, entity_id)] = document_id
+    return pairs
 
 
 def _require_repeatable_read_snapshot(session: Session) -> None:
@@ -845,9 +1084,7 @@ def _asset_metadata(
     }
 
 
-def _is_code_chunk(
-    chunk_kind: str, anchor_kind: str | None, representation_type: str
-) -> bool:
+def _is_code_chunk(chunk_kind: str, anchor_kind: str | None, representation_type: str) -> bool:
     return (
         "code" in chunk_kind.casefold()
         or anchor_kind == "code_lines"

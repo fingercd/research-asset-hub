@@ -4,30 +4,47 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import Query, Request, Response
+from pydantic import Field
 
 from apps.api import routes_v1 as _v1
 from apps.api.config import PROJECT_ROOT
 from apps.api.problem import ApiProblem
+from apps.asset_gateway.registry import SourceConfigurationError
 from packages.domain.serving_scope import RetiredRepresentationError
+from packages.knowledge.domains import normalize_domain
 from packages.knowledge.service import KnowledgeError, KnowledgeService
+from packages.knowledge.status import build_knowledge_status
+
+KeywordTerm = Annotated[str, Field(min_length=1, max_length=80)]
+QueryConstraint = Annotated[str, Field(min_length=1, max_length=160)]
 
 
 @contextmanager
 def _service(request: Request) -> Iterator[KnowledgeService]:
     try:
         with _v1._database(request).session() as session:
+            registry = _v1._source_registry(request)
+            registry.refresh_if_changed()
             yield KnowledgeService(
                 session,
-                _v1._source_registry(request),
+                registry,
                 PROJECT_ROOT / "outputs" / "knowledge-pilot" / "v1",
                 asset_loader=_v1._live_asset,
                 hidden_asset=_v1._is_system_hidden_asset,
                 keyword_search=lambda: _v1._search_runtime(request).service,
+                taxonomy_path=_v1._settings(request).taxonomy_config_path,
             )
+    except SourceConfigurationError as error:
+        raise ApiProblem(
+            503,
+            "来源配置暂不可用",
+            "来源配置更新或验证失败；未将其作为论文缺失处理。",
+            code="source_configuration_invalid",
+        ) from error
     except RetiredRepresentationError as error:
         raise _v1._retired_representation_problem(error) from error
     except KnowledgeError as error:
@@ -48,14 +65,31 @@ def search_assets(
     asset_type: str | None = None,
     source_type: Literal["original", "analysis"] | None = None,
     limit: int = Query(default=20, ge=1, le=20),
+    keywords: Annotated[list[KeywordTerm] | None, Query(max_length=8)] = None,
+    constraints: Annotated[list[QueryConstraint] | None, Query(max_length=6)] = None,
 ) -> dict[str, object]:
     if asset_type in {"figure", "writing_pattern", "code_pattern"}:
         from .knowledge_derivatives import search_derivatives
 
-        return search_derivatives(request, query, domain, asset_type, source_type, limit)
+        return search_derivatives(
+            request,
+            query,
+            domain,
+            asset_type,
+            source_type,
+            limit,
+            keywords=keywords or (),
+            constraints=constraints or (),
+        )
     with _service(request) as service:
         return service.search_assets(
-            query, domain=domain, asset_type=asset_type, source_type=source_type, limit=limit
+            query,
+            domain=domain,
+            asset_type=asset_type,
+            source_type=source_type,
+            limit=limit,
+            keywords=keywords or (),
+            constraints=constraints or (),
         )
 
 
@@ -98,6 +132,17 @@ def read_evidence(
 
 
 @_v1.router.get("/knowledge/status")
-def knowledge_status(request: Request) -> dict[str, object]:
+def knowledge_status(request: Request, domain: str | None = None) -> dict[str, object]:
     with _service(request) as service:
-        return service.status()
+        settings = _v1._settings(request)
+        try:
+            selected = normalize_domain(domain, settings.taxonomy_config_path)
+        except ValueError as error:
+            raise KnowledgeError("invalid_domain", str(error), 422) from error
+        return build_knowledge_status(
+            service.session,
+            service.registry,
+            service.cache_root,
+            settings,
+            domain=selected,
+        )

@@ -10,21 +10,25 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from starlette.requests import Request
 
 from apps.api.routes import knowledge_derivatives as routes
-from apps.asset_gateway.registry import SourceRegistry
+from apps.asset_gateway.registry import SourceConfigurationError, SourceRegistry
 from packages.domain.models import (
     Asset,
     BackupRun,
     Base,
     Representation,
     Source,
+    SourceRecord,
     SourceRetirement,
 )
+from packages.domain.platform_models import SourceRecordAsset
 from packages.domain.serving_scope import RetiredRepresentationError
 from packages.knowledge.derived import MAX_IMAGE_BYTES, DerivativeStore
 from packages.knowledge.service import KnowledgeError, KnowledgeService
@@ -449,3 +453,244 @@ def test_bad_methodology_evidence_is_an_explicit_failure(derivative_library, cor
         return
     assert result["items"] == []
     assert result["excluded_stale_or_unavailable"] == 1
+
+
+def _taxonomy(library):
+    path = library["cache"].parent / "taxonomy.yaml"
+    path.write_text(
+        "domains:\n  - id: agent\n    label: 智能体\n    aliases: [agents]\n"
+        "  - id: generation\n    label: 图像与视频生成\n"
+        "  - id: video-generation\n    label: 视频生成\n"
+        "  - id: image-editing\n    label: 图像生成与编辑\n"
+        "  - id: embodied-ai-compression\n    label: 具身智能与导航压缩\n"
+        "  - id: navigation-compression\n    label: 导航压缩\n",
+        encoding="utf-8",
+    )
+    library["service"].taxonomy_path = path
+
+
+@pytest.mark.parametrize("domain", ["视频生成", "video-generation"])
+def test_figure_search_filters_current_presentation_domain_instead_of_cache_metadata(
+    derivative_library, domain
+):
+    library = derivative_library
+    _taxonomy(library)
+    _figures(library)
+    library["paper"].domain_slugs = ["generation"]
+    library["paper"].attributes = {"category": "video_core"}
+    result = routes.search_derivatives(_request(), "diagram", domain, "figure", "original", 20)
+    assert result["total"] == 1
+    assert result["domain"] == "video-generation"
+    assert result["items"][0]["domains"] == [
+        "agent"
+    ]  # Frozen derivative classification remains traceable.
+    other = routes.search_derivatives(
+        _request(), "diagram", "image-editing", "figure", "original", 20
+    )
+    assert other["total"] == 0
+
+
+def test_methodology_chinese_alias_and_navigation_mapping_use_live_asset_domains(
+    derivative_library,
+):
+    library = derivative_library
+    _taxonomy(library)
+    card = _card(library)
+    library["paper"].domain_slugs = ["navigation-compression"]
+    _write_json(
+        library["cache"].parent / "methodology.json", {"schema_version": 1, "cards": [card]}
+    )
+    result = routes.get_methodology(
+        _request(), kind="code", domain="具身智能与导航压缩", q="", limit=20
+    )
+    assert result["items"] == [card]
+    assert result["domain"] == "embodied-ai-compression"
+    assert (
+        routes.get_methodology(_request(), kind="code", domain="智能体", q="", limit=20)["items"]
+        == []
+    )
+
+
+def test_methodology_generation_repository_inherits_source_paper_domain(derivative_library):
+    library = derivative_library
+    _taxonomy(library)
+    session = library["service"].session
+    library["paper"].domain_slugs = ["generation"]
+    library["paper"].attributes = {"category": "video_core"}
+    library["repository"].domain_slugs = ["generation"]
+    record = SourceRecord(
+        source_id=library["source"].id, source_record_id="video", asset_id=library["paper"].id
+    )
+    session.add(record)
+    session.flush()
+    session.add_all(
+        [
+            SourceRecordAsset(source_record_id=record.id, asset_id=library["paper"].id),
+            SourceRecordAsset(
+                source_record_id=record.id, asset_id=library["repository"].id, role="repository"
+            ),
+        ]
+    )
+    session.flush()
+    card = _card(library)
+    card["asset_ids"] = [str(library["repository"].id)]
+    _write_json(
+        library["cache"].parent / "methodology.json", {"schema_version": 1, "cards": [card]}
+    )
+    assert routes.get_methodology(_request(), kind="code", domain="视频生成", q="", limit=20)[
+        "items"
+    ] == [card]
+    assert (
+        routes.get_methodology(_request(), kind="code", domain="图像生成与编辑", q="", limit=20)[
+            "items"
+        ]
+        == []
+    )
+
+
+def test_derivative_keywords_expand_only_literal_aliases_and_conditions_stay_unverified(
+    derivative_library,
+):
+    library = derivative_library
+    card = {**_card(library), "title": "Quantization code pattern"}
+    _write_json(
+        library["cache"].parent / "methodology.json", {"schema_version": 1, "cards": [card]}
+    )
+    result = routes.search_derivatives(
+        _request(),
+        "我需要一种合适的方法",
+        "agent",
+        "code_pattern",
+        "analysis",
+        20,
+        keywords=["量化"],
+        constraints=["不重新训练"],
+    )
+    assert result["total"] == 1
+    assert result["query_plan"]["mode"] == "literal_keywords"
+    assert result["query_plan"]["needs_evidence_verification"] is True
+    assert result["items"][0]["ranking"]["conditions"][0]["needs_evidence_verification"] is True
+    assert result["items"][0]["human_reviewed"] is False
+    figure = _figures(library)
+    path = library["cache"] / str(library["paper"].id) / "figures.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["figures"][0]["caption"] = "Quantization architecture"
+    _write_json(path, manifest)
+    figures = routes.search_derivatives(
+        _request(), "请搜索相关结构图", "agent", "figure", "original", 20, keywords=["量化"]
+    )
+    assert figures["items"][0]["figure_id"] == figure["figure_id"]
+
+
+@pytest.mark.parametrize(
+    "asset_type,source_type",
+    [
+        ("figure", "original"),
+        ("code_pattern", "analysis"),
+        ("writing_pattern", "original"),
+        ("figure", "analysis"),
+    ],
+)
+@pytest.mark.parametrize("keywords,constraints", [(["term"] * 9, []), ([], ["condition"] * 7)])
+def test_all_derivative_types_enforce_query_plan_parameter_bounds(
+    derivative_library, asset_type, source_type, keywords, constraints
+):
+    with pytest.raises(KnowledgeError) as error:
+        routes.search_derivatives(
+            _request(),
+            "",
+            None,
+            asset_type,
+            source_type,
+            20,
+            keywords=keywords,
+            constraints=constraints,
+        )
+    assert error.value.status == 422
+
+
+def test_source_configuration_error_is_not_counted_as_stale_methodology(
+    derivative_library, monkeypatch
+):
+    library = derivative_library
+    card = _card(library)
+
+    def invalid_source(*args, **kwargs):
+        raise SourceConfigurationError("Invalid configuration")
+
+    monkeypatch.setattr(routes, "local_code_repository", invalid_source)
+    with pytest.raises(SourceConfigurationError):
+        _methodology(library, [card])
+
+
+def test_bad_source_configuration_propagates_from_figure_verification(
+    derivative_library, monkeypatch
+):
+    library = derivative_library
+    _figures(library)
+
+    def invalid_source(*args, **kwargs):
+        raise SourceConfigurationError("Invalid configuration")
+
+    monkeypatch.setattr(library["service"], "require_representation", invalid_source)
+    with pytest.raises(SourceConfigurationError):
+        routes.search_derivatives(_request(), "diagram", "agent", "figure", "original", 20)
+
+
+def test_figure_details_expose_only_same_page_warning_and_agent_review_fields(derivative_library):
+    library = derivative_library
+    figure = _figures(library)
+    path = library["cache"] / str(library["paper"].id) / "figures.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["warnings"] = [
+        {
+            "code": "source_clipped",
+            "page_index": 0,
+            "message": "Source page edge clips the figure",
+            "internal_path": "private",
+            "agent_review": {
+                "review_id": "review-1",
+                "human_reviewed": False,
+                "issue_category": "source_page_clipped",
+                "observation": "Bottom axis is clipped",
+                "confidence": "high",
+                "internal_path": "private",
+            },
+        },
+        {"code": "other_page_warning", "page_index": 1, "message": "Other page"},
+    ]
+    _write_json(path, manifest)
+    result = routes.get_figure(figure["figure_id"], _request())
+    assert len(result["page_warnings"]) == 1
+    warning = result["page_warnings"][0]
+    assert warning["code"] == "source_clipped"
+    assert warning["agent_review"]["human_reviewed"] is False
+    assert "internal_path" not in json.dumps(warning)
+    assert result["quality_status"] == "pending_review"
+    assert result["human_reviewed"] is False
+
+
+@pytest.mark.parametrize(
+    "parameter,terms",
+    [
+        ("keywords", ["term"] * 9),
+        ("constraints", ["condition"] * 7),
+        ("keywords", ["x" * 81]),
+        ("constraints", ["x" * 161]),
+    ],
+)
+def test_methodology_http_validates_list_and_term_limits(derivative_library, parameter, terms):
+    app = FastAPI()
+    app.add_api_route("/methodology", routes.get_methodology, methods=["GET"])
+    with TestClient(app) as client:
+        response = client.get("/methodology", params=[(parameter, term) for term in terms])
+    assert response.status_code == 422
+
+
+def test_unknown_domain_is_an_explicit_query_error(derivative_library):
+    library = derivative_library
+    _taxonomy(library)
+    with pytest.raises(KnowledgeError) as error:
+        routes.get_methodology(_request(), kind="code", domain="不存在的领域", q="", limit=20)
+    assert error.value.status == 422
+    assert error.value.code == "invalid_query"

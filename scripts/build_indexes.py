@@ -11,12 +11,13 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from packages.indexing import KEYWORD_INDEX_NAMES, IndexBuilder, RemoteIndexSuite
-from packages.indexing.builder import KeywordBuildReport
+from packages.indexing.builder import KeywordBuildReport, resolve_asset_scope
 
 DEFAULT_DATABASE_URL = (
     "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub"
@@ -40,8 +41,21 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--write-batch-size", type=int, default=256)
     parser.add_argument("--task-flush-batches", type=int, default=16)
     parser.add_argument(
+        "--asset-id",
+        action="append",
+        type=UUID,
+        default=None,
+        help="Refresh only this asset UUID; repeat for multiple assets.",
+    )
+    parser.add_argument(
+        "--source",
+        default=None,
+        help="Exact source alias, including its materialized repository assets.",
+    )
+    parser.add_argument(
         "--skip-code",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Leave the existing code index untouched and rebuild only non-code indexes.",
     )
     parser.add_argument(
@@ -95,31 +109,47 @@ def _write_report_atomic(path: Path, report: KeywordBuildReport) -> str:
 def main() -> None:
     args = _arguments()
     selected_indexes = tuple(
-        name
-        for name in KEYWORD_INDEX_NAMES
-        if not (args.skip_code and name == "code")
-    )
-    suite = RemoteIndexSuite.connect(
-        meilisearch_url=args.meilisearch_url,
-        meilisearch_api_key=args.meilisearch_api_key,
-        index_names=selected_indexes,
+        name for name in KEYWORD_INDEX_NAMES if not (args.skip_code and name == "code")
     )
     database_url = _sqlalchemy_url(args.database_url)
     engine = create_engine(database_url, **_engine_options(database_url))
+    suite = None
     try:
         with Session(engine) as session:
-            report: KeywordBuildReport = IndexBuilder(
+            asset_ids = resolve_asset_scope(
+                session,
+                asset_ids=getattr(args, "asset_id", None),
+                source_alias=getattr(args, "source", None),
+            )
+            if asset_ids == ():
+                raise ValueError("The requested scope contains no registered assets.")
+            suite = RemoteIndexSuite.connect(
+                meilisearch_url=args.meilisearch_url,
+                meilisearch_api_key=args.meilisearch_api_key,
+                index_names=selected_indexes,
+            )
+            builder = IndexBuilder(
                 suite,
                 version=args.version,
                 write_batch_size=args.write_batch_size,
                 task_flush_batch_count=args.task_flush_batches,
-            ).rebuild_keywords(session, index_names=selected_indexes)
+            )
+            report: KeywordBuildReport = (
+                builder.rebuild_keywords(session, index_names=selected_indexes)
+                if asset_ids is None
+                else builder.refresh_keywords(
+                    session,
+                    asset_ids=asset_ids,
+                    index_names=selected_indexes,
+                )
+            )
             session.commit()
         rendered = _write_report_atomic(args.report, report)
         print(rendered)
     finally:
         engine.dispose()
-        suite.close()
+        if suite is not None:
+            suite.close()
 
 
 if __name__ == "__main__":

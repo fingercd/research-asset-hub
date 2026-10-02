@@ -12,11 +12,11 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.config import ApiSettings
+from apps.api.config import PROJECT_ROOT, ApiSettings
 from apps.api.database import DatabaseManager
 from apps.api.problem import install_problem_handlers
 from apps.api.routes import knowledge
-from apps.asset_gateway.registry import SourceRegistry
+from apps.asset_gateway.registry import SourceConfigurationError, SourceRegistry
 from packages.domain.models import (
     Activity,
     Asset,
@@ -296,6 +296,7 @@ def test_http_routes_validate_limits_and_return_json(library):
     )
     database = DatabaseManager(settings, engine=service.session.bind, require_migrations=False)
     app = FastAPI()
+    app.state.settings = settings
     app.state.database = database
     app.state.source_registry = service.registry
     app.include_router(knowledge._v1.router)
@@ -316,6 +317,86 @@ def test_http_routes_validate_limits_and_return_json(library):
         assert client.get("/api/v1/knowledge/status").json()["read_only"] is True
         assert client.get(f"/api/v1/knowledge/papers/{uuid4()}").status_code == 404
         assert client.post("/api/v1/knowledge/search").status_code == 405
+        assert (
+            client.get("/api/v1/knowledge/search", params={"keywords": ["x"] * 9}).status_code
+            == 422
+        )
+        assert (
+            client.get("/api/v1/knowledge/status", params={"domain": "unknown-domain"}).status_code
+            == 422
+        )
+
+
+def test_indexed_domain_mapping_and_query_contract(library):
+    service, asset, *_ = library
+    asset.title = "Efficient Video Diffusion"
+    asset.domain_slugs = ["generation"]
+    asset.attributes = {"category": "video_core"}
+    service.session.commit()
+    service.taxonomy_path = PROJECT_ROOT / "config/taxonomy.yaml"
+    index = InMemoryKeywordIndex()
+    index.upsert(
+        [
+            SearchDocument(
+                document_id="asset:" + str(asset.id),
+                asset_id=str(asset.id),
+                kind="asset",
+                title=asset.title,
+                text="Video diffusion",
+                metadata={"domains": ["generation"]},
+            )
+        ]
+    )
+    service.keyword_search = lambda: KeywordSearchService({"assets": index})
+    result = service.search_assets(
+        "寻找视频扩散方法",
+        domain="视频生成",
+        keywords=["Video", "Diffusion"],
+        constraints=["无需重新训练"],
+    )
+    assert result["degraded"] is False
+    assert result["items"][0]["asset_id"] == str(asset.id)
+    assert result["items"][0]["domains"] == ["video-generation"]
+    assert result["items"][0]["source_domains"] == ["generation"]
+    assert result["items"][0]["constraints_need_evidence_verification"] is True
+    assert result["query_plan"]["conditions"]
+    assert service.search_assets("Video", domain="图像编辑")["items"] == []
+    assert not service.session.dirty
+
+
+def test_source_configuration_failure_is_not_metadata_degradation(library):
+    service, *_ = library
+
+    def invalid_config():
+        raise SourceConfigurationError("invalid fixture")
+
+    service.keyword_search = invalid_config
+    with pytest.raises(SourceConfigurationError):
+        service.search_assets("Evidence")
+
+
+def test_http_bad_source_configuration_is_503(library, monkeypatch):
+    service, *_ = library
+    settings = ApiSettings(
+        database_url="sqlite+pysqlite:///:memory:", database_require_migrations=False
+    )
+    app = FastAPI()
+    app.state.settings = settings
+    app.state.database = DatabaseManager(
+        settings, engine=service.session.bind, require_migrations=False
+    )
+    app.state.source_registry = service.registry
+    app.include_router(knowledge._v1.router)
+    install_problem_handlers(app)
+
+    def invalid_config(*args, **kwargs):
+        raise SourceConfigurationError("invalid fixture")
+
+    monkeypatch.setattr(service.registry, "refresh_if_changed", invalid_config)
+    with TestClient(app) as client:
+        response = client.get("/api/v1/knowledge/status")
+    assert response.status_code == 503
+    assert response.json()["code"] == "source_configuration_invalid"
 
 
 def test_fulltext_index_keeps_evidence_and_filters_disabled_sources(library):

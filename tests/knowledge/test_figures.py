@@ -10,6 +10,7 @@ from PIL import Image
 
 from packages.knowledge.figures import (
     SourceHashMismatch,
+    apply_cached_figure_corrections,
     apply_caption_review_warnings,
     extract_pdf_figures,
     normalize_bbox,
@@ -269,3 +270,164 @@ def test_caption_cross_reference_does_not_look_like_second_caption() -> None:
     apply_caption_review_warnings(manifest)
     assert manifest["figures"][0]["requires_review"] is False
     assert manifest["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "caption_box",
+    [
+        {"x1": 40, "x2": 180, "y1": 305, "y2": 315},
+        {"x1": 40, "x2": 180, "y1": 130, "y2": 130},
+    ],
+)
+def test_valid_figure_survives_invalid_caption_box(
+    tmp_path: Path, caption_box: dict[str, int]
+) -> None:
+    path = _pdf(tmp_path / "paper.pdf")
+    manifest = extract_pdf_figures(
+        path,
+        tmp_path / "derived",
+        asset_id="paper",
+        representation_id="pdf",
+        source_hash=_sha256(path),
+        run_pymupdf_heuristic=False,
+        pdffigures2_results=[
+            {
+                "figType": "Figure",
+                "name": "1",
+                "page": 0,
+                "caption": "Figure 1: Kept caption text",
+                "regionBoundary": {"x1": 35, "x2": 140, "y1": 40, "y2": 110},
+                "captionBoundary": caption_box,
+            }
+        ],
+    )
+    figure = manifest["figures"][0]
+    assert figure["bbox"] == [35, 40, 140, 110]
+    assert figure["caption"] == "Figure 1: Kept caption text"
+    assert figure["caption_bbox"] is None
+    assert figure["requires_review"] is True
+    assert any(w["code"] == "pdffigures2_invalid_caption_bbox" for w in manifest["warnings"])
+    assert not any(w["code"] == "pdffigures2_invalid_item" for w in manifest["warnings"])
+
+
+def test_cached_additions_are_idempotent_and_preserve_existing_crops(tmp_path: Path) -> None:
+    path = _pdf(tmp_path / "paper.pdf", rotation=90)
+    root = tmp_path / "derived"
+    original = extract_pdf_figures(
+        path, root, asset_id="paper", representation_id="pdf", source_hash=_sha256(path)
+    )
+    before = (root / original["figures"][0]["image_path"]).read_bytes()
+    addition = {
+        "figure_number": "2",
+        "caption": "Figure 2: Added region",
+        "page_index": 0,
+        "bbox": [180, 50, 280, 100],
+        "reviewer": "agent-visual-review",
+        "human_reviewed": False,
+    }
+    first = apply_cached_figure_corrections(
+        path, root, source_hash=_sha256(path), add_figures=[addition], mark_corrected_reviewed=True
+    )
+    assert len(first["figures"]) == 2
+    assert first["figures"][1]["quality_status"] == "agent_visual_review"
+    assert first["figures"][1]["correction_provenance"]["human_reviewed"] is False
+    with Image.open(root / first["figures"][1]["image_path"]) as crop:
+        assert crop.height > crop.width  # Unrotated 100x50 region rendered at 90 degrees.
+    second = apply_cached_figure_corrections(
+        path, root, source_hash=_sha256(path), add_figures=[addition]
+    )
+    assert [r["figure_id"] for r in first["figures"]] == [r["figure_id"] for r in second["figures"]]
+    assert second["last_correction_run"]["changed_figures"] == 0
+    assert (root / original["figures"][0]["image_path"]).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        {"page_index": 1, "bbox": [180, 50, 280, 100]},
+        {"page_index": 0, "bbox": [180, 50, 410, 100]},
+        {"page_index": 0, "bbox": [180, 50, 180, 100]},
+    ],
+)
+def test_cached_additions_reject_bad_page_and_bbox_without_manifest_write(
+    tmp_path: Path, bad_row: dict[str, object]
+) -> None:
+    path = _pdf(tmp_path / "paper.pdf")
+    root = tmp_path / "derived"
+    extract_pdf_figures(
+        path, root, asset_id="paper", representation_id="pdf", source_hash=_sha256(path)
+    )
+    before = (root / "figures.json").read_bytes()
+    with pytest.raises(ValueError):
+        apply_cached_figure_corrections(
+            path,
+            root,
+            source_hash=_sha256(path),
+            add_figures=[{"figure_number": "2", "caption": "Figure 2: Added", **bad_row}],
+        )
+    assert (root / "figures.json").read_bytes() == before
+    with pytest.raises(SourceHashMismatch):
+        apply_cached_figure_corrections(path, root, source_hash="0" * 64, add_figures=[])
+
+
+def test_cached_additions_reject_duplicate_logical_figures(tmp_path: Path) -> None:
+    path = _pdf(tmp_path / "paper.pdf")
+    root = tmp_path / "derived"
+    extract_pdf_figures(
+        path, root, asset_id="paper", representation_id="pdf", source_hash=_sha256(path)
+    )
+    row = {
+        "figure_number": "2",
+        "caption": "Figure 2: Added",
+        "page_index": 0,
+        "bbox": [180, 50, 280, 100],
+    }
+    with pytest.raises(ValueError, match="Duplicate logical"):
+        apply_cached_figure_corrections(
+            path, root, source_hash=_sha256(path), add_figures=[row, row]
+        )
+
+
+@pytest.mark.parametrize("source_clipped", [False, True])
+def test_explicit_addition_preserves_agent_review_status_in_fresh_extraction(
+    tmp_path: Path,
+    source_clipped: bool,
+) -> None:
+    path = _pdf(tmp_path / "paper.pdf")
+    manifest = extract_pdf_figures(
+        path,
+        tmp_path / "derived",
+        asset_id="paper",
+        representation_id="pdf",
+        source_hash=_sha256(path),
+        pdffigures2_results=[],
+        run_pymupdf_heuristic=False,
+        mark_corrected_reviewed=True,
+        add_figures=[
+            {
+                "page_index": 0,
+                "bbox": [40, 50, 120, 100],
+                "figure_number": "1",
+                "caption": "Figure 1: Explicitly recovered",
+                "reviewer": "agent-visual-review",
+                "human_reviewed": False,
+                "source_clipped": source_clipped,
+            }
+        ],
+    )
+    assert manifest["figures"][0]["quality_status"] == (
+        "source_clipped_candidate" if source_clipped else "agent_visual_review"
+    )
+    assert manifest["figures"][0]["requires_review"] is source_clipped
+    assert manifest["figures"][0]["correction_provenance"]["human_reviewed"] is False
+
+
+def test_addition_config_requires_original_pdf_hash() -> None:
+    from scripts.extract_pilot_figures import _additions_for_entry
+
+    entry = {"asset_id": "paper", "source_hash": "a" * 64}
+    payload = {"papers": {"paper": {"add_figures": [{"figure_number": "1"}]}}}
+    with pytest.raises(ValueError, match="source_hash"):
+        _additions_for_entry(payload, entry)
+    payload["papers"]["paper"]["source_hash"] = "a" * 64
+    assert _additions_for_entry(payload, entry)[0]["human_reviewed"] is False

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from apps.asset_gateway.registry import SourceConfigurationError
+
 from .service import KnowledgeError
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -24,10 +26,47 @@ def _json(path: Path, root: Path) -> dict[str, Any]:
         if not isinstance(result, dict) or result.get("schema_version") != 1:
             raise ValueError("Unsupported derivative schema.")
         return result
+    except SourceConfigurationError:
+        raise
     except (OSError, ValueError) as error:
         raise KnowledgeError(
             "invalid_derivative", "The derivative is missing or invalid.", 409
         ) from error
+
+
+def _page_warnings(document: dict[str, Any], figure: dict[str, Any]) -> list[dict[str, Any]]:
+    """Expose diagnostics for this source page without publishing manifest internals."""
+    page_index = figure.get("page_index", figure.get("page", 0) - 1)
+    warnings = []
+    for warning in document.get("warnings", []):
+        if warning.get("page_index") != page_index:
+            continue
+        item = {
+            key: warning[key]
+            for key in (
+                "code",
+                "page_index",
+                "figure_number",
+                "figure_id",
+                "requires_review",
+                "message",
+            )
+            if key in warning
+        }
+        if warning.get("agent_review"):
+            item["agent_review"] = {
+                key: warning["agent_review"][key]
+                for key in (
+                    "confidence",
+                    "human_reviewed",
+                    "issue_category",
+                    "observation",
+                    "review_id",
+                )
+                if key in warning["agent_review"]
+            }
+        warnings.append(item)
+    return warnings
 
 
 class DerivativeStore:
@@ -53,6 +92,8 @@ class DerivativeStore:
                     document["source_hash"], str
                 ):
                     raise ValueError("Invalid figure manifest fields.")
+            except SourceConfigurationError:
+                raise
             except (KeyError, TypeError, ValueError) as error:
                 raise KnowledgeError("invalid_derivative", "Figure metadata is invalid.") from error
             if asset_id_value != path.parent.name:
@@ -75,6 +116,7 @@ class DerivativeStore:
                         "quality_status": figure.get("quality_status", "candidate"),
                         "paper_title": metadata.get("title", ""),
                         "domains": metadata.get("domains", []),
+                        "page_warnings": _page_warnings(document, figure),
                     }
                 )
         return figures
@@ -104,6 +146,8 @@ class DerivativeStore:
                 raise KnowledgeError("image_too_large", "Use the smaller figure preview.", 413)
             with path.open("rb") as stream:
                 data = stream.read(MAX_IMAGE_BYTES + 1)
+        except SourceConfigurationError:
+            raise
         except (OSError, ValueError) as error:
             raise KnowledgeError(
                 "image_not_available", "The figure image is unavailable.", 404

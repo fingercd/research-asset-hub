@@ -18,12 +18,110 @@ from sqlalchemy.orm import Session
 from apps.api.config import PROJECT_ROOT, ApiSettings
 from apps.asset_gateway.registry import SourceRegistry
 from packages.domain.exporters.common import atomic_write_json, atomic_write_text
-from packages.domain.models import Asset, Relation, Representation, Source
+from packages.domain.models import Asset, Relation, Representation, Source, SourceRecord
+from packages.domain.platform_models import Activity, DocumentChunk
 from packages.domain.serving_scope import active_representation_clause
 from packages.extraction.html import HTMLExtractor
-from packages.knowledge.documents import export_source_markdown, page_evidence_id, text_hash
+from packages.knowledge.documents import (
+    document_from_chunks,
+    export_source_markdown,
+    page_evidence_id,
+    text_hash,
+)
 
 BUILD_VERSION = "page-text-v1"
+
+
+def scoped_selection(db: Session, sources: list[str], asset_ids: list[str]) -> list[dict[str, str]]:
+    """Select existing formal papers, deduplicating overlapping source/asset scopes."""
+    items: dict[str, dict[str, str]] = {}
+    for alias in dict.fromkeys(sources):
+        source = db.scalar(select(Source).where(Source.alias == alias, Source.enabled.is_(True)))
+        if source is None:
+            raise ValueError(f"Unknown or disabled source: {alias}")
+        rows = db.execute(
+            select(Asset.id, SourceRecord.source_record_id)
+            .join(SourceRecord, SourceRecord.asset_id == Asset.id)
+            .where(
+                SourceRecord.source_id == source.id,
+                Asset.asset_type == "paper",
+                Asset.deleted_at.is_(None),
+            )
+            .order_by(SourceRecord.source_record_id)
+        )
+        for asset_id, record_id in rows:
+            items.setdefault(
+                str(asset_id),
+                {
+                    "asset_id": str(asset_id),
+                    "group": alias,
+                    "selection_source_id": alias,
+                    "source_record_id": record_id,
+                },
+            )
+    for raw_id in asset_ids:
+        asset_id = str(UUID(raw_id))
+        items.setdefault(asset_id, {"asset_id": asset_id, "group": "explicit-assets"})
+    return list(items.values())
+
+
+def extracted_document(
+    db: Session, asset: Asset, rep: Representation, digest: str
+) -> dict[str, Any] | None:
+    """Reuse verified page chunks rather than re-extract an already processed PDF."""
+    chunks = list(
+        db.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.asset_id == asset.id,
+                DocumentChunk.representation_id == rep.id,
+            )
+            .order_by(DocumentChunk.chunk_index, DocumentChunk.id)
+        )
+    )
+    if not chunks:
+        return None
+    for chunk in chunks:
+        if chunk.content_hash != text_hash(chunk.text_content):
+            raise ValueError("Extracted chunk content fingerprint differs.")
+        anchor = chunk.anchor or {}
+        if anchor.get("kind") != "pdf" or not anchor.get("page"):
+            raise ValueError("Extracted PDF chunk lacks page evidence.")
+    for activity_id in {c.activity_id for c in chunks if c.activity_id is not None}:
+        activity = db.get(Activity, activity_id)
+        paths = {
+            (c.anchor or {}).get("source_path") for c in chunks if c.activity_id == activity_id
+        }
+        if (
+            activity is None
+            or activity.status != "succeeded"
+            or activity.asset_id != asset.id
+            or activity.representation_id != rep.id
+            or len(paths) != 1
+            or None in paths
+            or activity.output_digest != text_hash(str(next(iter(paths))) + digest)
+        ):
+            raise ValueError("Extracted chunks do not match the live PDF fingerprint.")
+    if any(c.activity_id is None for c in chunks) and not rep.sha256:
+        raise ValueError("Legacy extraction lacks a registered PDF fingerprint.")
+    document = document_from_chunks(
+        asset_id=str(asset.id),
+        representation_id=str(rep.id),
+        source_hash=digest,
+        title=asset.title,
+        source_type="original",
+        chunks=[
+            {
+                "id": str(c.id),
+                "chunk_index": c.chunk_index,
+                "text_content": c.text_content,
+                "anchor": c.anchor,
+            }
+            for c in chunks
+        ],
+    )
+    document["parser"] = "existing verified document_chunks"
+    return document
 
 
 def file_hash(path: Path) -> str:
@@ -160,34 +258,51 @@ def build_paper(
     ref["source_hash"] = digest
     directory = output / "v1" / str(asset.id)
     document_path = directory / "document.json"
+    complete = all(
+        (directory / name).is_file()
+        for name in ("document.json", "source.md", "analysis.zh.md", "metadata.json")
+    )
     if document_path.exists():
         cached = json.loads(document_path.read_text(encoding="utf-8"))
-        if cached.get("source_hash") != digest or cached.get("builder_version") != BUILD_VERSION:
+        if (
+            cached.get("source_hash") != digest
+            or cached.get("representation_id") != str(rep.id)
+            or cached.get("builder_version") != BUILD_VERSION
+        ):
             raise ValueError("Existing derivative version differs; create a new version.")
-        # Refresh exported analysis from its own input; never replace source/figure reviews.
+        if complete:
+            metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+            if metadata.get("source_hash") != digest or metadata.get("representation_id") != str(
+                rep.id
+            ):
+                raise ValueError("Existing derivative metadata differs from its PDF.")
+            return {**metadata, "build_action": "reused"}
         pages = cached["pages"]
         warnings = cached["warnings"]
     else:
-        pages = []
+        extracted = extracted_document(db, asset, rep, digest)
+        pages = extracted["pages"] if extracted else []
         warnings = []
-        with pymupdf.open(path) as document:  # type: ignore[no-untyped-call]
-            for index, page in enumerate(document):
-                content = page.get_text("text", sort=True)
-                page_number = index + 1
-                if len(content.strip()) < 80:
-                    warnings.append(
-                        f"Page {page_number}: low text density; visual review/OCR needed."
+        if extracted is None:
+            with pymupdf.open(path) as document:  # type: ignore[no-untyped-call]
+                for index, page in enumerate(document):
+                    content = page.get_text("text", sort=True)
+                    page_number = index + 1
+                    if len(content.strip()) < 80:
+                        warnings.append(
+                            f"Page {page_number}: low text density; visual review/OCR needed."
+                        )
+                    pages.append(
+                        {
+                            "page": page_number,
+                            "text": content,
+                            "evidence_id": page_evidence_id(
+                                str(rep.id), digest, page_number, text_hash(content)
+                            ),
+                            "content_hash": text_hash(content),
+                            "anchor": {"kind": "pdf", "page": page_number, "precision": "page"},
+                        }
                     )
-                evidence_id = f"{rep.id}-p{page_number}-{digest[:12]}"
-                pages.append(
-                    {
-                        "page": page_number,
-                        "text": content,
-                        "evidence_id": evidence_id,
-                        "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-                        "anchor": {"kind": "pdf", "page": page_number, "precision": "page"},
-                    }
-                )
         atomic_write_json(
             document_path,
             {
@@ -198,27 +313,25 @@ def build_paper(
                 "title": asset.title,
                 "source_hash": digest,
                 "source_locator": ref,
-                "parser": f"PyMuPDF {pymupdf.VersionBind}",
+                "parser": extracted["parser"] if extracted else f"PyMuPDF {pymupdf.VersionBind}",
+                "source_type": "original",
+                "extraction_reused": extracted is not None,
                 "quality_status": "page_text_unreviewed",
                 "fidelity": "page text; formulas, table structure and reading order require review",
                 "pages": pages,
                 "warnings": warnings,
             },
         )
-    # Use the same evidence identities as the serving API and methodology cards.
     document_data = json.loads(document_path.read_text(encoding="utf-8"))
-    for page in document_data["pages"]:
-        page["evidence_id"] = page_evidence_id(
-            str(rep.id), digest, page["page"], text_hash(page["text"])
+    if not (directory / "source.md").exists():
+        atomic_write_text(
+            directory / "source.md",
+            "> 原文文本抽取；公式、表格和双栏阅读顺序仍需复核。\n\n"
+            + export_source_markdown(document_data),
         )
-    atomic_write_json(document_path, document_data)
-    atomic_write_text(
-        directory / "source.md",
-        "> 原文文本抽取；公式、表格和双栏阅读顺序仍需复核。\n\n"
-        + export_source_markdown(document_data),
-    )
     analysis, analysis_source = analysis_markdown(asset, reps, db, registry)
-    atomic_write_text(directory / "analysis.zh.md", analysis)
+    if not (directory / "analysis.zh.md").exists():
+        atomic_write_text(directory / "analysis.zh.md", analysis)
     repositories = repository_links(db, asset, registry)
     meta = {
         "schema_version": 1,
@@ -234,25 +347,49 @@ def build_paper(
         "repositories": repositories,
         "quality_status": "page_text_unreviewed",
         "warnings": warnings,
+        "extraction_reused": document_data.get("extraction_reused", False),
     }
-    atomic_write_json(directory / "metadata.json", meta)
-    return meta
+    if not (directory / "metadata.json").exists():
+        atomic_write_json(directory / "metadata.json", meta)
+    return {**meta, "build_action": "built"}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--selection", type=Path)
     parser.add_argument(
-        "--selection", type=Path, default=PROJECT_ROOT / "config/knowledge-pilot.json"
+        "--source", action="append", default=[], help="Formal source alias; repeatable"
+    )
+    parser.add_argument(
+        "--asset-id", action="append", default=[], help="Existing asset UUID; repeatable"
+    )
+    parser.add_argument(
+        "--report", type=Path, help="Scoped report; existing pilot manifest is preserved"
     )
     parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "outputs/knowledge-pilot")
     args = parser.parse_args()
-    selection = json.loads(args.selection.read_text(encoding="utf-8"))
-    ids = [p["asset_id"] for p in selection["papers"]]
-    if len(set(ids)) != len(ids):
-        parser.error("Pilot selection contains duplicate assets.")
+    scoped = bool(args.source or args.asset_id)
+    if scoped and args.selection:
+        parser.error("Use either --selection or --source/--asset-id.")
+    selection = (
+        {}
+        if scoped
+        else json.loads(
+            (args.selection or PROJECT_ROOT / "config/knowledge-pilot.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
     output = args.output.resolve()
     if not output.is_relative_to(PROJECT_ROOT / "outputs"):
         parser.error("Pilot derivatives must remain inside platform outputs.")
+    report_path = args.report or output / ("incremental.json" if scoped else "pilot.json")
+    report_path = report_path.resolve()
+    if not any(
+        report_path.is_relative_to(PROJECT_ROOT / folder)
+        for folder in ("outputs", "work/validation")
+    ):
+        parser.error("Reports must remain inside platform outputs or work/validation.")
     settings = ApiSettings()
     registry = SourceRegistry.load(settings.sources_config_path)
     engine = create_engine(
@@ -263,28 +400,43 @@ def main() -> int:
     with Session(engine) as db:
         db.execute(text("SET TRANSACTION READ ONLY"))
         db.execute(text("SET LOCAL statement_timeout = '30s'"))
-        for item in selection["papers"]:
+        try:
+            items = (
+                scoped_selection(db, args.source, args.asset_id) if scoped else selection["papers"]
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        ids = [p["asset_id"] for p in items]
+        if len(set(ids)) != len(ids):
+            parser.error("Selection contains duplicate assets.")
+        for item in items:
             try:
                 result = build_paper(db, registry, item, output)
                 papers.append(result)
-                print(f"built {len(papers)}/{len(ids)}: {result['title']}", flush=True)
+                print(
+                    f"{result['build_action']} {len(papers)}/{len(ids)}: {result['title']}",
+                    flush=True,
+                )
             except (OSError, ValueError, RuntimeError) as error:
                 failures.append({"asset_id": item["asset_id"], "reason": str(error)})
                 print(f"failed {item['asset_id']}: {error}", flush=True)
     report = {
         "schema_version": 1,
-        "pilot_id": selection["pilot_id"],
+        "pilot_id": "incremental" if scoped else selection["pilot_id"],
+        "selection": {"sources": args.source, "asset_ids": args.asset_id},
         "generated_at": datetime.now(UTC).isoformat(),
         "primary_database_read_only": True,
         "source_files_modified": 0,
         "selected_count": len(ids),
-        "built_count": len(papers),
+        "completed_count": len(papers),
+        "built_count": sum(p["build_action"] == "built" for p in papers),
+        "reused_count": sum(p["build_action"] == "reused" for p in papers),
         "page_count": sum(p["page_count"] for p in papers),
         "groups": dict(Counter(p["group"] for p in papers)),
         "papers": papers,
         "failures": failures,
     }
-    atomic_write_json(output / "pilot.json", report)
+    atomic_write_json(report_path, report)
     print(json.dumps({k: v for k, v in report.items() if k not in {"papers"}}, ensure_ascii=False))
     return 1 if failures else 0
 

@@ -7,8 +7,9 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Protocol
+from uuid import UUID
 
 import httpx
 
@@ -352,8 +353,7 @@ class MeilisearchIndex:
             )
             response = (
                 exact_response
-                if isinstance(exact_response.get("hits"), Sequence)
-                and bool(exact_response["hits"])
+                if isinstance(exact_response.get("hits"), Sequence) and bool(exact_response["hits"])
                 else self.transport.request(
                     "POST",
                     f"/indexes/{self.index_name}/search",
@@ -374,11 +374,7 @@ class MeilisearchIndex:
             if not isinstance(raw, Mapping):
                 continue
             formatted = raw.get("_formatted")
-            cropped_text = (
-                str(formatted.get("text", ""))
-                if isinstance(formatted, Mapping)
-                else ""
-            )
+            cropped_text = str(formatted.get("text", "")) if isinstance(formatted, Mapping) else ""
             document = SearchDocument(
                 document_id=str(raw.get("logical_document_id", raw.get("document_id", ""))),
                 asset_id=str(raw.get("asset_id", "")),
@@ -470,7 +466,12 @@ class MeilisearchAdmin:
         )
 
     def document_count(self, index_name: str) -> int:
-        response = self.transport.request("GET", f"/indexes/{index_name}/stats")
+        try:
+            response = self.transport.request("GET", f"/indexes/{index_name}/stats")
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return 0
+            raise
         return int(response.get("numberOfDocuments", 0))
 
     def document_ids(self, index_name: str) -> set[str]:
@@ -492,6 +493,54 @@ class MeilisearchAdmin:
                 break
             offset += len(results)
         return values
+
+    def iter_asset_document_id_batches(
+        self,
+        index_name: str,
+        *,
+        asset_ids: Sequence[UUID],
+        batch_size: int = 256,
+    ) -> Iterable[list[str]]:
+        """Read only selected assets through the official filtered documents API.
+
+        Fetch one asset at a time to keep the filter payload bounded. The caller
+        finishes reading all pages before deleting any documents.
+        """
+
+        size = max(1, batch_size)
+        for asset_id in asset_ids:
+            offset = 0
+            while True:
+                response = self.transport.request(
+                    "POST",
+                    f"/indexes/{index_name}/documents/fetch",
+                    payload={
+                        "filter": f"asset_id = {json.dumps(str(asset_id))}",
+                        "fields": ["logical_document_id", "asset_id"],
+                        "limit": size,
+                        "offset": offset,
+                    },
+                )
+                results = response.get("results")
+                if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+                    raise TypeError("Expected a Meilisearch document result sequence")
+                values: list[str] = []
+                for item in results:
+                    if (
+                        not isinstance(item, Mapping)
+                        or item.get("asset_id") != str(asset_id)
+                        or not item.get("logical_document_id")
+                    ):
+                        raise RuntimeError(
+                            f"Index {index_name!r} returned a document outside the asset scope "
+                            "or without logical_document_id"
+                        )
+                    values.append(str(item["logical_document_id"]))
+                if values:
+                    yield values
+                if len(results) < size:
+                    break
+                offset += len(results)
 
 
 def _meili_primary_key(document_id: str) -> str:
