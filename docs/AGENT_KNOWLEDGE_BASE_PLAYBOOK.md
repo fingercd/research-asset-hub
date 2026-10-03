@@ -75,6 +75,8 @@ git status --short
 
 ## 3. 标准知识单元
 
+当前永久资料根为 `D:/ResearchLibrary`，PDF 和代码位于其领域子目录；`research-asset-hub` 是应用仓库。新增资料沿用这个资料根，并在新的旁车 source 中显式声明对应 `asset_roots`。
+
 一个标准知识单元以论文或技术报告为主记录。原始大文件保留在用户指定的永久目录，Hub 项目只保存小型旁车 manifest：
 
 ```text
@@ -115,7 +117,7 @@ research-asset-hub/
 | `year` | 推荐使用四位年份 |
 | `venue` | 会议、期刊、机构或技术报告系列 |
 | `doi` / `arxiv_id` | 有则必须保留，是跨来源合并的重要强标识 |
-| `abstract` | 原始摘要；不要把 Agent 推测写成原始摘要 |
+| `abstract` | 作者原始摘要；模型/系统卡可保存官方介绍，但 provenance 必须明确 `is_paper_abstract: false`，不要把 Agent 推测或导读写成原始摘要 |
 | `summary` | 可放中文导读或人工概括 |
 | `tags` | 使用稳定、可复用的标签，不堆叠同义词 |
 | `source_urls` | 论文页、项目页等可核验来源 |
@@ -295,7 +297,7 @@ API 会按 asset UUID 校验两个端点并记录审计事件；关系详情和 
 
 CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入绕过跨来源合并门禁。
 
-`ingest -All` 在连接数据库写入前还会自动重跑一次完整 dry-run。正式 importer 会再次强制每个 source 的 `expected_records`、适配器实际输出的 taxonomy domain、弱合并审批和冻结摘要，因此不能靠跳过手工命令绕过这些检查。成功报告必须为 schema v2，并包含 `validated_dry_run.status: passed`。
+`ingest -All` 在数据库写入前会读取已审计的标识拒绝策略并重跑完整 dry-run；策略不可读时正式导入停止。离线文件 dry-run 仍可查看原始声明，但不能替代正式路径的策略检查。正式 importer 会再次强制每个 source 的 `expected_records`、适配器实际输出的 taxonomy domain、弱合并审批和冻结摘要，因此不能靠跳过手工命令绕过这些检查。成功报告必须为 schema v2，并包含 `validated_dry_run.status: passed`。
 
 检查 `work/validation/ingest-formal.json` 后，在不改变输入的情况下再次执行：
 
@@ -346,15 +348,19 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 正式完成条件：
 
-- serving scope 选中的关键词索引（默认 `assets/documents/annotations`）计数与报告一致；
+- serving scope 选中的关键词索引（默认 `assets/annotations`）计数与报告一致；
 - 新增资产存在于 assets 索引；
-- 新增正文存在于 documents 索引；代码索引只有在明确启用时才要求建立和验证；
-- 不存在上一版本残留的失效文档。默认构建命令可加 `--skip-code`，API 默认
-  `HUB_SEARCH_CODE_INDEX_ENABLED=false`，代码仓库仍保留本地表示和详情页按钮。
+- 资产可搜索文本仅由标题、中文题名和摘要组成；DOI/arXiv 只用于必要的精确标识匹配，不混入正文、summary 或标签；
+- 正文抽取保留在操作主库供按需读证据，不默认维护或查询 documents/code 全文索引；只有明确指定 `--index documents` 或 `--index code` 时才维护这些历史索引；
+- 不存在所选范围中的失效服务文档。API 默认 `HUB_SEARCH_CODE_INDEX_ENABLED=false`，代码仓库仍可安全浏览和按行读取。
+
+发现登记 PDF 实际属于另一篇论文时，保留旧文件和冻结声明，另建正确原文的旁车来源。原错误表示通过 `GET/PATCH /api/v1/representations/{id}/serving` 设置独立审计的 `excluded`，提交登记 SHA、当前 ETag、幂等键与原因；恢复同样必须显式审计。错误 DOI/arXiv 身份通过 `GET/PATCH /api/v1/external-identifiers/{id}/identity` 拒绝，先核对预期资产、scheme/scope/canonical 和绑定的来源稳定键。两项控制都不改写原始 source/manifest，也不会被普通重新导入解除；不得用直接改库代替。
 
 ## 9. 验证用户真正能用
 
 来源检查：
+
+网关健康只反映数据库与签名配置是否就绪；知识库状态中的根目录信息只表示注册情况，`source_files_verified: false` 明确表示未扫描文件。不要用冻结来源中的全部历史目录是否存在推断当前库可读性。真实表示缺失仍需从 availability、导入检查与实际打开失败报告中处理；保留冻结来源和 manifest，不为消除历史目录告警改写证据。
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/verify_source_integrity.py

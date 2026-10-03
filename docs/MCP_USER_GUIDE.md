@@ -1,24 +1,24 @@
 # Research Asset Hub 本地只读 MCP
 
-MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research Asset Hub。它使用官方 Python SDK 的 FastMCP，经 stdio 通信，再用 HTTP GET 读取本机 Hub API。所有七个工具声明 `readOnlyHint=true`，没有数据库写入、导入、批注、运行源码或启动服务的工具。
+MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它使用官方 Python SDK 的 FastMCP，经 stdio 通信，再用 HTTP GET 读取本机 Hub API。所有七个工具声明 `readOnlyHint=true`，没有数据库写入、导入、批注或运行源码的工具。默认本机 API 未运行时，首次实际读取会按需唤醒现有桌面程序的共享后台。
 
 ## 当前安装与启动
 
-2026-10-02 已在本机 Codex 配置中注册 **research-assets**。新建聊天后加载；若工具列表没有刷新，重启 Codex。当前聊天的工具列表不会热加载，但实际 stdio 客户端已验证七个工具均可调用。
+本机 Codex 配置中的名称为 **research-assets**。配置默认启用；新建聊天后加载，工具列表没有刷新时可重启 Codex。现有聊天的工具列表不会热加载。
 
-注册入口是项目的 scripts/run_knowledge_mcp.py。它可从其他工作目录启动，先复用或启动独立的本地知识 API（127.0.0.1:8877），再进入 MCP stdio；启动信息只写 stderr，不污染协议 stdout。启动器使用已配置的 PowerShell 7 路径，startup_timeout_sec 为180，工具超时60秒。
+注册入口是项目的 `scripts/run_knowledge_mcp.py`。它可从其他工作目录启动，直接进入 MCP stdio；`initialize` 和 `list_tools` 不连接 API、不启动桌面程序，即使 Hub 没运行也能列出七个工具。协议 stdout 只用于 MCP 消息。
 
-**基础数据库与 Meilisearch 仍由现有 Research Asset Hub 桌面程序管理，需要保持运行。** 知识 API 复用同一数据库、来源登记和搜索索引；不会创建另一套库。关闭或重启原桌面程序会短暂中断查询。启动器仅启动知识 API，不暗中初始化数据库、重建索引或修改来源。
+默认 API 是 `http://127.0.0.1:8767/api/v1`。首次工具 GET 连接失败时，桥接进程先取得数据目录下的 `state/mcp-backend.lock` 进程锁，再检查轻量 `/knowledge/ready` 和桌面程序已有单实例互斥体。已有后台可用时直接复用；桌面程序正在启动时等待；确实没有桌面实例时才启动正式安装的 `C:/Program Files/ResearchAssetHub/research-asset-hub-desktop.exe --background`，与开始菜单原入口一致。部署直接更新这套正式程序，不把临时或其他启动副本当作部署目标。安装目录由用户调整时，可用 `HUB_MCP_DESKTOP_EXE` 明确指向同一正式程序。
 
-若需要手工重启本轮独立 API，可在项目目录运行：
+多个聊天共用同一后台和同一数据根，不各自启动 API 或 worker。后台模式初次启动不显示或聚焦窗口，第二个 `--background` 实例也不唤起现有窗口；正常手动打开和托盘操作仍按原流程工作。首次唤醒经 Windows Explorer 的桌面 ShellExecute 发起，后台独立于某个聊天的 stdio 进程，聊天关闭时不会随其 Windows Job Object 一同终止。桌面程序继续监督 PostgreSQL、Meilisearch、API、隔离网关及 worker 的完整生命周期，MCP 不新建维护任务；原先已授权排队的任务可以按既有 worker 流程继续执行。
 
-    pwsh -NoProfile -File scripts/start_knowledge_api.ps1 -Restart
+协调恢复最多等待90秒，HTTP 连接和读取另有各自的超时，本机宿主工具超时设为120秒。Windows 上未能建立 TCP 连接的超时按服务尚未可达处理，已连接后的读取超时则等待现有服务，避免把尚未启动误判为正在启动。启动失败时返回明确工具错误，保留已有桌面实例与子进程；后台初次失败不弹桌面对话框，可查 Hub 数据目录中的日志。默认数据根与桌面程序一致，位于用户 `Documents/ResearchAssetHub`；通过 `HUB_DATA_DIR` 自定义时，桌面程序和 MCP 必须使用同一数据根。
 
-该脚本仅重启由它记录、命令行与端口均匹配的8877进程。它从桌面程序既有本地配置读取搜索密钥，不输出或重写密钥。8767上的已安装桌面API仍保持原来的版本；不要把MCP地址直接改到8767，除非该API也已部署本轮知识路由。
+已运行但缺少兼容知识路由的 API 会明确报错，需要部署包含 `/knowledge/ready` 的共享 API；MCP 不自动替换运行中的代码。部署或重启桌面程序会短暂中断查询。
 
-启动器使用轻量 `/knowledge/ready` 检查知识路由、数据库查询和来源配置，不再为了判断是否启动而执行全库统计。它不代表远端索引内容已验收；完整台账仍由 `library_status` 返回。
+恢复检查使用轻量 `/knowledge/ready` 验证知识路由、数据库查询和来源配置，不为了判断是否启动而执行全库统计。它不代表远端索引内容已验收；完整台账仍由 `library_status` 返回。
 
-正常使用不需要执行提取脚本。开发者如果已启动兼容API，也可直接运行项目Python的 -m apps.mcp_server，跳过启动器。默认地址为 http://127.0.0.1:8877/api/v1；MCP仅接受回环HTTP(S)地址，禁用代理和重定向。
+正常使用不需要执行提取脚本。开发者可运行项目 Python 的 `-m apps.mcp_server`，启动行为与注册入口相同。`HUB_MCP_API_URL` 仅接受回环 HTTP(S) 地址，禁用代理和重定向；指定其他本机地址时由调用者管理该 API，MCP 不自动启动桌面程序。检索仍只用关键词与别名，不加载向量模型或扫描全库。
 
 配置与协议依据：[官方 MCP 文档](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)和[官方 Python SDK v1](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x)。当前SDK为1.30.0，依赖约束保留小于2。
 
@@ -36,7 +36,7 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research 
 
 `domain` 接受已注册的 slug、中文名称或无歧义别名，长度1–64字符，例如 `ai-for-math`、`AI for Math`、`形式化数学`。可从 `library_status` 查看当前领域。公开名称优先匹配显示领域；历史 `generation` 和 `navigation-compression` slug 仍可显式使用。论文返回的 `domains` 是显示领域，`source_domains` 保留原登记分类；派生卡与图保留生成时的来源分类，筛选依据当前正式资产。
 
-`keywords` 最多8项，每项1–80字符；`constraints` 最多6项，每项1–160字符。例如问题“寻找无须重新训练的视频扩散加速方法”，可传 `keywords=["video diffusion", "cache"]`、`constraints=["无需重新训练"]`。后端执行最多3条短关键词查询，按题名、标识符、标签、摘要和片段的词面匹配排序。`query_plan` 保留主题、正负条件和未映射内容，`match_reasons` 解释排序；分数不是概率，条件始终需要原文核验。代码仍由安全浏览工具按行读取，不默认建立代码全文索引。
+`keywords` 最多8项，每项1–80字符；`constraints` 最多6项，每项1–160字符。例如问题“寻找无须重新训练的视频扩散加速方法”，可传 `keywords=["video diffusion", "cache"]`、`constraints=["无需重新训练"]`。论文检索只读取正式标题、中文题名、摘要及必要的论文标识；正文、summary 导读和标签不参与论文匹配。术语及中英文别名按并集广召回，再按词面匹配排序；条件始终需要原文核验。返回精确 `total`、`offset`、`has_more` 和 `next_offset`，翻页时保持相同查询条件，首屏不是全部候选。代码仍由安全浏览工具按行读取，不默认建立代码全文索引。
 
 工具 schema 会公开数量和长度界限，参数超界时不会发出 HTTP 请求。`read_code` 的相对路径最多512字符，行号1–100000；多个可用代码表示需要明确选择 `representation_id`，不会任意挑选。
 
@@ -67,7 +67,7 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询正在运行的 Research 
 - “浏览已登记的代码资产，读取 `src/model.py` 的第30到80行，解释数据流并给出代码引用。”
 - “找图像编辑领域已审查的科研图方法卡，列出证据；没有卡片就说明没有。”
 
-先调用 `library_status` 检查当前状态；搜索后使用返回的 ID。搜索片段标为 indexed_excerpt_requires_read，仅用于发现材料；引用前调用 read_evidence 重新核对源文件指纹和全文上下文。当前为关键词检索加小型科研中英术语表，未启用语义向量模型，复杂问题宜拆成短专业关键词。服务不可达时先确认原Hub的数据库和搜索仍在运行。
+先搜索并使用返回的 ID；需要台账或诊断时调用 `library_status`。搜索结果中的摘要用于发现材料，引用结论前调用 `read_evidence` 核对源文件指纹、页码和上下文。当前为标题摘要关键词检索加小型科研中英术语表，未启用语义向量模型，复杂问题宜拆成短专业关键词。正常缺少后台会按需自动恢复；旧聊天仍缓存旧连接时需新建聊天或重启 Codex，不能把连接故障当作检索无结果。
 
 ## 已正式导入批次的维护
 

@@ -2,6 +2,11 @@
 
 ## Safety boundary
 
+The current permanent material root is
+`D:/ResearchLibrary`; PDF and code materials live in its domain
+subdirectories, outside the `research-asset-hub` application repository. New
+intake sources declare those directories through explicit `asset_roots`.
+
 All entries in `config/sources.yaml` are imported as read-only sources. The hub
 stores normalized records, user-authored state, indexes, and reports inside the
 `research-asset-hub` project. It must not rename, move, delete, annotate, or
@@ -16,6 +21,14 @@ source_id + source-relative path
 Absolute Windows paths are resolved only at runtime from `sources.yaml`. This
 keeps asset identities stable when the workspace is moved or later mounted on a
 server.
+
+Frozen source declarations remain import evidence. Root diagnostics count
+registrations without checking every historical directory. Gateway health checks
+database readiness and signing configuration; it does not certify file coverage.
+Knowledge status reports representation availability, source activity and root
+registration with `source_files_verified: false`. Reading a representation still
+checks its actual file and returns 404 when it is absent, while registered-root,
+source ownership and path traversal checks remain enforced.
 
 ## Adding papers to an existing domain
 
@@ -41,8 +54,26 @@ The first formal import stores both the manifest SHA-256 and the semantic source
 configuration digest in `Source.config`. Every later formal import and release
 report checks those frozen values. A changed manifest, adapter mapping, root, or
 other source setting therefore fails closed instead of silently creating a new
-source-record version. The formal CLI also performs a fresh all-source dry-run
-before opening the write transaction.
+source-record version. The formal CLI loads audited identifier decisions and
+performs a fresh all-source dry-run before opening the write transaction. A
+failure to load these decisions is not treated as an empty policy.
+
+## Correcting mistaken evidence and identities
+
+Corrected PDFs use new immutable sidecar sources and new files outside the
+existing material directories. Existing PDFs and source declarations remain
+unchanged. A registered umbrella resolution root does not automatically make
+new task-owned work files or separately authorized correction files formal
+representations; only explicit manifest references publish them.
+
+Representation `/serving` decisions and external-identifier `/identity`
+decisions live in audited `FieldResolution` records. Their APIs require current
+ETags, idempotency keys, reasons and the expected evidence identity. A serving
+exclusion removes the representation from all active read, extraction and
+index surfaces while preserving its original declaration and extracted history.
+An identifier rejection releases its effective identity projection and filters
+only the bound source stable keys during reconciliation; another real paper may
+still use that identifier. Ordinary imports cannot clear these decisions.
 
 ## Adding a new domain
 

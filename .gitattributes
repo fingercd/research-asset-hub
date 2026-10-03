@@ -1,0 +1,2 @@
+# These imported manifests are immutable byte-level evidence (including CRLF).
+config/intake/pdf-correction-20261003-*/manifest.json -text whitespace=cr-at-eol
