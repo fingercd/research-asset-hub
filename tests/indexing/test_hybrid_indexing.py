@@ -344,9 +344,7 @@ class _GeneratedCatalog:
         for start in range(0, self.total, batch_size):
             batch = [
                 SearchDocument(
-                    document_id=(
-                        f"{entity_type}:{UUID(int=identifier_offset + index + 1)}"
-                    ),
+                    document_id=(f"{entity_type}:{UUID(int=identifier_offset + index + 1)}"),
                     asset_id=str(UUID(int=identifier_offset + index + 1)),
                     kind=index_name.removesuffix("s"),
                     title=f"Generated {index}",
@@ -434,7 +432,9 @@ def test_keyword_rebuild_writes_only_keyword_indexes() -> None:
     suite = cast(RemoteIndexSuite, _MemorySuite())
     with Session(engine) as session:
         _seed(session)
-        report = IndexBuilder(suite).rebuild_keywords(session)
+        report = IndexBuilder(suite).rebuild_keywords(
+            session, index_names=("assets", "documents", "code", "annotations")
+        )
 
     assert report.keyword_counts_after == {
         "assets": 1,
@@ -486,10 +486,14 @@ def test_builder_is_idempotent_and_index_state_does_not_duplicate() -> None:
             suite,
             version="v1",
         )
-        first = builder.rebuild_keywords(session)
+        first = builder.rebuild_keywords(
+            session, index_names=("assets", "documents", "code", "annotations")
+        )
         session.commit()
         states_after_first = session.scalar(select(func.count()).select_from(IndexState))
-        second = builder.rebuild_keywords(session)
+        second = builder.rebuild_keywords(
+            session, index_names=("assets", "documents", "code", "annotations")
+        )
         session.commit()
         states_after_second = session.scalar(select(func.count()).select_from(IndexState))
 
@@ -523,12 +527,10 @@ def test_streaming_rebuild_bounds_batches_and_spools_stale_ids() -> None:
             write_batch_size=37,
             task_flush_batch_count=3,
             catalog=cast(PostgresIndexCatalog, catalog),
-        ).rebuild_keywords(session)
+        ).rebuild_keywords(session, index_names=("assets", "documents", "code", "annotations"))
         session.commit()
         ready_states = session.scalar(
-            select(func.count())
-            .select_from(IndexState)
-            .where(IndexState.status == "ready")
+            select(func.count()).select_from(IndexState).where(IndexState.status == "ready")
         )
 
     assert report.keyword_documents_upserted == {
@@ -582,17 +584,19 @@ def test_failed_remote_task_rolls_back_index_state_and_is_rerunnable() -> None:
             catalog=cast(PostgresIndexCatalog, catalog),
         )
         with pytest.raises(RuntimeError, match="synthetic Meilisearch task failure"):
-            builder.rebuild_keywords(session)
+            builder.rebuild_keywords(
+                session, index_names=("assets", "documents", "code", "annotations")
+            )
         session.commit()
-        persisted = session.scalar(
-            select(IndexState).where(IndexState.entity_id == existing_id)
-        )
+        persisted = session.scalar(select(IndexState).where(IndexState.entity_id == existing_id))
         assert persisted is not None
         assert persisted.status == "ready"
         assert session.scalar(select(func.count()).select_from(IndexState)) == 1
 
         suite.meili_transport.fail_flush = False
-        report = builder.rebuild_keywords(session)
+        report = builder.rebuild_keywords(
+            session, index_names=("assets", "documents", "code", "annotations")
+        )
         session.commit()
 
     assert report.keyword_counts_after == {

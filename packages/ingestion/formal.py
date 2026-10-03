@@ -43,6 +43,7 @@ from packages.domain.enums import (
     RepresentationAvailability,
     SourceAssetRole,
 )
+from packages.domain.identifier_policy import RejectedIdentityKeys, rejected_identity_keys
 from packages.domain.models import (
     Activity,
     Asset,
@@ -431,11 +432,12 @@ def identity_groups(
     records: Sequence[NormalizedRecord],
     *,
     approved_weak_merges: Mapping[str, frozenset[str]] | None = None,
+    rejected_keys: RejectedIdentityKeys = frozenset(),
 ) -> tuple[list[list[NormalizedRecord]], dict[str, Any]]:
     """Apply the approved strong and reviewed title/year merge decisions."""
 
     reconciliation = apply_weak_merge_approvals(
-        reconcile_records(records),
+        reconcile_records(records, rejected_keys=rejected_keys),
         approvals=approved_weak_merges,
     )
     if reconciliation["unapproved_review_groups"]:
@@ -496,6 +498,7 @@ class ImportContext:
     source_models: dict[str, Source]
     run: ImportRun
     domain_scope_policy: DomainScopePolicy
+    rejected_keys: RejectedIdentityKeys = frozenset()
     counters: ImportCounters = field(default_factory=ImportCounters)
     record_models: dict[str, SourceRecord] = field(default_factory=dict)
     record_versions: dict[str, SourceRecordVersion] = field(default_factory=dict)
@@ -767,7 +770,15 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
                         scope=identifier.scope,
                         value=identifier.value,
                         canonical=canonical,
-                        is_identity=bool(identifier.is_identity),
+                        is_identity=bool(identifier.is_identity)
+                        and (
+                            record.source_id,
+                            record.source_record_id,
+                            identifier.scheme,
+                            identifier.scope,
+                            canonical,
+                        )
+                        not in ctx.rejected_keys,
                     )
                 )
                 ctx.dirty_asset_ids.add(asset.id)
@@ -1701,7 +1712,8 @@ def run_formal_import(
         for record in records
         if f"{record.source_id}:{record.source_record_id}" not in excluded_record_keys
     ]
-    groups, reconciliation = identity_groups(records)
+    rejected_keys = rejected_identity_keys(session)
+    groups, reconciliation = identity_groups(records, rejected_keys=rejected_keys)
     source_models = _upsert_sources(session, active_sources)
     run = ImportRun(
         source_id=None,
@@ -1721,6 +1733,7 @@ def run_formal_import(
         source_models=source_models,
         run=run,
         domain_scope_policy=scope_policy,
+        rejected_keys=rejected_keys,
     )
 
     for group in groups:

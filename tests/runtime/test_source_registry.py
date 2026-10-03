@@ -52,7 +52,7 @@ def test_load_uses_host_workspace_override_for_installed_config(
     assert registry.root_for("demo", "pdf") == host_workspace.resolve() / "library" / "papers"
 
 
-def test_root_status_reports_configured_existing_and_missing_roots(
+def test_root_status_reports_registration_without_probing_historical_roots(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -66,18 +66,16 @@ def test_root_status_reports_configured_existing_and_missing_roots(
 
     assert status["workspace_root"] == str(host_workspace.resolve())
     assert status["configured"] == 2
-    assert status["existing"] == 1
-    assert status["missing"] == 1
-    assert status["missing_roots"] == [
-        {
-            "source_id": "demo",
-            "root_key": "pdf",
-            "path": str((host_workspace / "library" / "papers").resolve()),
-        }
-    ]
+    assert status["verification"] == "registration_only"
+    assert status["source_files_verified"] is False
+    assert "missing" not in status and "existing" not in status
+
+    registry = SourceRegistry({("historical", "pdf"): host_workspace / "removed"})
+    monkeypatch.setattr(Path, "stat", lambda *args, **kwargs: pytest.fail("root was probed"))
+    assert registry.root_status()["configured"] == 1
 
 
-def test_parent_directory_override_exposes_extra_level_regression(
+def test_parent_directory_override_resolves_declared_roots_without_availability_claim(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -87,11 +85,12 @@ def test_parent_directory_override_exposes_extra_level_regression(
     (project_root / "library" / "papers").mkdir(parents=True)
     monkeypatch.setenv("HUB_HOST_WORKSPACE_ROOT", str(project_root.parent))
 
-    status = SourceRegistry.load(config_path).root_status()
+    registry = SourceRegistry.load(config_path)
+    status = registry.root_status()
 
     assert status["configured"] == 2
-    assert status["existing"] == 0
-    assert status["missing"] == 2
+    assert registry.root_for("demo", "source") == project_root.parent / "library"
+    assert status["source_files_verified"] is False
 
 
 def test_shared_registry_sees_new_roots_and_changed_workspace_in_place(tmp_path, monkeypatch):

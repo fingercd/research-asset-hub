@@ -503,6 +503,72 @@ def test_relation_crud_evidence_and_logical_deduplication(
     assert len(outbox_rows) >= 4
 
 
+def test_create_override_rejects_changed_asset_version(api_runtime: tuple[Any, ...]) -> None:
+    client, database, _ = api_runtime
+    asset = create_asset(client, abstract=None)
+    old = client.get(f"/api/v1/assets/{asset['id']}")
+    edited = client.patch(
+        f"/api/v1/assets/{asset['id']}",
+        json={"abstract": "A newer user-supplied abstract."},
+        headers={"If-Match": old.headers["ETag"]},
+    )
+    assert edited.status_code == 200
+    result = client.post(
+        "/api/v1/overrides",
+        json={
+            "entity_id": asset["id"],
+            "field_path": "/abstract",
+            "override_value": "An older enrichment candidate.",
+        },
+        headers={"If-Match": old.headers["ETag"], "Idempotency-Key": "stale-abstract"},
+    )
+    assert result.status_code == 412
+    assert result.headers["ETag"] == edited.headers["ETag"]
+    assert client.get(f"/api/v1/assets/{asset['id']}").json()["abstract"] == (
+        "A newer user-supplied abstract."
+    )
+    with database.session() as session:
+        table = Base.metadata.tables["field_resolutions"]
+        rows = session.execute(
+            table.select().where(
+                table.c.entity_id == UUID(asset["id"]),
+                table.c.field_path == "/abstract",
+            )
+        ).all()
+    assert rows == []
+
+
+def test_conditional_create_override_replay_does_not_reapply(api_runtime: tuple[Any, ...]) -> None:
+    client, database, _ = api_runtime
+    asset = create_asset(client, abstract=None)
+    old = client.get(f"/api/v1/assets/{asset['id']}")
+    payload = {
+        "entity_id": asset["id"],
+        "field_path": "/abstract",
+        "override_value": "Verified abstract from the registered original PDF.",
+        "reason": "Source-bound enrichment fixture",
+    }
+    headers = {"If-Match": old.headers["ETag"], "Idempotency-Key": "verified-abstract"}
+    created = client.post("/api/v1/overrides", json=payload, headers=headers)
+    assert created.status_code == 201
+    current = client.get(f"/api/v1/assets/{asset['id']}")
+    assert current.json()["abstract"] == payload["override_value"]
+    assert current.headers["ETag"] != old.headers["ETag"]
+    replay = client.post("/api/v1/overrides", json=payload, headers=headers)
+    assert replay.status_code == 201 and replay.headers["Idempotency-Replayed"] == "true"
+    assert replay.json()["id"] == created.json()["id"]
+    assert client.get(f"/api/v1/assets/{asset['id']}").headers["ETag"] == current.headers["ETag"]
+    with database.session() as session:
+        table = Base.metadata.tables["audit_events"]
+        rows = session.execute(
+            table.select().where(
+                table.c.entity_type == "field_override",
+                table.c.entity_id == UUID(created.json()["id"]),
+            )
+        ).all()
+    assert len(rows) == 1
+
+
 def test_field_override_lifecycle_is_recoverable(api_runtime: tuple[Any, ...]) -> None:
     client, database, _ = api_runtime
     asset = create_asset(client, title="Imported title")

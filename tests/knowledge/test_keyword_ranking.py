@@ -47,7 +47,7 @@ def test_method_and_exact_id_outrank_generic_concepts():
     method, _ = lexical_rank(plan, {"title": "AlphaNet"})
     identifier, reasons = lexical_rank(plan, {"arxiv": "2601.12345"})
     assert identifier > generic and method > generic
-    assert reasons["matches"][0]["field"] == "metadata"
+    assert reasons["matches"][0]["field"] == "identifier"
 
 
 def test_exact_title_and_nfkc_alias():
@@ -96,3 +96,24 @@ def test_generic_title_case_words_cannot_outscore_multiple_scientific_topics():
     task_only, _ = lexical_rank(plan, {"title": "Theorem-Provers Self-Correction"})
     science, _ = lexical_rank(plan, {"title": "Stochastic Optimization and Proof Obligations"})
     assert science > task_only
+
+
+def test_summaries_body_tags_authors_urls_and_remote_scores_do_not_change_rank():
+    plan = plan_query("扩散采样")
+    baseline, reasons = lexical_rank(plan, {"title": "Unrelated"})
+    polluted, polluted_reasons = lexical_rank(
+        plan,
+        {
+            "title": "Unrelated",
+            "summary": "Diffusion sampling",
+            "content": "Diffusion sampling",
+            "tags": ["Diffusion sampling"],
+            "authors": ["Diffusion sampling"],
+            "source_urls": ["Diffusion sampling"],
+            "domains": ["Diffusion sampling"],
+        },
+        snippet="Diffusion sampling",
+        backend_score=10000,
+    )
+    assert polluted == baseline
+    assert polluted_reasons == reasons

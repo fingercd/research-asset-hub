@@ -863,5 +863,7 @@ def test_formal_cli_bootstrap_without_lifecycle_tables_remains_fail_closed_at_im
         lambda report, name: tmp_path / name,
     )
 
-    assert main(["ingest", "--all"]) == 0
-    assert calls == ["formal"]
+    # The audited identity policy must be available before any formal import,
+    # even when a test/bootstrap caller replaces the final importer.
+    assert main(["ingest", "--all"]) == 1
+    assert calls == []

@@ -448,7 +448,11 @@ class MeilisearchAdmin:
             payload={
                 "filterableAttributes": list(self.FILTERABLE_ATTRIBUTES),
                 "sortableAttributes": list(self.SORTABLE_ATTRIBUTES),
-                "searchableAttributes": list(self.SEARCHABLE_ATTRIBUTES),
+                "searchableAttributes": (
+                    ["title", "text"]
+                    if index_name == "assets"
+                    else list(self.SEARCHABLE_ATTRIBUTES)
+                ),
                 "displayedAttributes": [
                     "document_id",
                     "logical_document_id",

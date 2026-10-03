@@ -1155,7 +1155,8 @@ def list_representations(
                     "role": item.role,
                     "materialization_kind": item.materialization_kind,
                     "availability": item.availability,
-                    "retired": True,
+                    "retired": serving.retirement_id is not None,
+                    "excluded": serving.exclusion_id is not None,
                     "audit_only": True,
                     "successor_representation_id": (
                         str(serving.successor_representation_id)

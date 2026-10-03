@@ -13,9 +13,10 @@ from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from sqlalchemy import and_, exists, func, or_, select, tuple_, union, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from packages.domain.enums import IndexKind, IndexStatus, ReadingStatus
+from packages.domain.identifier_policy import effective_identifier_clause
 from packages.domain.models import (
     Annotation,
     Asset,
@@ -35,7 +36,7 @@ from .meili import HttpxJSONTransport, KeywordIndex, MeilisearchAdmin, Meilisear
 from .models import SearchDocument
 
 KEYWORD_INDEX_NAMES = ("assets", "documents", "code", "annotations")
-DEFAULT_REFRESH_INDEX_NAMES = ("assets", "documents", "annotations")
+DEFAULT_REFRESH_INDEX_NAMES = ("assets", "annotations")
 DEFAULT_INDEX_VERSION = "v1"
 DEFAULT_TASK_FLUSH_BATCHES = 16
 T = TypeVar("T")
@@ -95,7 +96,7 @@ class RemoteIndexSuite:
         request_timeout: float = 30,
     ) -> RemoteIndexSuite:
         selected_indexes = tuple(
-            dict.fromkeys(KEYWORD_INDEX_NAMES if index_names is None else index_names)
+            dict.fromkeys(DEFAULT_REFRESH_INDEX_NAMES if index_names is None else index_names)
         )
         if not selected_indexes:
             raise ValueError("index_names must contain at least one keyword index")
@@ -224,7 +225,7 @@ class PostgresIndexCatalog:
     ) -> Iterable[list[SearchDocument]]:
         cursor: UUID | None = None
         while True:
-            statement = select(Asset).where(Asset.deleted_at.is_(None))
+            statement = select(Asset).options(_asset_projection()).where(Asset.deleted_at.is_(None))
             if asset_ids is not None:
                 statement = statement.where(Asset.id.in_(asset_ids))
             if cursor is not None:
@@ -426,7 +427,9 @@ class PostgresIndexCatalog:
             return {}
         assets = list(
             session.scalars(
-                select(Asset).where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None))
+                select(Asset)
+                .options(_asset_projection())
+                .where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None))
             ).all()
         )
         identifiers: defaultdict[UUID, list[str]] = defaultdict(list)
@@ -435,7 +438,11 @@ class PostgresIndexCatalog:
                 ExternalIdentifierModel.asset_id,
                 ExternalIdentifierModel.value,
                 ExternalIdentifierModel.canonical,
-            ).where(ExternalIdentifierModel.asset_id.in_(asset_ids))
+            ).where(
+                ExternalIdentifierModel.asset_id.in_(asset_ids),
+                ExternalIdentifierModel.scheme.in_(("doi", "arxiv", "arxiv-id")),
+                effective_identifier_clause(),
+            )
         ):
             identifiers[asset_id].extend((str(canonical), str(value)))
         reading_status = {
@@ -516,13 +523,7 @@ class PostgresIndexCatalog:
                 str(value)
                 for value in (
                     asset.title_zh,
-                    asset.subtitle,
-                    asset.venue,
                     asset.abstract,
-                    asset.summary,
-                    asset.content,
-                    " ".join(asset.authors or []),
-                    " ".join(asset.tags or []),
                 )
                 if value
             ),
@@ -530,8 +531,6 @@ class PostgresIndexCatalog:
             exact_terms=_unique_terms(
                 asset.title,
                 asset.title_zh,
-                *list(asset.authors or []),
-                *list(asset.source_urls or []),
                 *context.identifiers,
             ),
         )
@@ -701,7 +700,7 @@ class IndexBuilder:
 
         normalized_scope = _normalize_scope(scope)
         selected_indexes = tuple(
-            dict.fromkeys(KEYWORD_INDEX_NAMES if index_names is None else index_names)
+            dict.fromkeys(DEFAULT_REFRESH_INDEX_NAMES if index_names is None else index_names)
         )
         if not selected_indexes:
             raise ValueError("index_names must contain at least one keyword index")
@@ -1054,6 +1053,21 @@ def _require_repeatable_read_snapshot(session: Session) -> None:
         )
     # Prevent two builders from interleaving writes from different snapshots.
     session.execute(select(func.pg_advisory_xact_lock(1_384_425_732)))
+
+
+def _asset_projection() -> Any:
+    """Metadata maintenance must not fetch stored full text or guide summaries."""
+    return load_only(
+        Asset.id,
+        Asset.title,
+        Asset.title_zh,
+        Asset.abstract,
+        Asset.domain_slugs,
+        Asset.year,
+        Asset.asset_type,
+        Asset.tags,
+        Asset.authors,
+    )
 
 
 def _asset_metadata(

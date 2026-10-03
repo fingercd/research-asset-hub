@@ -215,7 +215,7 @@ def _asset_fields(
     state: ReadingState | None,
     relation_ids: list[str],
 ) -> dict[str, Any]:
-    by_scheme = {item.scheme: item.canonical for item in identifiers}
+    by_scheme = {item.scheme: item.canonical for item in identifiers if item.is_identity}
     return {
         "title": asset.title,
         "aliases": [asset.title_zh] if asset.title_zh else [],
@@ -235,7 +235,7 @@ def _asset_fields(
         "identifiers": {
             item.scheme: item.canonical
             for item in identifiers
-            if item.canonical
+            if item.canonical and item.is_identity
         },
     }
 

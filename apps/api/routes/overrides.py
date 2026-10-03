@@ -1,4 +1,5 @@
 """领域路由：字段覆盖。"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -71,12 +72,14 @@ def list_overrides(
             len(all_items),
         )
 
+
 @router.post("/overrides", status_code=201)
 def create_override(
     payload: OverrideCreate,
     request: Request,
     response: Response,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    if_match: str | None = Header(None, alias="If-Match"),
 ) -> dict[str, Any]:
     request_payload = payload.model_dump(mode="json")
     with _v1._database(request).session() as session:
@@ -92,6 +95,11 @@ def create_override(
             response.headers["ETag"] = _etag(int(replay["row_version"]))
             return replay
         asset = _live_asset(session, payload.entity_id)
+        if if_match is not None:
+            # Conditional enrichment must observe the version while holding the
+            # asset row, so a concurrent edit cannot be overwritten after check.
+            session.refresh(asset, with_for_update=True)
+            _check_if_match(if_match, asset.row_version)
         asset_before = serialize_asset(asset)
         override_value = _validated_override_value(
             _override_asset_field(payload.field_path),
@@ -184,6 +192,7 @@ def create_override(
         response.headers["ETag"] = _etag(item.row_version)
         return result
 
+
 @router.get("/overrides/{override_id}")
 def get_override(
     override_id: UUID,
@@ -200,6 +209,7 @@ def get_override(
         result = _serialize_override(item)
         response.headers["ETag"] = _etag(item.row_version)
         return result
+
 
 @router.patch("/overrides/{override_id}")
 def update_override(
@@ -251,6 +261,7 @@ def update_override(
         response.headers["ETag"] = _etag(item.row_version)
         return result
 
+
 @router.delete("/overrides/{override_id}", status_code=204)
 def delete_override(
     override_id: UUID,
@@ -295,6 +306,7 @@ def delete_override(
             event_type="field-override.cleared",
         )
     return Response(status_code=204)
+
 
 @router.post("/overrides/{override_id}/restore")
 def restore_override(

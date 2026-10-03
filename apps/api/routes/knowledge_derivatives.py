@@ -96,7 +96,10 @@ def search_derivatives(
     *,
     keywords: Sequence[str] = (),
     constraints: Sequence[str] = (),
+    offset: int = 0,
 ) -> dict[str, Any]:
+    if offset < 0:
+        raise KnowledgeError("invalid_offset", "offset must be nonnegative.", 422)
     if asset_type in {"writing_pattern", "code_pattern"}:
         if source_type == "original":
             with _service(request) as service:
@@ -106,6 +109,9 @@ def search_derivatives(
                     "items": [],
                     "total": 0,
                     "limit": limit,
+                    "offset": offset,
+                    "has_more": False,
+                    "next_offset": None,
                     "backend": "derived_cards",
                     "domain": domain,
                     "query_plan": plan.to_dict() if plan else None,
@@ -118,6 +124,7 @@ def search_derivatives(
             limit=limit,
             keywords=list(keywords),
             constraints=list(constraints),
+            offset=offset,
         )
     with _service(request) as service:
         service.registry.refresh_if_changed()
@@ -127,6 +134,9 @@ def search_derivatives(
                 "items": [],
                 "total": 0,
                 "limit": limit,
+                "offset": offset,
+                "has_more": False,
+                "next_offset": None,
                 "backend": "figure_metadata",
                 "domain": domain,
                 "query_plan": plan.to_dict() if plan else None,
@@ -168,11 +178,16 @@ def search_derivatives(
                 }
             )
         ranked = [_ranked(item, plan) for item in matches]
-        ranked.sort(key=lambda item: -item[0])
+        ranked.sort(key=lambda item: (-item[0], item[1]["figure_id"]))
+        page = [item for _, item in ranked[offset : offset + limit]]
+        has_more = offset + len(page) < len(ranked)
         return {
-            "items": [item for _, item in ranked[:limit]],
+            "items": page,
             "total": len(matches),
             "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": offset + len(page) if has_more else None,
             "backend": "figure_metadata",
             "excluded_stale_or_unavailable": unavailable,
             "domain": domain,
@@ -223,7 +238,10 @@ def get_methodology(
     include_candidates: bool = False,
     keywords: Annotated[list[KeywordTerm] | None, Query(max_length=8)] = None,
     constraints: Annotated[list[QueryConstraint] | None, Query(max_length=6)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:
+    if offset < 0:
+        raise KnowledgeError("invalid_offset", "offset must be nonnegative.", 422)
     with _service(request) as service:
         service.registry.refresh_if_changed()
         domain, plan = _query_plan(service, q, domain, keywords or (), constraints or ())
@@ -309,11 +327,16 @@ def get_methodology(
                 continue
             visible.append(card)
         ranked = [_ranked(card, plan) for card in visible]
-        ranked.sort(key=lambda item: -item[0])
+        ranked.sort(key=lambda item: (-item[0], item[1]["id"]))
+        page = [card for _, card in ranked[offset : offset + limit]]
+        has_more = offset + len(page) < len(ranked)
         return {
-            "items": [card for _, card in ranked[:limit]],
+            "items": page,
             "total": len(visible),
             "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": offset + len(page) if has_more else None,
             "excluded_stale_or_unavailable": excluded,
             "review_scope": (
                 "Agent source review is distinct from human review or experiment reproduction."

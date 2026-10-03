@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -34,7 +33,6 @@ from packages.indexing.keyword import KeywordSearchService
 from packages.indexing.meili import InMemoryKeywordIndex
 from packages.indexing.models import SearchDocument
 from packages.knowledge.documents import document_from_chunks, text_hash
-from packages.knowledge.query_terms import QueryPlan
 from packages.knowledge.service import KnowledgeError, KnowledgeService, representation_source_type
 
 
@@ -258,7 +256,8 @@ def test_search_is_bounded_sql_and_uses_identifiers(library):
         event.remove(service.session.bind, "before_cursor_execute", record_statement)
     assert result["total"] == 1 and result["items"][0]["asset_id"] == str(asset.id)
     assert len(statements) == 2
-    assert "LIMIT" in statements[-1]
+    assert "LIMIT" in statements[0]
+    assert "assets.content" not in statements[0] and "assets.summary" not in statements[0]
     assert service.search_assets("10.123/evidence")["total"] == 1
     assert service.search_assets("%")["total"] == 0
     with pytest.raises(KnowledgeError):
@@ -370,68 +369,18 @@ def test_indexed_domain_mapping_and_query_contract(library):
     assert not service.session.dirty
 
 
-def test_source_configuration_failure_is_not_metadata_degradation(library):
+def test_search_never_initializes_remote_indexes(library):
     service, *_ = library
 
-    def invalid_config():
-        raise SourceConfigurationError("invalid fixture")
+    def remote_runtime():
+        raise AssertionError("ordinary knowledge search must not contact Meilisearch")
 
-    service.keyword_search = invalid_config
-    with pytest.raises(SourceConfigurationError):
-        service.search_assets("Evidence")
-
-
-def test_query_variants_run_concurrently_but_database_stays_on_request_thread(library, monkeypatch):
-    service, asset, *_ = library
-    request_thread = threading.get_ident()
-    started_threads = set()
-    lock = threading.Lock()
-    all_started = threading.Event()
-
-    class ConcurrentIndex(InMemoryKeywordIndex):
-        def search(self, query, **kwargs):
-            with lock:
-                started_threads.add(threading.get_ident())
-                if len(started_threads) == 3:
-                    all_started.set()
-            assert all_started.wait(5), "Independent query variants must start together"
-            return super().search(query, **kwargs)
-
-    index = ConcurrentIndex()
-    index.upsert(
-        [
-            SearchDocument(
-                document_id="asset:" + str(asset.id),
-                asset_id=str(asset.id),
-                kind="asset",
-                title=asset.title,
-                text="alpha beta gamma",
-            )
-        ]
-    )
-    service.keyword_search = lambda: KeywordSearchService({"assets": index})
-    monkeypatch.setattr(
-        "packages.knowledge.service.plan_query",
-        lambda *a, **kw: QueryPlan(
-            queries=("alpha", "beta", "gamma"),
-            original="example",
-            concept_groups=(),
-            conditions=(),
-            named_terms=(),
-            unmapped=(),
-        ),
-    )
-
-    def sql_thread(conn, cursor, statement, parameters, context, executemany):
-        assert threading.get_ident() == request_thread
-
-    event.listen(service.session.bind, "before_cursor_execute", sql_thread)
-    try:
-        result = service.search_assets("example")
-    finally:
-        event.remove(service.session.bind, "before_cursor_execute", sql_thread)
-    assert result["degraded"] is False and result["total"] == 1
-    assert len(started_threads) == 3 and request_thread not in started_threads
+    service.keyword_search = remote_runtime
+    result = service.search_assets("Evidence")
+    assert result["backend"] == "postgresql_keywords"
+    assert result["degraded"] is False
+    assert result["errors"] == []
+    assert result["total"] == 1
 
 
 def test_http_bad_source_configuration_is_503(library, monkeypatch):
@@ -458,48 +407,13 @@ def test_http_bad_source_configuration_is_503(library, monkeypatch):
     assert response.json()["code"] == "source_configuration_invalid"
 
 
-def test_fulltext_index_keeps_evidence_and_filters_disabled_sources(library):
-    service, asset, rep, source, _ = library
-    chunks = service.session.query(DocumentChunk).order_by(DocumentChunk.chunk_index).all()
-    index = InMemoryKeywordIndex()
-    index.upsert(
-        [
-            SearchDocument(
-                document_id="chunk:" + str(chunks[1].id),
-                asset_id=str(asset.id),
-                kind="document",
-                title=asset.title,
-                text=chunks[1].text_content,
-                metadata={"representation_id": str(rep.id), "anchor": chunks[1].anchor},
-            )
-        ]
+def test_body_chunks_are_readable_but_never_recalled(library):
+    service, asset, rep, _, _ = library
+    assert service.search_assets("second page")["total"] == 0
+    assert (
+        service.read_evidence(asset.id, representation_id=rep.id, page_start=2)["text"]
+        == "second page text"
     )
-    service.keyword_search = lambda: KeywordSearchService({"documents": index})
-    result = service.search_assets("second page")
-    assert result["backend"] == "meilisearch" and result["degraded"] is False
-    assert result["items"][0]["snippet"] == "second page text"
-    assert result["items"][0]["anchor"]["page"] == 2
-    assert result["items"][0]["source_type"] == "original"
-    assert result["items"][0]["evidence_id"].startswith("chunk:")
-    assert result["items"][0]["requires_read_evidence"] is True
-    assert service.search_assets("second page", source_type="analysis")["items"] == []
-    source.enabled = False
-    service.session.flush()
-    assert service.search_assets("second page")["items"] == []
-
-
-def test_keyword_failure_is_explicit_metadata_degradation(library):
-    service, *_ = library
-
-    def unavailable():
-        raise ConnectionError("not reachable")
-
-    service.keyword_search = unavailable
-    result = service.search_assets("Evidence")
-    assert result["degraded"] is True
-    assert result["backend"] == "postgresql_metadata"
-    assert result["errors"] == ["keyword_runtime:ConnectionError"]
-    assert len(result["items"]) == 1
 
 
 @pytest.mark.parametrize("representation_type", ["html", "markdown"])
@@ -536,20 +450,8 @@ def test_historical_original_role_webpage_is_analysis(library, representation_ty
     assert analysis["text"] == "中文解读页面" and analysis["anchor_precision"] == "document"
     assert service.search_assets("Evidence", source_type="original")["total"] == 0
     assert service.search_assets("Evidence", source_type="analysis")["total"] == 1
-    index = InMemoryKeywordIndex()
-    index.upsert(
-        [
-            SearchDocument(
-                document_id="chunk:" + str(chunk.id),
-                asset_id=str(asset.id),
-                kind="document",
-                title=asset.title,
-                text=chunk.text_content,
-                metadata={"representation_id": str(rep.id), "anchor": chunk.anchor},
-            )
-        ]
-    )
-    service.keyword_search = lambda: KeywordSearchService({"documents": index})
     assert service.search_assets("中文解读", source_type="original")["items"] == []
+    assert service.search_assets("中文解读", source_type="analysis")["items"] == []
+    asset.abstract = "中文解读"
     result = service.search_assets("中文解读", source_type="analysis")
-    assert result["items"][0]["source_type"] == "analysis"
+    assert result["items"][0]["source_type"] == "metadata"

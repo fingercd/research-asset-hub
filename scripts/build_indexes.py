@@ -1,7 +1,7 @@
 """Build the serving Meilisearch keyword indexes from PostgreSQL.
 
-The code index is optional; ``--skip-code`` is the low-memory/default serving
-mode and leaves any existing code index untouched.
+Default maintenance builds assets and annotations. Body and code indexes are
+preserved for explicit maintenance through ``--index``.
 """
 
 from __future__ import annotations
@@ -17,7 +17,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from packages.indexing import KEYWORD_INDEX_NAMES, IndexBuilder, RemoteIndexSuite
-from packages.indexing.builder import KeywordBuildReport, resolve_asset_scope
+from packages.indexing.builder import (
+    DEFAULT_REFRESH_INDEX_NAMES,
+    KeywordBuildReport,
+    resolve_asset_scope,
+)
 
 DEFAULT_DATABASE_URL = (
     "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub"
@@ -53,10 +57,17 @@ def _arguments() -> argparse.Namespace:
         help="Exact source alias, including its materialized repository assets.",
     )
     parser.add_argument(
+        "--index",
+        action="append",
+        choices=KEYWORD_INDEX_NAMES,
+        default=None,
+        help="Maintain only this index; repeat to select several. Defaults to assets/annotations.",
+    )
+    parser.add_argument(
         "--skip-code",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Leave the existing code index untouched and rebuild only non-code indexes.",
+        help="Leave code untouched by default; --no-skip-code adds code to the default indexes.",
     )
     parser.add_argument(
         "--report",
@@ -109,7 +120,10 @@ def _write_report_atomic(path: Path, report: KeywordBuildReport) -> str:
 def main() -> None:
     args = _arguments()
     selected_indexes = tuple(
-        name for name in KEYWORD_INDEX_NAMES if not (args.skip_code and name == "code")
+        dict.fromkeys(
+            getattr(args, "index", None)
+            or (*DEFAULT_REFRESH_INDEX_NAMES, *(("code",) if not args.skip_code else ()))
+        )
     )
     database_url = _sqlalchemy_url(args.database_url)
     engine = create_engine(database_url, **_engine_options(database_url))

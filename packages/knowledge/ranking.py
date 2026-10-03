@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
-from .query_terms import BROAD_CONCEPTS, IDENTIFIER, QueryPlan, contains, normalize
+from .query_terms import BROAD_CONCEPTS, QueryPlan, contains, normalize
 
 
 def _text(value: Any) -> str:
@@ -16,6 +17,15 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def normalize_identifier(value: str) -> str:
+    value = normalize(value)
+    for prefix in ("doi:", "arxiv:", "https://doi.org/", "https://arxiv.org/abs/"):
+        if value.startswith(prefix):
+            value = value.removeprefix(prefix).strip()
+            break
+    return re.sub(r"v\d+$", "", value) if re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", value) else value
+
+
 def lexical_rank(
     plan: QueryPlan,
     asset_metadata: Mapping[str, Any],
@@ -23,21 +33,29 @@ def lexical_rank(
     backend_score: float = 0.0,
 ) -> tuple[float, dict[str, Any]]:
     title = " ".join(_text(asset_metadata.get(key)) for key in ("title", "title_zh"))
-    tags = " ".join(_text(asset_metadata.get(key)) for key in ("tags", "domains", "keywords"))
-    abstract = " ".join(_text(asset_metadata.get(key)) for key in ("abstract", "summary"))
-    metadata = " ".join(
-        (
-            title,
-            tags,
-            _text(asset_metadata.get("external_identifiers")),
-            _text(asset_metadata.get("identifiers")),
-            _text(asset_metadata.get("doi")),
-            _text(asset_metadata.get("arxiv")),
-            _text(asset_metadata.get("source_urls")),
-        )
-    )
+    # Only the registered titles and original abstract contribute lexical scores.
+    # The arguments remain accepted for callers, but cached excerpts and remote
+    # scores may contain old body projections and therefore cannot affect order.
+    abstract = _text(asset_metadata.get("abstract"))
+    identifiers = []
+    for key in ("external_identifiers", "identifiers", "doi", "arxiv"):
+        value = asset_metadata.get(key)
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if item:
+                identifiers.append(normalize_identifier(item))
     matches: list[dict[str, Any]] = []
     score = 0.0
+    matched_identifier = next(
+        (
+            normalize_identifier(term)
+            for term in (plan.original, *plan.named_terms)
+            if normalize_identifier(term) in identifiers
+        ),
+        None,
+    )
+    if matched_identifier:
+        score += 2000
+        matches.append({"kind": "exact_identifier", "field": "identifier", "weight": 2000})
     for key in ("title", "title_zh"):
         if normalize(_text(asset_metadata.get(key))) in {
             normalize(title) for title in (plan.original, *plan.exact_titles) if normalize(title)
@@ -46,25 +64,29 @@ def lexical_rank(
             matches.append({"kind": "exact_title", "field": key, "weight": 2000})
             break
     for term in plan.named_terms:
-        exact_weight = 2000 if IDENTIFIER.fullmatch(term) else 500
-        field, weight = ("metadata", exact_weight) if contains(metadata, term) else ("snippet", 12)
-        if contains(metadata if field == "metadata" else snippet, term):
+        if normalize_identifier(term) in identifiers:
+            continue
+        if contains(title, term):
+            field, weight = "title", 500
+        elif contains(abstract, term):
+            field, weight = "abstract", 12
+        else:
+            continue
+        if weight:
             score += weight
             matches.append({"kind": "named_term", "term": term, "field": field, "weight": weight})
     covered = 0
     for group in plan.concept_groups:
         for field, text, weight in (
             ("title", title, 25),
-            ("tags", tags, 16),
             ("abstract", abstract, 8),
-            ("snippet", snippet, 3),
         ):
             matched = next((term for term in group.terms if contains(text, term)), None)
             if matched:
                 if group.name in BROAD_CONCEPTS or group.name == "proof":
                     weight = max(1, weight // 2)
                 score += weight
-                covered += field != "snippet"
+                covered += 1
                 matches.append(
                     {
                         "kind": "concept",
@@ -80,7 +102,7 @@ def lexical_rank(
     condition_matches = []
     for condition in plan.conditions:
         matched = next(
-            (term for term in condition.terms if contains(title + " " + tags, term)), None
+            (term for term in condition.terms if contains(title + " " + abstract, term)), None
         )
         weight = (4 if condition.polarity == "require" else -2) if matched else 0
         score += weight
@@ -97,8 +119,6 @@ def lexical_rank(
         4 if plan.year is not None and str(asset_metadata.get("year")) == str(plan.year) else 0
     )
     score += year_weight
-    backend_weight = max(0.0, min(2.0, backend_score))
-    score += backend_weight
     return score, {
         "mode": "literal_keywords",
         "matches": matches,
@@ -106,7 +126,7 @@ def lexical_rank(
         "coverage_bonus": coverage_bonus,
         "conditions": condition_matches,
         "year_weight": year_weight,
-        "backend_weight": backend_weight,
+        "backend_weight": 0.0,
         "needs_evidence_verification": True,
         "score_is_probability": False,
     }

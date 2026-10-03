@@ -31,6 +31,8 @@ from packages.domain.models import (
     Source,
 )
 from packages.domain.serving_scope import (
+    active_source_clause,
+    assert_representation_active,
     representation_serving_status,
     retired_representation_ids,
 )
@@ -129,14 +131,22 @@ class RuntimeHandlers:
         if job_id is not None:
             runtime_parameters["_job_id"] = str(job_id)
         result = handler(runtime_parameters)
-        if result.get("status") == "skipped_retired" and job_id is not None:
+        if result.get("status") in {"skipped_retired", "skipped_excluded"} and job_id is not None:
             with self.database.session() as session:
                 job = session.get(Job, job_id, with_for_update=True)
                 if job is not None:
                     job.cancel_requested = True
                     job.error = {
-                        "type": "RepresentationRetired",
-                        "detail": "Job skipped because its source is retired.",
+                        "type": (
+                            "RepresentationExcluded"
+                            if result["status"] == "skipped_excluded"
+                            else "RepresentationRetired"
+                        ),
+                        "detail": (
+                            "Job skipped because its representation is excluded."
+                            if result["status"] == "skipped_excluded"
+                            else "Job skipped because its source is retired."
+                        ),
                     }
         return result
 
@@ -153,7 +163,7 @@ class RuntimeHandlers:
                 session.expunge(representation)
                 return representation, None
             return representation, {
-                "status": "skipped_retired",
+                "status": "skipped_excluded" if status.exclusion_id else "skipped_retired",
                 "representation_id": str(representation.id),
                 "successor_representation_id": (
                     str(status.successor_representation_id)
@@ -180,6 +190,7 @@ class RuntimeHandlers:
             source = session.get(Source, representation.source_id)
             if source is None or not source.enabled:
                 raise FileNotFoundError("Representation source is unavailable.")
+            assert_representation_active(session, representation)
             registered_path = self.registry.resolve(
                 source.alias,
                 representation.root_key,
@@ -321,6 +332,30 @@ class RuntimeHandlers:
                 stored_activity = session.get(Activity, activity_id)
                 if stored_activity is None:
                     raise RuntimeError("Extraction activity disappeared.")
+                # A serving decision can change while a file parser is running.
+                # Serialize with the serving endpoint before replacing old chunks.
+                current_representation = session.execute(
+                    select(Representation)
+                    .where(Representation.id == representation.id)
+                    .with_for_update()
+                ).scalar_one()
+                current_scope = representation_serving_status(session, current_representation)
+                if not current_scope.active:
+                    stored_activity.status = ActivityStatus.SKIPPED.value
+                    stored_activity.finished_at = datetime.now(UTC)
+                    skipped_result: dict[str, object] = {
+                        "status": (
+                            "skipped_excluded" if current_scope.exclusion_id else "skipped_retired"
+                        ),
+                        "representation_id": str(representation.id),
+                        "successor_representation_id": (
+                            str(current_scope.successor_representation_id)
+                            if current_scope.successor_representation_id
+                            else None
+                        ),
+                    }
+                    stored_activity.result = skipped_result
+                    return skipped_result
                 previous_digest = session.scalar(
                     select(Activity.output_digest)
                     .where(
@@ -470,9 +505,13 @@ class RuntimeHandlers:
                     }
             raise
 
-    def _refresh_asset_keywords(self, asset_id: UUID) -> dict[str, object]:
+    def _refresh_asset_keywords(
+        self, asset_id: UUID, *, cleanup: bool = False
+    ) -> dict[str, object]:
         index_names = (
             KEYWORD_INDEX_NAMES
+            if cleanup
+            else (*DEFAULT_REFRESH_INDEX_NAMES, "code")
             if self.settings.search_code_index_enabled
             else DEFAULT_REFRESH_INDEX_NAMES
         )
@@ -512,7 +551,13 @@ class RuntimeHandlers:
         if deleted or not serving_status.active:
             result.update(
                 {
-                    "status": "skipped_deleted" if deleted else "skipped_retired",
+                    "status": (
+                        "skipped_deleted"
+                        if deleted
+                        else "skipped_excluded"
+                        if serving_status.exclusion_id
+                        else "skipped_retired"
+                    ),
                     "representation_id": str(representation_id),
                     "successor_representation_id": (
                         str(serving_status.successor_representation_id)
@@ -527,7 +572,7 @@ class RuntimeHandlers:
         return self._refresh_asset_keywords(_uuid_parameter(parameters, "asset_id"))
 
     def delete_asset_index(self, parameters: dict[str, object]) -> dict[str, object]:
-        return self._refresh_asset_keywords(_uuid_parameter(parameters, "asset_id"))
+        return self._refresh_asset_keywords(_uuid_parameter(parameters, "asset_id"), cleanup=True)
 
 
 def dispatch_outbox_once(
@@ -555,7 +600,12 @@ def dispatch_outbox_once(
         event.locked_until = now
         event.attempts += 1
         try:
-            if event.aggregate_type in {"asset", "annotation", "reading_state"}:
+            if event.aggregate_type in {
+                "asset",
+                "annotation",
+                "reading_state",
+                "representation_serving",
+            }:
                 asset_id_value: Any = None
                 if event.aggregate_type == "asset":
                     asset_id_value = event.aggregate_id
@@ -568,6 +618,7 @@ def dispatch_outbox_once(
                     job_type = (
                         "delete_asset_index"
                         if event.event_type == "asset.deleted"
+                        or event.aggregate_type == "representation_serving"
                         else "index_asset"
                     )
                     dedupe = f"outbox:{event.id}:{job_type}"
@@ -650,6 +701,14 @@ def cancel_retired_pending_jobs(
     )
     if not retired_ids:
         return 0
+    excluded_ids = set(
+        session.scalars(
+            select(Representation.id).where(
+                Representation.id.in_(retired_ids),
+                active_source_clause(Representation.source_id),
+            )
+        ).all()
+    )
     asset_by_representation: dict[UUID, UUID] = {
         representation_id: asset_id
         for representation_id, asset_id in session.execute(
@@ -668,8 +727,14 @@ def cancel_retired_pending_jobs(
         job.status = JobStatus.CANCELLED.value
         job.finished_at = current
         job.error = {
-            "type": "RepresentationRetired",
-            "detail": "Pending job cancelled because its source is retired.",
+            "type": "RepresentationExcluded"
+            if representation_id in excluded_ids
+            else "RepresentationRetired",
+            "detail": (
+                "Pending job cancelled because its representation is excluded."
+                if representation_id in excluded_ids
+                else "Pending job cancelled because its source is retired."
+            ),
         }
         cancelled += 1
         asset_id = asset_by_representation.get(representation_id)

@@ -51,10 +51,15 @@ pub struct OrchestratorEntry {
 }
 
 pub struct AppState {
+    pub background: bool,
     pub force_exit: AtomicBool,
     pub orchestrator: Mutex<Option<OrchestratorEntry>>,
     pub startup_progress: Mutex<Vec<StartupProgress>>,
     pub startup_ready: AtomicBool,
+}
+
+fn background_requested(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    args.into_iter().any(|arg| arg == "--background")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -115,7 +120,7 @@ fn shutdown_orchestrator(state: &AppState) {
 /// 重试路径:开头取走上一个实例——先经令牌无锁置位取消(打断进行中的 start),
 /// 再取锁 shutdown 收尾(已结束的实例立即清理残留,进行中的 ≤~1s 自行返回后清理),
 /// 避免端口占用误报。
-fn run_startup(app: tauri::AppHandle) {
+fn run_startup(app: tauri::AppHandle, show_ui: bool) {
     let started = std::time::Instant::now();
     app.state::<AppState>()
         .startup_ready
@@ -228,8 +233,10 @@ fn run_startup(app: tauri::AppHandle) {
             // 托盘图标,表现为"完全无法打开"。就绪后必须显式 show + 聚焦。
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.eval("location.replace('index.html');");
-                let _ = window.show();
-                let _ = window.set_focus();
+                if show_ui {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
         }
         Err(StartupError::StepFailed { step, detail }) => {
@@ -238,10 +245,12 @@ fn run_startup(app: tauri::AppHandle) {
                 return;
             }
             let message = format!("{}失败\n\n{}", step.as_str(), detail);
-            app.dialog()
-                .message(message)
-                .title("研究资产库启动失败")
-                .blocking_show();
+            if show_ui {
+                app.dialog()
+                    .message(message)
+                    .title("研究资产库启动失败")
+                    .blocking_show();
+            }
         }
     }
 }
@@ -249,17 +258,19 @@ fn run_startup(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_startup_milestone("process-entry");
+    let background = background_requested(std::env::args_os().skip(1));
     // 单实例保护必须在任何 Builder/setup 之前:第二个实例若进入 setup,
     // 编排器预检会把已有实例的后台服务当作"残留"清理并弹报错(实测)。
     // 此处互斥体拦截:已有实例则唤起其窗口后立即退出。
     #[cfg(windows)]
-    if !single_instance::acquire() {
+    if !single_instance::acquire(!background) {
         std::process::exit(0);
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
+            background,
             force_exit: AtomicBool::new(false),
             orchestrator: Mutex::new(None),
             startup_progress: Mutex::new(Vec::new()),
@@ -293,7 +304,8 @@ pub fn run() {
             // Backend imports and database startup overlap WebView creation.
             // The loading-page callback replays progress or redirects when ready.
             let handle = app.handle().clone();
-            std::thread::spawn(move || run_startup(handle));
+            let show_ui = !app.state::<AppState>().background;
+            std::thread::spawn(move || run_startup(handle, show_ui));
             // 桌面壳注入 API 基址;前端 resolveApiBase 优先读它(Task 2)。
             // 用 initialization script 而非 setup 内一次性 eval:初始化脚本在每次
             // 文档加载(包括 location.replace('index.html') 导航)时重新执行,
@@ -307,6 +319,7 @@ pub fn run() {
             let app_for_links = app.handle().clone();
             let _main_window = tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)
                 .expect("main window config must be valid")
+                .visible(!app.state::<AppState>().background)
                 .initialization_script(&api_base_init_script)
                 .on_new_window(move |url, _features| {
                     // Wry 默认拦截 window.open；opener 插件只自动接管 a[target=_blank]。
@@ -420,7 +433,7 @@ pub fn run() {
                                 }
                             }
                         }
-                        tray::TraySignal::Retry => run_startup(handle.clone()),
+                        tray::TraySignal::Retry => run_startup(handle.clone(), true),
                         tray::TraySignal::Quit => {
                             let state = handle.state::<AppState>();
                             state.force_exit.store(true, Ordering::SeqCst);
@@ -466,6 +479,19 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_flag_requires_exact_argument() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert!(background_requested(args(&["--background"])));
+        assert!(!background_requested(args(&[])));
+        assert!(!background_requested(args(&["--background=false"])));
+    }
 
     #[test]
     fn startup_progress_replay_keeps_each_stage_and_resets_on_retry() {

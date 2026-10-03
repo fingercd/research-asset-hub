@@ -83,12 +83,10 @@ def test_worker_index_jobs_use_shared_scoped_builder(
         asset_id, representation_id = asset.id, representation.id
     selected_indexes = (
         ("assets", "documents", "code", "annotations")
+        if job_type in {"delete_asset_index", "asset.index-delete"}
+        else ("assets", "annotations", "code")
         if code_enabled
-        else (
-            "assets",
-            "documents",
-            "annotations",
-        )
+        else ("assets", "annotations")
     )
     captured: list[dict[str, Any]] = []
 

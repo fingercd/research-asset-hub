@@ -148,7 +148,11 @@ def test_refresh_removes_only_selected_asset_stale_chunks_and_preserves_other_st
     asset_b, _, chunk_b = _seed(session, "b")
     suite = _ScopedSuite()
     builder = IndexBuilder(cast(RemoteIndexSuite, suite), write_batch_size=1)
-    builder.refresh_keywords(session, asset_ids=(asset_a.id, asset_b.id))
+    builder.refresh_keywords(
+        session,
+        asset_ids=(asset_a.id, asset_b.id),
+        index_names=("assets", "documents", "annotations"),
+    )
     session.commit()
     b_ids = {
         asset_b.id,
@@ -189,7 +193,9 @@ def test_refresh_removes_only_selected_asset_stale_chunks_and_preserves_other_st
     session.commit()
     suite.meili_transport.fetches.clear()
 
-    report = builder.refresh_keywords(session, asset_ids=(asset_a.id,))
+    report = builder.refresh_keywords(
+        session, asset_ids=(asset_a.id,), index_names=("assets", "documents", "annotations")
+    )
     session.commit()
 
     assert report.index_version == "v1"
@@ -220,7 +226,9 @@ def test_refresh_removes_only_selected_asset_stale_chunks_and_preserves_other_st
     )
     assert old_state is not None and old_state.status == "stale"
     state_count = len(session.scalars(select(IndexState.id)).all())
-    second = builder.refresh_keywords(session, asset_ids=(asset_a.id,))
+    second = builder.refresh_keywords(
+        session, asset_ids=(asset_a.id,), index_names=("assets", "documents", "annotations")
+    )
     session.commit()
     assert second.stale_keyword_documents_removed == {"assets": 0, "documents": 0, "annotations": 0}
     assert second.scoped_keyword_counts_after == report.scoped_keyword_counts_after
@@ -236,8 +244,8 @@ def test_refresh_uses_formal_projection_and_skips_code_by_default(session: Sessi
     report = IndexBuilder(cast(RemoteIndexSuite, suite)).refresh_keywords(
         session, asset_ids=(asset.id,)
     )
-    assert report.skipped_indexes == ("code",)
-    assert report.keyword_documents_upserted["documents"] == 0
+    assert report.skipped_indexes == ("documents", "code")
+    assert "documents" not in report.keyword_documents_upserted
     assert not suite.keyword_indexes["code"].documents
     for name in report.selected_indexes:
         assert (
@@ -252,12 +260,16 @@ def test_refresh_deleted_asset_cleans_remote_documents_without_local_chunks(
     asset, _, chunk = _seed(session, "deleted")
     suite = _ScopedSuite()
     builder = IndexBuilder(cast(RemoteIndexSuite, suite))
-    builder.refresh_keywords(session, asset_ids=(asset.id,))
+    builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     session.commit()
     asset.deleted_at = datetime.now(UTC)
     session.execute(delete(DocumentChunk).where(DocumentChunk.id == chunk.id))
     session.commit()
-    report = builder.refresh_keywords(session, asset_ids=(asset.id,))
+    report = builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     assert report.keyword_documents_upserted == {"assets": 0, "documents": 0, "annotations": 0}
     assert report.stale_keyword_documents_removed == {"assets": 1, "documents": 1, "annotations": 1}
     assert all(not index.documents for index in suite.keyword_indexes.values())
@@ -274,7 +286,9 @@ def test_refresh_retired_source_removes_representation_documents(session: Sessio
     session.commit()
     suite = _ScopedSuite()
     builder = IndexBuilder(cast(RemoteIndexSuite, suite))
-    builder.refresh_keywords(session, asset_ids=(asset.id,))
+    builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     session.commit()
     backup = BackupRun(destination_label="test")
     session.add(backup)
@@ -298,7 +312,9 @@ def test_refresh_retired_source_removes_representation_documents(session: Sessio
         )
     )
     session.commit()
-    report = builder.refresh_keywords(session, asset_ids=(asset.id,))
+    report = builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     assert report.stale_keyword_documents_removed["documents"] == 1
     assert report.stale_keyword_documents_removed["annotations"] == 1
     assert len(suite.keyword_indexes["annotations"].documents) == 1
@@ -312,7 +328,9 @@ def test_remote_failure_rolls_back_ready_states_even_if_caller_commits(session: 
     suite = _ScopedSuite()
     suite.meili_transport.fail = True
     with pytest.raises(RuntimeError, match="remote task failed"):
-        IndexBuilder(cast(RemoteIndexSuite, suite)).refresh_keywords(session, asset_ids=(asset.id,))
+        IndexBuilder(cast(RemoteIndexSuite, suite)).refresh_keywords(
+            session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+        )
     session.commit()
     assert session.scalar(select(IndexState.id)) is None
     assert suite.meili_transport.wait_for_tasks is True
@@ -360,7 +378,9 @@ def test_refresh_spools_multiple_old_pages_before_deleting(session: Session) -> 
     session.commit()
     suite = _ScopedSuite()
     builder = IndexBuilder(cast(RemoteIndexSuite, suite), write_batch_size=2)
-    builder.refresh_keywords(session, asset_ids=(asset.id,))
+    builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     session.commit()
     session.execute(
         delete(DocumentChunk).where(
@@ -369,7 +389,9 @@ def test_refresh_spools_multiple_old_pages_before_deleting(session: Session) -> 
         )
     )
     session.commit()
-    report = builder.refresh_keywords(session, asset_ids=(asset.id,))
+    report = builder.refresh_keywords(
+        session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+    )
     assert report.scoped_keyword_counts_before is not None
     assert report.scoped_keyword_counts_before["documents"] == 6
     assert report.stale_keyword_documents_removed["documents"] == 5
@@ -404,7 +426,9 @@ def test_filtered_remote_response_cannot_expand_scope_or_hide_unaddressable_docu
     suite.meili_transport = InvalidTransport(suite.keyword_indexes)
     suite.meili_admin = MeilisearchAdmin(cast(HttpxJSONTransport, suite.meili_transport))
     with pytest.raises(RuntimeError, match="outside the asset scope"):
-        IndexBuilder(cast(RemoteIndexSuite, suite)).refresh_keywords(session, asset_ids=(asset.id,))
+        IndexBuilder(cast(RemoteIndexSuite, suite)).refresh_keywords(
+            session, asset_ids=(asset.id,), index_names=("assets", "documents", "annotations")
+        )
     session.commit()
     assert session.scalar(select(IndexState.id)) is None
     assert all(not index.documents for index in suite.keyword_indexes.values())
@@ -420,3 +444,41 @@ def test_optional_missing_code_index_reports_zero_without_provisioning() -> None
     assert (
         MeilisearchAdmin(cast(HttpxJSONTransport, MissingTransport())).document_count("code") == 0
     )
+
+
+def test_assets_only_refresh_replaces_old_body_projection_and_preserves_other_indexes(session):
+    asset, _, _ = _seed(session, "target")
+    other, _, _ = _seed(session, "other")
+    asset.summary = "summary-only-token"
+    asset.content = "body-only-token"
+    asset.tags = ["tag-only-token"]
+    asset.authors = ["author-only-token"]
+    asset.source_urls = ["https://url-only-token.invalid"]
+    session.commit()
+    suite = _ScopedSuite()
+    builder = IndexBuilder(cast(RemoteIndexSuite, suite))
+    builder.refresh_keywords(
+        session, asset_ids=(asset.id, other.id), index_names=KEYWORD_INDEX_NAMES
+    )
+    session.commit()
+    before = {name: dict(index.documents) for name, index in suite.keyword_indexes.items()}
+    default_report = builder.refresh_keywords(session, asset_ids=(asset.id,))
+    assert default_report.selected_indexes == ("assets", "annotations")
+    for name in ("documents", "code"):
+        assert suite.keyword_indexes[name].documents == before[name]
+    states_before = _state_snapshot(session, {other.id})
+    asset.title = "Updated title"
+    session.commit()
+    report = builder.refresh_keywords(session, asset_ids=(asset.id,), index_names=("assets",))
+    document = suite.keyword_indexes["assets"].documents[f"asset:{asset.id}"]
+    assert document.title == "Updated title"
+    assert document.text == "Abstract target"
+    assert all("only-token" not in term for term in document.exact_terms)
+    assert report.selected_indexes == ("assets",)
+    for name in ("documents", "code", "annotations"):
+        assert suite.keyword_indexes[name].documents == before[name]
+    assert (
+        suite.keyword_indexes["assets"].documents[f"asset:{other.id}"]
+        == before["assets"][f"asset:{other.id}"]
+    )
+    assert _state_snapshot(session, {other.id}) == states_before

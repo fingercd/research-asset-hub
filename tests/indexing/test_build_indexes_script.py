@@ -68,9 +68,14 @@ def test_failed_build_does_not_publish_success_report(
     assert suite.closed is True
 
 
-def test_skip_code_passes_only_non_code_indexes(
+@pytest.mark.parametrize(
+    "indexes,expected", [(None, ("assets", "annotations")), (["assets"], ("assets",))]
+)
+def test_default_and_explicit_assets_select_only_requested_indexes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    indexes: list[str] | None,
+    expected: tuple[str, ...],
 ) -> None:
     report_path = tmp_path / "index-build.json"
     suite = _ClosingSuite()
@@ -96,7 +101,7 @@ def test_skip_code_passes_only_non_code_indexes(
                 keyword_documents_upserted=counts,
                 stale_keyword_documents_removed=counts,
                 selected_indexes=index_names,
-                skipped_indexes=("code",),
+                skipped_indexes=tuple(name for name in counts if name not in index_names),
             )
 
     arguments = argparse.Namespace(
@@ -107,6 +112,7 @@ def test_skip_code_passes_only_non_code_indexes(
         write_batch_size=17,
         task_flush_batches=2,
         skip_code=True,
+        index=indexes,
         report=report_path,
     )
 
@@ -123,15 +129,13 @@ def test_skip_code_passes_only_non_code_indexes(
 
     build_indexes.main()
 
-    assert captured == [("assets", "documents", "annotations")]
-    assert connect_kwargs[0]["index_names"] == (
-        "assets",
-        "documents",
-        "annotations",
-    )
+    assert captured == [expected]
+    assert connect_kwargs[0]["index_names"] == expected
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["selected_indexes"] == ["assets", "documents", "annotations"]
-    assert report["skipped_indexes"] == ["code"]
+    assert report["selected_indexes"] == list(expected)
+    assert report["skipped_indexes"] == [
+        name for name in ("assets", "documents", "code", "annotations") if name not in expected
+    ]
 
 
 def test_success_report_is_atomically_replaced(tmp_path: Path) -> None:
@@ -220,7 +224,7 @@ def test_source_scope_calls_refresh_for_primary_and_materialized_assets(
             index_names: tuple[str, ...],
         ) -> KeywordBuildReport:
             captured.append(asset_ids)
-            assert index_names == ("assets", "documents", "annotations")
+            assert index_names == ("assets", "annotations")
             counts = {name: 1 for name in index_names}
             return KeywordBuildReport(
                 index_version="v1",

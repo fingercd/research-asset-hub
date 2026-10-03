@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from packages.domain.models import Asset
 from packages.domain.platform_models import SourceRecordAsset
@@ -39,7 +39,7 @@ def presentation_domains(asset: Any) -> list[str]:
 
 
 def annotate_presentation_domains(session: Session, assets: list[Asset]) -> None:
-    """Assign generation repositories the topic of their source paper in one query."""
+    """Assign generation repositories their paper topics using batched metadata."""
     by_id = {asset.id: asset for asset in assets}
     repository_ids = {
         asset.id
@@ -66,22 +66,29 @@ def annotate_presentation_domains(session: Session, assets: list[Asset]) -> None
     missing_keys = {
         source_record_id
         for source_record_id, asset_id in source_rows
-        if asset_id in repository_ids
-        and source_record_id not in papers_by_source
+        if asset_id in repository_ids and source_record_id not in papers_by_source
     }
     if missing_keys:
-        for source_record_id, asset_id in session.execute(
-            select(
-                SourceRecordAsset.source_record_id,
-                SourceRecordAsset.asset_id,
-            ).where(
+        for source_record_id, paper in session.execute(
+            select(SourceRecordAsset.source_record_id, Asset)
+            .join(Asset, Asset.id == SourceRecordAsset.asset_id)
+            .options(
+                load_only(
+                    Asset.id,
+                    Asset.asset_type,
+                    Asset.title,
+                    Asset.domain_slugs,
+                    Asset.attributes,
+                    Asset.tags,
+                )
+            )
+            .where(
                 SourceRecordAsset.source_record_id.in_(missing_keys),
                 SourceRecordAsset.deleted_at.is_(None),
+                Asset.asset_type == "paper",
             )
         ):
-            paper = session.get(Asset, asset_id)
-            if paper is not None and paper.asset_type == "paper":
-                papers_by_source[source_record_id] = paper
+            papers_by_source[source_record_id] = paper
     for source_record_id, asset_id in source_rows:
         if asset_id not in repository_ids:
             continue

@@ -8,6 +8,7 @@
 
 ## 不可破坏的不变量
 
+- 当前永久资料根为 `D:/ResearchLibrary`，PDF 与代码使用其领域子目录；新增资料以新的旁车 source 显式登记这些 `asset_roots`。根注册数量与冻结历史目录不用于判断当前资料可读性；表示 availability 和实际文件打开失败仍须如实报告。
 - 所有已经登记的来源根、来源 manifest 和表示文件都是冻结的只读证据。Hub 与 Agent 均不得改写、移动、重命名、覆盖或删除它们。用户交给 Agent 的新资料默认通过 `config/intake/<source-id>/manifest.json` 旁车清单登记，原 PDF、代码和 HTML 保持原位。
 - 每个 source 首次正式导入时，系统会把 manifest SHA-256 和 source 配置摘要冻结到 PostgreSQL；以后任一摘要变化都会使正式导入和发布门禁失败。首次导入前必须把 ID、领域、路径、条目数和映射检查完毕；发现历史错误时创建更正来源并走审计流程，不得删除冻结字段或直接改库绕过。
 - 不得把来源大文件复制进 `research-asset-hub`。平台只保存来源别名、受控根目录、相对路径、指纹、抽取结果和用户状态。

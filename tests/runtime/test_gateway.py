@@ -235,19 +235,14 @@ def test_desktop_signed_routes_serve_pdf_range_and_markdown_without_cookies(
     assert markdown.headers["access-control-allow-origin"] == desktop_origin
 
 
-def test_gateway_health_reports_root_counts_and_degrades_for_missing_root(
+def test_gateway_health_ignores_unused_historical_roots_and_still_serves_current_files(
     gateway_runtime: tuple[Any, ...],
 ) -> None:
-    client, database, _, page, settings = gateway_runtime
+    client, database, representation, page, settings = gateway_runtime
     healthy = client.get("/health")
     assert healthy.status_code == 200
-    assert healthy.json()["source_roots"] == {
-        "workspace_root": None,
-        "configured": 1,
-        "existing": 1,
-        "missing": 0,
-        "missing_roots": [],
-    }
+    assert healthy.json()["source_roots"]["configured"] == 1
+    assert healthy.json()["source_roots"]["verification"] == "registration_only"
     missing_root = page.parent / "missing-root"
     registry = SourceRegistry(
         {
@@ -257,23 +252,48 @@ def test_gateway_health_reports_root_counts_and_degrades_for_missing_root(
         workspace_root=page.parent,
     )
     app = create_app(settings, database=database, registry=registry)
-    with TestClient(app) as degraded_client:
-        degraded = degraded_client.get("/health")
+    with TestClient(app) as current_client:
+        health = current_client.get("/health")
+        token = create_gateway_token(
+            settings.gateway_secret, representation.id, ttl_seconds=60, nonce="historical-root"
+        )
+        signed = current_client.get(
+            f"/session/{representation.id}", params={"token": token}, follow_redirects=False
+        )
+        assert signed.status_code == 303
+        assert current_client.get(signed.headers["location"]).content == page.read_bytes()
 
-    assert degraded.status_code == 200
-    payload = degraded.json()
-    assert payload["status"] == "degraded"
+    assert health.status_code == 200
+    payload = health.json()
+    assert payload["status"] == "healthy"
     assert payload["registered_roots"] == 2
     assert payload["source_roots"]["configured"] == 2
-    assert payload["source_roots"]["existing"] == 1
-    assert payload["source_roots"]["missing"] == 1
-    assert payload["source_roots"]["missing_roots"] == [
-        {
-            "source_id": "demo",
-            "root_key": "pdf",
-            "path": str(missing_root.resolve()),
-        }
-    ]
+    assert "missing_roots" not in payload["source_roots"]
+    assert payload["source_roots"]["source_files_verified"] is False
+
+
+@pytest.mark.parametrize("availability", ["available", "missing"])
+def test_gateway_preserves_missing_file_and_unavailable_ledger_errors(
+    gateway_runtime, availability
+):
+    client, database, representation, page, settings = gateway_runtime
+    with database.session() as session:
+        item = session.get(Representation, representation.id)
+        item.availability = availability
+    token = create_gateway_token(
+        settings.gateway_secret, representation.id, ttl_seconds=60, nonce="actual-missing"
+    )
+    if availability == "available":
+        signed = client.get(
+            f"/session/{representation.id}", params={"token": token}, follow_redirects=False
+        )
+        assert signed.status_code == 303
+        page.unlink()
+        assert client.get(signed.headers["location"]).status_code == 404
+    else:
+        assert (
+            client.get(f"/session/{representation.id}", params={"token": token}).status_code == 409
+        )
 
 
 def test_gateway_hub_presentation_injects_versioned_theme_and_preserves_source(

@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import String, and_, cast, exists, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from apps.api.domain_views import annotate_presentation_domains, presentation_domains
 from apps.asset_gateway.registry import SourceConfigurationError, SourceRegistry, UnsafeAssetPath
+from packages.domain.identifier_policy import effective_identifier_clause
 from packages.domain.models import (
     Activity,
     Asset,
@@ -29,17 +30,20 @@ from packages.domain.serving_scope import (
     active_representation_clause,
     assert_representation_active,
 )
-from packages.indexing.keyword import KeywordSearchService
-from packages.indexing.models import SearchHit
 
 from .documents import document_from_chunks, page_evidence_id, text_hash
 from .domains import matches_domain, normalize_domain, source_domain_candidates
-from .query_terms import QueryPlan, plan_query
+from .query_terms import contains, normalize, plan_query
 from .ranking import lexical_rank
+from .ranking import normalize_identifier as _identifier_value
 
 MAX_CHARS = 16_000
 MAX_RESULTS = 20
 MAX_CACHE_BYTES = 32 * 1024 * 1024
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class KnowledgeError(Exception):
@@ -83,7 +87,6 @@ class KnowledgeService:
         *,
         asset_loader: Callable[[Session, UUID], Asset] | None = None,
         hidden_asset: Callable[[Asset], bool] | None = None,
-        keyword_search: Callable[[], KeywordSearchService] | None = None,
         taxonomy_path: Path | None = None,
     ) -> None:
         self.session = session
@@ -91,7 +94,6 @@ class KnowledgeService:
         self.cache_root = cache_root
         self.asset_loader = asset_loader
         self.hidden_asset = hidden_asset or self._hidden
-        self.keyword_search = keyword_search
         self.taxonomy_path = taxonomy_path
 
     @staticmethod
@@ -132,11 +134,19 @@ class KnowledgeService:
         asset_type: str | None = None,
         source_type: str | None = None,
         limit: int = MAX_RESULTS,
+        offset: int = 0,
         keywords: Sequence[str] = (),
         constraints: Sequence[str] = (),
     ) -> dict[str, Any]:
+        """Recall literal title/abstract aliases over the complete live metadata.
+
+        UUID pages bound database reads, while final lexical order is independent
+        of page size. No remote top-k window or body index caps the candidates.
+        """
         if not 1 <= limit <= MAX_RESULTS:
             raise KnowledgeError("invalid_limit", "limit must be between 1 and 20.", 422)
+        if offset < 0:
+            raise KnowledgeError("invalid_offset", "offset must be nonnegative.", 422)
         if source_type not in {None, "original", "analysis"}:
             raise KnowledgeError("invalid_source_type", "Unknown evidence source type.", 422)
         query = query.strip()
@@ -149,332 +159,59 @@ class KnowledgeService:
             )
         except ValueError as error:
             raise KnowledgeError("invalid_query", str(error), 422) from error
-        errors: list[str] = []
-        if plan is not None and self.keyword_search:
-            try:
-                runtime = self.keyword_search()
-                # Annotations are user state, and the code index has its own safe browser.
-                search = KeywordSearchService(
-                    {
-                        name: index
-                        for name, index in runtime.keyword_indexes.items()
-                        if name in {"assets", "documents"}
-                    }
+        recall_terms = tuple(
+            dict.fromkeys(
+                normalize(term)
+                for term in (
+                    [query, *plan.queries, *plan.named_terms, *plan.exact_titles]
+                    + [term for group in plan.concept_groups for term in group.terms]
+                    if plan is not None
+                    else []
                 )
-                filters = {
-                    key: value
-                    for key, value in {
-                        "domain": list(source_domain_candidates(domain)) or None,
-                        "type": asset_type,
-                        "year": plan.year,
-                    }.items()
-                    if value is not None
-                }
-                searched_queries = list(plan.queries)
-                # Only remote keyword reads run concurrently; the SQLAlchemy
-                # session remains exclusively on this request's main thread.
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    results = list(
-                        executor.map(
-                            lambda value: search.search(
-                                value, filters=filters, limit=40, candidate_limit=40
-                            ),
-                            searched_queries,
-                        )
-                    )
-                if all(not result.degraded for result in results):
-                    # Preserve different evidence hits until live source checks finish.
-                    unique: dict[str, SearchHit] = {}
-                    for result in results:
-                        for hit in result.hits:
-                            prior = unique.get(hit.document.document_id)
-                            if prior is None or (hit.exact_match, hit.score) > (
-                                prior.exact_match,
-                                prior.score,
-                            ):
-                                unique[hit.document.document_id] = hit
-                    payload = self._indexed_results(
-                        query,
-                        list(unique.values()),
-                        domain=domain,
-                        asset_type=asset_type,
-                        source_type=source_type,
-                        limit=limit,
-                        plan=plan,
-                    )
-                    payload["query_variants"] = list(plan.queries)
-                    payload["searched_queries"] = searched_queries
-                    payload["query_plan"] = plan.to_dict()
-                    payload["query_expansion"] = "lexical_terms_and_constraints"
-                    return payload
-                for result in results:
-                    errors.extend(result.errors or ("keyword_backend_degraded",))
-            except SourceConfigurationError:
-                raise
-            except Exception as error:
-                errors.append("keyword_runtime:" + type(error).__name__)
-        metadata = self._metadata_search_assets(
-            query or " ".join(keywords),
-            domain=domain,
-            asset_type=asset_type,
-            source_type=source_type,
-            limit=limit,
-            year=plan.year if plan else None,
-        )
-        metadata.update(
-            degraded=plan is not None,
-            errors=errors or (["keyword_backend_not_configured"] if plan else []),
-            mode="metadata",
-            total_is_lower_bound=metadata.get("total_is_lower_bound", False),
-        )
-        if plan is not None:
-            metadata["query_plan"] = plan.to_dict()
-        return metadata
-
-    def _indexed_results(
-        self,
-        query: str,
-        hits: Sequence[SearchHit],
-        *,
-        domain: str | None,
-        asset_type: str | None,
-        source_type: str | None,
-        limit: int,
-        plan: QueryPlan | None = None,
-    ) -> dict[str, Any]:
-        asset_ids = set()
-        for hit in hits:
-            try:
-                asset_ids.add(UUID(hit.document.asset_id))
-            except ValueError:
-                continue
-        assets = {
-            a.id: a
-            for a in self.session.scalars(
-                select(Asset).where(
-                    Asset.id.in_(asset_ids),
-                    Asset.deleted_at.is_(None),
-                )
-            )
-            if not self.hidden_asset(a) and (not asset_type or a.asset_type == asset_type)
-        }
-        annotate_presentation_domains(self.session, list(assets.values()))
-        assets = {
-            key: asset
-            for key, asset in assets.items()
-            if matches_domain(asset, domain)
-            and (plan is None or plan.year is None or asset.year == plan.year)
-        }
-        ranking: dict[str, tuple[float, dict[str, Any]]] = {}
-        if plan is not None:
-            assets_by_string = {str(key): value for key, value in assets.items()}
-            identifiers: dict[str, list[str]] = {}
-            for owner, identifier in self.session.execute(
-                select(ExternalIdentifierModel.asset_id, ExternalIdentifierModel.canonical).where(
-                    ExternalIdentifierModel.asset_id.in_(assets)
-                )
-            ):
-                identifiers.setdefault(str(owner), []).append(identifier)
-            for hit in hits:
-                asset = assets_by_string.get(hit.document.asset_id)
-                if asset is None:
-                    continue
-                ranking[hit.document.document_id] = lexical_rank(
-                    plan,
-                    {
-                        **self._asset_payload(asset),
-                        "abstract": asset.abstract,
-                        "summary": asset.summary,
-                        "identifiers": identifiers.get(str(asset.id), []),
-                    },
-                    snippet=hit.document.text,
-                    backend_score=hit.score,
-                )
-            hits = sorted(
-                hits,
-                key=lambda h: ranking.get(h.document.document_id, (float("-inf"), {}))[0],
-                reverse=True,
-            )
-        reps = list(
-            self.session.scalars(
-                select(Representation)
-                .join(Source)
-                .where(
-                    Representation.asset_id.in_(assets),
-                    Representation.deleted_at.is_(None),
-                    Source.enabled.is_(True),
-                    active_representation_clause(),
-                )
+                if term.strip()
             )
         )
-        by_id = {r.id: r for r in reps}
-        by_asset: dict[UUID, list[Representation]] = {}
-        for candidate_rep in reps:
-            by_asset.setdefault(candidate_rep.asset_id, []).append(candidate_rep)
-        items = []
-        returned_assets: set[UUID] = set()
-        rejected = 0
-        for hit in hits:
-            try:
-                asset = assets.get(UUID(hit.document.asset_id))
-            except ValueError:
-                continue
-            if asset is None:
-                rejected += 1
-                continue
-            if asset.id in returned_assets:
-                continue
-            if source_type and not any(
-                representation_source_type(r) == source_type for r in by_asset.get(asset.id, [])
-            ):
-                rejected += 1
-                continue
-            payload = self._asset_payload(asset)
-            payload.update(snippet=None, evidence_id=None, anchor=None, source_type="metadata")
-            representation_id = hit.document.metadata.get("representation_id")
-            if representation_id:
-                try:
-                    rep = by_id.get(UUID(str(representation_id)))
-                except ValueError:
-                    rep = None
-                if (
-                    rep is None
-                    or rep.asset_id != asset.id
-                    or (source_type and representation_source_type(rep) != source_type)
-                ):
-                    rejected += 1
-                    continue
-                chunk_evidence_id = hit.document.document_id
-                if not chunk_evidence_id.startswith("chunk:"):
-                    rejected += 1
-                    continue
-                try:
-                    indexed_chunk = self.session.get(DocumentChunk, UUID(chunk_evidence_id[6:]))
-                except ValueError:
-                    indexed_chunk = None
-                if (
-                    indexed_chunk is None
-                    or indexed_chunk.asset_id != asset.id
-                    or indexed_chunk.representation_id != rep.id
-                    or indexed_chunk.content_hash
-                    != (hit.document.metadata.get("content_hash") or text_hash(hit.document.text))
-                ):
-                    rejected += 1
-                    continue
-                try:
-                    self._source_path(asset, rep)
-                except (KnowledgeError, RetiredRepresentationError):
-                    rejected += 1
-                    continue
-                chunk_id = hit.document.document_id
-                anchor = dict(indexed_chunk.anchor or {})
-                anchor.pop("bbox", None)
-                anchor["precision"] = "page" if anchor.get("page") else "document"
-                text = indexed_chunk.text_content
-                position = text.casefold().find(query.casefold())
-                start = max(0, position - 120)
-                payload.update(
-                    snippet=text[start : start + 600],
-                    evidence_id=chunk_id,
-                    chunk_evidence_id=chunk_id,
-                    anchor=anchor,
-                    representation_id=str(rep.id),
-                    source_type=representation_source_type(rep),
-                    source_hash=rep.sha256,
-                    evidence_status="indexed_excerpt_requires_read",
-                    requires_read_evidence=True,
-                )
-            elif hit.document.kind != "asset":
-                rejected += 1
-                continue
-            payload.update(score=hit.score, rank=hit.rank)
-            if asset_key := ranking.get(hit.document.document_id):
-                payload["keyword_score"], payload["match_reasons"] = asset_key
-                payload["constraints_need_evidence_verification"] = True
-            items.append(payload)
-            returned_assets.add(asset.id)
-            if len(items) == limit:
-                break
-        return {
-            "items": items,
-            "total": len(items),
-            "limit": limit,
-            "query": query,
-            "backend": "meilisearch",
-            "mode": "keyword",
-            "degraded": False,
-            "errors": [],
-            "candidate_limit": 120,
-            "rejected_candidates": rejected,
-            "total_is_lower_bound": True,
+        identifier_terms = {
+            _identifier_value(term)
+            for term in [query, *(plan.named_terms if plan else ())]
+            if term.strip()
         }
-
-    def _metadata_search_assets(
-        self,
-        query: str,
-        *,
-        domain: str | None = None,
-        asset_type: str | None = None,
-        source_type: str | None = None,
-        limit: int = MAX_RESULTS,
-        year: int | None = None,
-    ) -> dict[str, Any]:
-        if not 1 <= limit <= MAX_RESULTS:
-            raise KnowledgeError("invalid_limit", "limit must be between 1 and 20.", 422)
-        if source_type not in {None, "original", "analysis"}:
-            raise KnowledgeError("invalid_source_type", "Unknown evidence source type.", 422)
+        if not keywords and re.fullmatch(r"10\.\d+/\S+|\d{4}\.\d{4,5}", _identifier_value(query)):
+            recall_terms = ()
         hidden = func.lower(cast(Asset.attributes["system_hidden"].as_string(), String))
-        statement = select(Asset).where(
-            Asset.deleted_at.is_(None), or_(hidden.is_(None), hidden.not_in(["true", "1"]))
-        )
-        query = query.strip()
-        if query:
-            pattern = (
-                "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            )
-            statement = statement.where(
-                or_(
-                    *(
-                        column.ilike(pattern, escape="\\")
-                        for column in (
-                            Asset.title,
-                            Asset.title_zh,
-                            Asset.abstract,
-                            Asset.summary,
-                            cast(Asset.authors, String),
-                            cast(Asset.tags, String),
-                        )
-                    ),
-                    exists(
-                        select(ExternalIdentifierModel.id).where(
-                            ExternalIdentifierModel.asset_id == Asset.id,
-                            ExternalIdentifierModel.canonical.ilike(pattern, escape="\\"),
-                        )
-                    ),
+        statement = (
+            select(Asset)
+            .options(
+                load_only(
+                    Asset.id,
+                    Asset.asset_type,
+                    Asset.title,
+                    Asset.title_zh,
+                    Asset.abstract,
+                    Asset.authors,
+                    Asset.year,
+                    Asset.venue,
+                    Asset.domain_slugs,
+                    Asset.tags,
+                    Asset.source_urls,
+                    Asset.attributes,
                 )
             )
+            .where(
+                Asset.deleted_at.is_(None),
+                or_(hidden.is_(None), hidden.not_in(["true", "1"])),
+            )
+        )
         if asset_type:
             statement = statement.where(Asset.asset_type == asset_type)
-        if year is not None:
-            statement = statement.where(Asset.year == year)
-        candidates = source_domain_candidates(domain)
-        if candidates:
+        domain_candidates = source_domain_candidates(domain)
+        if domain_candidates:
             patterns = [
-                "%"
-                + json.dumps(item, ensure_ascii=False)
-                .replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_")
-                + "%"
-                for item in candidates
+                "%" + _escape_like(json.dumps(item, ensure_ascii=False)) + "%"
+                for item in domain_candidates
             ]
             statement = statement.where(
-                or_(
-                    *[
-                        cast(Asset.domain_slugs, String).like(pattern, escape="\\")
-                        for pattern in patterns
-                    ]
-                )
+                or_(*[cast(Asset.domain_slugs, String).like(p, escape="\\") for p in patterns])
             )
         if source_type:
             original = and_(
@@ -500,26 +237,95 @@ class KnowledgeService:
                     )
                 )
             )
-        total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
-        assets = list(
-            self.session.scalars(
-                statement.order_by(Asset.year.desc().nullslast(), Asset.title, Asset.id).limit(
-                    100 if len(candidates) > 1 else limit
-                )
-            )
-        )
-        if len(candidates) > 1:
+        candidates: list[tuple[float, dict[str, Any]]] = []
+        cursor: UUID | None = None
+        while True:
+            page = statement if cursor is None else statement.where(Asset.id > cursor)
+            assets = list(self.session.scalars(page.order_by(Asset.id).limit(256)))
+            if not assets:
+                break
+            cursor = assets[-1].id
             annotate_presentation_domains(self.session, assets)
-            assets = [asset for asset in assets if matches_domain(asset, domain)][:limit]
-            total = len(assets)
-        return {
-            "items": [self._asset_payload(asset) for asset in assets],
+            identifiers: dict[UUID, list[str]] = {}
+            if plan is not None:
+                for owner, value in self.session.execute(
+                    select(
+                        ExternalIdentifierModel.asset_id, ExternalIdentifierModel.canonical
+                    ).where(
+                        ExternalIdentifierModel.asset_id.in_([asset.id for asset in assets]),
+                        ExternalIdentifierModel.scheme.in_(["doi", "arxiv", "arxiv-id"]),
+                        effective_identifier_clause(),
+                    )
+                ):
+                    identifiers.setdefault(owner, []).append(_identifier_value(value))
+            for asset in assets:
+                if self.hidden_asset(asset) or not matches_domain(asset, domain):
+                    continue
+                title_abstract = "\n".join(
+                    value for value in (asset.title, asset.title_zh, asset.abstract) if value
+                )
+                exact_identifier = bool(
+                    identifier_terms.intersection(identifiers.get(asset.id, []))
+                )
+                if plan is not None and not (
+                    exact_identifier or any(contains(title_abstract, term) for term in recall_terms)
+                ):
+                    continue
+                payload = self._asset_payload(asset)
+                payload.update(
+                    abstract=asset.abstract,
+                    snippet=(asset.abstract or "")[:600] or None,
+                    evidence_id=None,
+                    anchor=None,
+                    source_type="metadata",
+                )
+                score = 0.0
+                if plan is not None:
+                    score, reasons = lexical_rank(
+                        plan,
+                        {**payload, "identifiers": identifiers.get(asset.id, [])},
+                    )
+                    payload.update(
+                        keyword_score=score,
+                        match_reasons=reasons,
+                        constraints_need_evidence_verification=True,
+                    )
+                candidates.append((score, payload))
+            if len(assets) < 256:
+                break
+        candidates.sort(key=lambda item: (-item[0], item[1]["asset_id"]))
+        total = len(candidates)
+        items = [item for _, item in candidates[offset : offset + limit]]
+        for rank, item in enumerate(items, start=offset + 1):
+            item["rank"] = rank
+        has_more = offset + len(items) < total
+        result = {
+            "items": items,
             "total": total,
             "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": offset + len(items) if has_more else None,
             "query": query,
-            "backend": "postgresql_metadata",
-            "total_is_lower_bound": len(candidates) > 1,
+            "backend": "postgresql_keywords",
+            "mode": "keyword" if plan else "metadata",
+            "degraded": False,
+            "errors": [],
+            "total_is_lower_bound": False,
+            "search_fields": ["title", "title_zh", "abstract"],
+            "identifiers_exact": ["doi", "arxiv"],
+            "recall_terms": list(recall_terms),
+            "pagination_consistency": "live_metadata",
+            "semantic_search": False,
         }
+        if plan is not None:
+            result.update(
+                query_variants=list(plan.queries),
+                searched_queries=list(plan.queries),
+                query_plan=plan.to_dict(),
+                query_expansion="lexical_aliases",
+            )
+        return result
 
     def _active_representations(self, asset_id: UUID) -> list[Representation]:
         return list(

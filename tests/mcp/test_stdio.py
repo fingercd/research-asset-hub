@@ -77,11 +77,12 @@ async def test_real_stdio_initialize_list_and_call() -> None:
                 tools = await session.list_tools()
                 assert len(tools.tools) == 7
                 assert all(tool.annotations.readOnlyHint for tool in tools.tools)
+                assert requests == [], "initialize/list_tools must not contact even the API fixture"
                 response = await session.call_tool("library_status", {})
                 assert not response.isError
                 assert response.structuredContent == {"status": "test-fixture", "read_only": True}
                 for tool, args in [
-                    ("search_assets", {"query": "fixture"}),
+                    ("search_assets", {"query": "fixture", "offset": 20}),
                     ("get_paper", {"paper_id": ASSET}),
                     ("read_evidence", {"paper_id": ASSET}),
                     ("get_methodology", {"domain": "image-editing", "kind": "figure"}),
@@ -99,7 +100,28 @@ async def test_real_stdio_initialize_list_and_call() -> None:
                 assert invalid.isError
         assert len(requests) == 9
         assert requests[0] == "/api/v1/knowledge/status"
+        assert "offset=20" in requests[1]
     finally:
         fixture.shutdown()
         fixture.server_close()
         worker.join(timeout=2)
+
+
+async def test_default_entrypoint_initializes_with_no_platform_or_launcher(tmp_path: Path) -> None:
+    env = {
+        **os.environ,
+        "HUB_DATA_DIR": str(tmp_path),
+        "HUB_MCP_DESKTOP_EXE": str(tmp_path / "missing.exe"),
+    }
+    env.pop("HUB_MCP_API_URL", None)
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(ROOT / "scripts/run_knowledge_mcp.py")],
+        cwd=str(tmp_path),
+        env=env,
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            assert (await session.initialize()).serverInfo.name == "Research Asset Hub"
+            assert len((await session.list_tools()).tools) == 7
+    assert not (tmp_path / "state/mcp-backend.lock").exists()

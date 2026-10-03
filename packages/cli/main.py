@@ -195,6 +195,7 @@ def _run_validate(args: argparse.Namespace) -> int:
 
 def _run_ingest(args: argparse.Namespace) -> int:
     if args.dry_run:
+        from packages.domain.identifier_policy import rejected_identity_keys
         from packages.ingestion.dry_run import run_dry_run
         from packages.ingestion.formal import retired_source_contracts_for_dry_run
 
@@ -204,6 +205,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         )
         retirement_contracts: dict[str, dict[str, Any]] = {}
         retirement_state_checked = False
+        identity_keys = frozenset()
         if configured_database_url:
             engine = create_engine(configured_database_url, pool_pre_ping=True)
             try:
@@ -214,6 +216,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
                             sources,
                             require_complete=not bool(args.source),
                         )
+                        identity_keys = rejected_identity_keys(retirement_session)
                     retirement_state_checked = True
                 except OperationalError:
                     pass
@@ -223,8 +226,10 @@ def _run_ingest(args: argparse.Namespace) -> int:
             sources,
             retired_source_contracts=retirement_contracts,
             operational_registry=SourceRegistry.load(args.config),
+            rejected_identity_keys=identity_keys,
         )
         report["retirement_state_checked"] = retirement_state_checked
+        report["identity_decisions_checked"] = retirement_state_checked
         path = write_report(report, "ingest-dry-run.json")
         report["report_path"] = str(path)
         _emit(report, args.json)
@@ -247,6 +252,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         _emit(report, args.json)
         return 1
 
+    from packages.domain.identifier_policy import rejected_identity_keys
     from packages.ingestion.dry_run import run_dry_run
     from packages.ingestion.formal import (
         retired_source_contracts_for_dry_run,
@@ -268,12 +274,18 @@ def _run_ingest(args: argparse.Namespace) -> int:
             # same check again and therefore still fails closed before writes.
             retirement_contracts = {}
             retirement_state_checked = False
+        # Formal import must obtain the current audited identity decisions.
+        # Missing/unavailable policy tables fail before the pre-import gate.
+        with Session(engine) as identity_session:
+            identity_keys = rejected_identity_keys(identity_session)
         dry_run_report = run_dry_run(
             sources,
             retired_source_contracts=retirement_contracts,
             operational_registry=SourceRegistry.load(args.config),
+            rejected_identity_keys=identity_keys,
         )
         dry_run_report["retirement_state_checked"] = retirement_state_checked
+        dry_run_report["identity_decisions_checked"] = True
         write_report(dry_run_report, "ingest-dry-run.json")
         if dry_run_report["status"] != "passed":
             report = {

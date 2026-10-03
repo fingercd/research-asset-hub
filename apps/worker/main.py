@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -45,15 +46,26 @@ def write_heartbeat(
         "current_job_id": current_job_id,
         "detail": detail,
     }
-    temporary_path = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    )
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        temporary_path.replace(path)
+        for attempt in range(10):
+            try:
+                temporary_path.replace(path)
+                break
+            except OSError as error:
+                # Windows readers may briefly deny deletion of the old file.
+                # Keep the heartbeat atomic; retry only that sharing conflict.
+                if (
+                    sys.platform != "win32"
+                    or getattr(error, "winerror", None) not in {5, 32}
+                    or attempt == 9
+                ):
+                    raise
+                time.sleep(0.05)
     finally:
         temporary_path.unlink(missing_ok=True)
 

@@ -1,4 +1,4 @@
-"""Cheap, read-only library coverage from SQL ledgers and configured root stats.
+"""Cheap, read-only library coverage from SQL ledgers and root registration.
 
 This endpoint does not verify source files, extraction digests, or a remote
 search engine. It deliberately keeps those claims separate from ledger counts.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import yaml
 from sqlalchemy import func, or_, select, tuple_, union_all
@@ -68,14 +68,6 @@ def _build_status(
     roots_by_alias: dict[str, set[str]] = {}
     for root in roots:
         roots_by_alias.setdefault(root.source_id, set()).add(root.root_key)
-    missing_keys = {
-        (item["source_id"], item["root_key"])
-        for item in cast(list[dict[str, str]], root_status["missing_roots"])
-    }
-    invalid_keys = {
-        (item["source_id"], item["root_key"])
-        for item in cast(list[dict[str, str]], root_status["invalid_roots"])
-    }
     configuration["matches_settings_configuration_path"] = (
         registry.config_path == Path(settings.sources_config_path).expanduser().resolve()
         if registry.config_path is not None
@@ -186,10 +178,6 @@ def _build_status(
             reason = "remote_location_not_verified"
         elif root_key not in roots_by_alias.get(alias, set()):
             reason = "root_not_registered"
-        elif (alias, root_key) in missing_keys:
-            reason = "configured_root_missing"
-        elif (alias, root_key) in invalid_keys:
-            reason = "configured_root_invalid"
         else:
             registered_local += count
         if enabled and active and availability == "available":
@@ -283,14 +271,8 @@ def _build_status(
                 "enabled": source.enabled,
                 "registered": source.alias in roots_by_alias,
                 "configured_root_count": len(roots_by_alias.get(source.alias, set())),
-                "missing_root_keys": sorted(
-                    key for alias, key in missing_keys if alias == source.alias
-                ),
-                "invalid_root_keys": sorted(
-                    key for alias, key in invalid_keys if alias == source.alias
-                ),
                 "representation_count": source_rep_counts[source.alias],
-                "verification": "ledger_and_root_stat_only",
+                "verification": "ledger_and_root_registration_only",
             }
         )
     # The default status describes the whole index ledger, including historical
@@ -413,7 +395,8 @@ def _build_status(
                 else "other",
                 "index_name": name,
                 "entity_type": entity_type,
-                "serving_enabled": name != "code" or settings.search_code_index_enabled,
+                "serving_enabled": name != "documents"
+                and (name != "code" or settings.search_code_index_enabled),
                 "state_counts": {},
                 "distinct_entities_by_state": {},
                 "verification": "ledger_only",
@@ -444,22 +427,15 @@ def _build_status(
         "sources": sources,
         "configured_sources_not_in_database": sorted(roots_by_alias.keys() - database_aliases),
         "source_roots": {
-            key: root_status[key]
-            for key in (
-                "configured",
-                "existing",
-                "missing",
-                "actionable_missing",
-                "ignored_missing",
-            )
+            key: root_status[key] for key in ("configured", "verification", "source_files_verified")
         },
         "representations": {
             "by_type": list(rep_types.values()),
             "active_count": active_representations,
             "ledger_available_count": ledger_available,
-            "representations_with_existing_registered_root": registered_local,
+            "representations_with_registered_root": registered_local,
             "unavailable_or_unverified_reasons": dict(sorted(unavailable.items())),
-            "verification": "ledger_and_root_stat_only",
+            "verification": "ledger_and_root_registration_only",
             "source_files_verified": False,
         },
         "extraction": {

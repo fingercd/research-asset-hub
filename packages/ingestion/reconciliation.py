@@ -12,6 +12,7 @@ from typing import Any, TypeAlias
 
 import yaml
 
+from packages.domain.identifier_policy import RejectedIdentityKeys
 from packages.domain.schemas import NormalizedRecord
 
 _PUNCTUATION = re.compile(r"[^\w]+", re.UNICODE)
@@ -63,11 +64,26 @@ def canonical_identifier(scheme: str, value: str) -> str:
     return f"{normalized_scheme}:{normalized_value}"
 
 
-def record_identity_keys(record: NormalizedRecord) -> dict[str, list[str]]:
+def record_identity_keys(
+    record: NormalizedRecord,
+    *,
+    rejected_keys: RejectedIdentityKeys = frozenset(),
+) -> dict[str, list[str]]:
     strong: list[str] = []
     for identifier in record.asset.external_identifiers:
         scheme = str(identifier.scheme)
-        if scheme.casefold() in {"doi", "arxiv", "arxiv-id"}:
+        rejected_key = (
+            record.source_id,
+            record.source_record_id,
+            scheme,
+            identifier.scope,
+            identifier.canonical,
+        )
+        if (
+            identifier.is_identity
+            and rejected_key not in rejected_keys
+            and scheme.casefold() in {"doi", "arxiv", "arxiv-id"}
+        ):
             strong.append(canonical_identifier(scheme, identifier.value))
 
     weak: list[str] = []
@@ -318,7 +334,11 @@ def apply_weak_merge_approvals(
     }
 
 
-def reconcile_records(records: Iterable[NormalizedRecord]) -> dict[str, Any]:
+def reconcile_records(
+    records: Iterable[NormalizedRecord],
+    *,
+    rejected_keys: RejectedIdentityKeys = frozenset(),
+) -> dict[str, Any]:
     strong_index: dict[str, list[RecordLocator]] = defaultdict(list)
     weak_index: dict[str, list[RecordLocator]] = defaultdict(list)
     source_keys: set[str] = set()
@@ -333,7 +353,7 @@ def reconcile_records(records: Iterable[NormalizedRecord]) -> dict[str, Any]:
             duplicate_source_keys.append(locator.key)
         source_keys.add(locator.key)
         fingerprints[locator.key] = record_fingerprint(record)
-        keys = record_identity_keys(record)
+        keys = record_identity_keys(record, rejected_keys=rejected_keys)
         for key in keys["strong"]:
             strong_index[key].append(locator)
         for key in keys["weak"]:

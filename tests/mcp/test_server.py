@@ -75,6 +75,8 @@ async def test_exactly_seven_tools_have_read_only_annotations_and_bounds() -> No
         assert tool.annotations.openWorldHint is False
     search = next(tool for tool in tools if tool.name == "search_assets")
     assert search.inputSchema["properties"]["limit"]["maximum"] == 20
+    assert search.inputSchema["properties"]["offset"]["minimum"] == 0
+    assert search.inputSchema["properties"]["offset"]["default"] == 0
     assert search.inputSchema["properties"]["asset_type"]["anyOf"][0]["enum"] == [
         "paper",
         "repository",
@@ -114,7 +116,17 @@ async def test_search_serializes_keywords_constraints_and_domain_alias() -> None
         assert request.url.params["domain"] == "形式化数学"
         assert request.url.params.get_list("keywords") == ["Lean", "theorem proving"]
         assert request.url.params.get_list("constraints") == ["无需重新训练", "not distillation"]
-        return httpx.Response(200, json={"items": [], "query_plan": {"mode": "literal_keywords"}})
+        assert request.url.params["offset"] == "20"
+        return httpx.Response(
+            200,
+            json={
+                "items": [],
+                "query_plan": {"mode": "literal_keywords"},
+                "total": 31,
+                "has_more": True,
+                "next_offset": 30,
+            },
+        )
 
     result = await invoke(
         server_for(handler),
@@ -124,9 +136,13 @@ async def test_search_serializes_keywords_constraints_and_domain_alias() -> None
             "domain": "形式化数学",
             "keywords": ["Lean", "theorem proving"],
             "constraints": ["无需重新训练", "not distillation"],
+            "offset": 20,
         },
     )
     assert result["query_plan"]["mode"] == "literal_keywords"
+    assert result["total"] == 31
+    assert result["has_more"] is True
+    assert result["next_offset"] == 30
 
 
 async def test_library_status_passes_optional_domain() -> None:
@@ -179,6 +195,7 @@ async def test_search_derived_assets_uses_the_same_knowledge_route(asset_type: s
         ("search_assets", {"query": "x", "keywords": ["x"] * 9}),
         ("search_assets", {"query": "x", "constraints": ["x"] * 7}),
         ("search_assets", {"query": "x", "keywords": ["x" * 81]}),
+        ("search_assets", {"query": "x", "offset": -1}),
     ],
 )
 async def test_invalid_arguments_fail_before_http(tool: str, arguments: dict[str, Any]) -> None:
@@ -435,7 +452,7 @@ async def test_http_errors_are_explicit_and_never_expose_body(status: int) -> No
 @pytest.mark.parametrize(
     "exception, text",
     [
-        (httpx.ConnectError("connection refused"), "Start Hub yourself"),
+        (httpx.ConnectError("connection refused"), "Cannot reach the configured local Hub API"),
         (httpx.ReadTimeout("read timeout"), "timed out"),
     ],
 )

@@ -597,7 +597,8 @@ def _load_assets(
     if all_asset_ids:
         identifiers = session.scalars(
             select(ExternalIdentifierModel).where(
-                ExternalIdentifierModel.asset_id.in_(all_asset_ids)
+                ExternalIdentifierModel.asset_id.in_(all_asset_ids),
+                ExternalIdentifierModel.is_identity.is_(True),
             )
         )
         for identifier in identifiers:

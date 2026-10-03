@@ -43,8 +43,8 @@ def test_runtime_close_closes_suite_once() -> None:
 @pytest.mark.parametrize(
     ("code_enabled", "expected"),
     [
-        (False, ("assets", "documents", "annotations")),
-        (True, ("assets", "documents", "code", "annotations")),
+        (False, ("assets", "annotations")),
+        (True, ("assets", "annotations", "code")),
     ],
 )
 def test_runtime_selects_configured_keyword_indexes(

@@ -12,7 +12,6 @@ from pydantic import Field
 from sqlalchemy import select
 
 from apps.api import routes_v1 as _v1
-from apps.api.config import PROJECT_ROOT
 from apps.api.problem import ApiProblem
 from apps.asset_gateway.registry import SourceConfigurationError
 from packages.domain.serving_scope import RetiredRepresentationError
@@ -33,10 +32,9 @@ def _service(request: Request) -> Iterator[KnowledgeService]:
             yield KnowledgeService(
                 session,
                 registry,
-                PROJECT_ROOT / "outputs" / "knowledge-pilot" / "v1",
+                _v1._settings(request).host_workspace_root / "outputs" / "knowledge-pilot" / "v1",
                 asset_loader=_v1._live_asset,
                 hidden_asset=_v1._is_system_hidden_asset,
-                keyword_search=lambda: _v1._search_runtime(request).service,
                 taxonomy_path=_v1._settings(request).taxonomy_config_path,
             )
     except SourceConfigurationError as error:
@@ -68,6 +66,7 @@ def search_assets(
     limit: int = Query(default=20, ge=1, le=20),
     keywords: Annotated[list[KeywordTerm] | None, Query(max_length=8)] = None,
     constraints: Annotated[list[QueryConstraint] | None, Query(max_length=6)] = None,
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     if asset_type in {"figure", "writing_pattern", "code_pattern"}:
         from .knowledge_derivatives import search_derivatives
@@ -81,6 +80,7 @@ def search_assets(
             limit,
             keywords=keywords or (),
             constraints=constraints or (),
+            offset=offset,
         )
     with _service(request) as service:
         return service.search_assets(
@@ -91,6 +91,7 @@ def search_assets(
             limit=limit,
             keywords=keywords or (),
             constraints=constraints or (),
+            offset=offset,
         )
 
 

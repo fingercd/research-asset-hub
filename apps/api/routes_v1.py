@@ -194,10 +194,9 @@ def _retired_representation_problem(
     return ApiProblem(
         410,
         "表示层已退出服务",
-        "The requested representation belongs to a retired source and is retained "
-        "only as audit provenance.",
-        problem_type="urn:research-asset-hub:problem:representation-retired",
-        code="representation_retired",
+        error.detail,
+        problem_type=f"urn:research-asset-hub:problem:{error.code.replace('_', '-')}",
+        code=error.code,
         headers=headers,
         errors=[
             {
@@ -1438,6 +1437,7 @@ def _live_override(
     }
     if (
         item is None
+        or item.entity_type != "asset"
         or not is_override
         or (item.resolution_kind == FieldResolutionKind.CLEARED.value and not include_deleted)
     ):

@@ -238,6 +238,7 @@ def status_library(tmp_path):
                 ("math", "source"): tmp_path,
                 ("new-config-only", "source"): tmp_path,
                 ("disabled", "source"): tmp_path,
+                ("math", "historical-pdf"): tmp_path / "removed-historical-root",
             }
         )
         yield session, registry, tmp_path / "cache", settings, engine
@@ -272,7 +273,15 @@ def test_status_reports_actual_domains_partial_extraction_and_separate_index_ver
     assert asset_index["distinct_entities_by_state"]["ready"] == 1
     assert {item["version_role"] for item in states} == {"formal", "legacy"}
     assert result["keyword_index"]["remote_service_verified"] is False
+    assert all(item["serving_enabled"] is (item["index_name"] == "assets") for item in states)
     assert result["representations"]["source_files_verified"] is False
+    assert result["representations"]["verification"] == "ledger_and_root_registration_only"
+    assert result["representations"]["representations_with_registered_root"] == 1
+    assert result["source_roots"] == {
+        "configured": 4,
+        "verification": "registration_only",
+        "source_files_verified": False,
+    }
     assert result["representations"]["unavailable_or_unverified_reasons"] == {
         "remote_location_not_verified": 1,
         "representation_missing": 1,

@@ -694,3 +694,43 @@ def test_unknown_domain_is_an_explicit_query_error(derivative_library):
         routes.get_methodology(_request(), kind="code", domain="不存在的领域", q="", limit=20)
     assert error.value.status == 422
     assert error.value.code == "invalid_query"
+
+
+@pytest.mark.parametrize("asset_type", ["figure", "code_pattern"])
+def test_derivative_search_pages_all_verified_candidates_stably(derivative_library, asset_type):
+    library = derivative_library
+    if asset_type == "figure":
+        _figures(library)
+        path = library["cache"] / str(library["paper"].id) / "figures.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        base = manifest["figures"][0]
+        identifiers = [f"{library['paper'].id}-fig-{n}" for n in range(5)]
+        manifest["figures"] = [{**base, "figure_id": key} for key in reversed(identifiers)]
+        _write_json(path, manifest)
+        id_field = "figure_id"
+    else:
+        identifiers = [f"code-pattern-{n}" for n in range(5)]
+        _methodology(library, [{**_card(library), "id": key} for key in reversed(identifiers)])
+        id_field = "id"
+    found = []
+    offset = 0
+    while True:
+        result = routes.search_derivatives(
+            _request(), "", "agent", asset_type, None, 2, offset=offset
+        )
+        assert result["total"] == 5
+        assert result["offset"] == offset
+        found.extend(item[id_field] for item in result["items"])
+        if not result["has_more"]:
+            assert result["next_offset"] is None
+            break
+        assert result["next_offset"] == offset + 2
+        offset = result["next_offset"]
+    assert found == identifiers
+    beyond = routes.search_derivatives(
+        _request(), "", "agent", asset_type, None, 2, offset=5
+    )
+    assert beyond["items"] == []
+    assert beyond["total"] == 5
+    assert beyond["has_more"] is False
+    assert beyond["next_offset"] is None

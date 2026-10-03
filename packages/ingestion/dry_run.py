@@ -10,6 +10,7 @@ from typing import Any
 from apps.asset_gateway.registry import SourceRegistry
 from packages.adapters import DEFAULT_REGISTRY
 from packages.cli.config import PROJECT_ROOT, LoadedSource, unregistered_source_domains
+from packages.domain.identifier_policy import RejectedIdentityKeys
 from packages.domain.path_exclusions import OperationalPathExclusions
 from packages.domain.schemas import AdapterWarning, NormalizedRecord, SourceConfig
 
@@ -160,6 +161,7 @@ def run_dry_run(
     known_domain_slugs: set[str] | None = None,
     retired_source_contracts: dict[str, dict[str, Any]] | None = None,
     operational_registry: SourceRegistry | None = None,
+    rejected_identity_keys: RejectedIdentityKeys = frozenset(),
 ) -> dict[str, Any]:
     DEFAULT_REGISTRY.discover_entry_points()
     all_records: list[NormalizedRecord] = []
@@ -323,7 +325,9 @@ def run_dry_run(
                 }
             )
 
-    reconciliation = apply_weak_merge_approvals(reconcile_records(all_records))
+    reconciliation = apply_weak_merge_approvals(
+        reconcile_records(all_records, rejected_keys=rejected_identity_keys)
+    )
     expected_total = sum(
         source.expected_records or 0
         for source in sources

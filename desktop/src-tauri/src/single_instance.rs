@@ -3,7 +3,7 @@
 //! 为什么不依赖 tauri-plugin-single-instance:实测插件拦截发生在 setup 之后,
 //! 第二个实例的编排器已经跑完预检(把已有实例的后台服务当"残留"清理、弹报错)
 //! 才被退出。互斥体在 run() 第一行、任何 Builder/setup 之前生效,第二个实例
-//! 只做一件事:唤起已有窗口,立即退出,绝不触碰编排器。
+//! 按正常/后台启动参数决定是否唤起已有窗口,立即退出,绝不触碰编排器。
 
 use std::sync::OnceLock;
 
@@ -16,8 +16,8 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// 返回 true = 本实例是主实例(互斥体归我);false = 已有实例在运行,
-/// 已尝试唤起其窗口,调用方应立即退出且不得启动任何编排逻辑。
-pub fn acquire() -> bool {
+/// show_existing 为 true 时尝试唤起其窗口,调用方应立即退出且不得启动编排逻辑。
+pub fn acquire(show_existing: bool) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
@@ -30,7 +30,9 @@ pub fn acquire() -> bool {
         };
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(handle);
-            show_existing_window();
+            if show_existing {
+                show_existing_window();
+            }
             return false;
         }
         let _ = MUTEX_HANDLE.set(handle.0 as isize);

@@ -25,6 +25,7 @@ dependencies = [
   "tree-sitter-language-pack>=1.6,<2",
   "uvicorn[standard]>=0.34,<1",
   "mcp>=1.28,<2",
+  "pywin32>=311; sys_platform == 'win32'",
   "pymupdf>=1.26,<2",
 ]
 

@@ -10,11 +10,13 @@ from . import (  # noqa: F401
     backups,
     comparisons,
     domains,
+    identifier_identity,
     integrations,
     knowledge,
     knowledge_derivatives,
     ops,
     overrides,
     relations,
+    representation_serving,
     settings,
 )

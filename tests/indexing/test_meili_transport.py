@@ -5,7 +5,30 @@ import json
 import httpx
 import pytest
 
-from packages.indexing.meili import HttpxJSONTransport
+from packages.indexing.meili import HttpxJSONTransport, MeilisearchAdmin
+
+
+def test_assets_settings_keep_exact_identifiers_out_of_ordinary_recall() -> None:
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"uid": "assets"})
+        assert request.method == "PATCH"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={})
+
+    transport = HttpxJSONTransport("http://meili.test")
+    transport.client.close()
+    transport.client = httpx.Client(
+        base_url="http://meili.test", transport=httpx.MockTransport(handler)
+    )
+    try:
+        MeilisearchAdmin(transport).ensure_index("assets")
+    finally:
+        transport.close()
+    assert captured[0]["searchableAttributes"] == ["title", "text"]
+    assert "exact_terms" in captured[0]["filterableAttributes"]
 
 
 def test_transport_batches_then_verifies_queued_tasks() -> None:

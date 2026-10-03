@@ -1,7 +1,8 @@
-"""Bounded HTTP reads; no database, source filesystem, or process access."""
+"""Bounded HTTP reads with lazy recovery of the shared desktop backend."""
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import os
@@ -11,7 +12,8 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from mcp.server.fastmcp.exceptions import ToolError
 
-DEFAULT_API_URL = "http://127.0.0.1:8877/api/v1"
+from apps.mcp_server.backend import DEFAULT_API_URL, SharedBackend
+
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
@@ -55,12 +57,38 @@ class HubClient:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.base_url = local_api_url(
+        requested_url = (
             base_url if base_url is not None else os.getenv("HUB_MCP_API_URL", DEFAULT_API_URL)
         )
+        self.base_url = local_api_url(requested_url)
         self.transport = transport
+        # Custom local APIs are explicitly managed by their caller. Test transports
+        # never launch a process; constructing the default client is also inert.
+        self.backend = (
+            SharedBackend(self.base_url)
+            if transport is None and requested_url.rstrip("/") == DEFAULT_API_URL
+            else None
+        )
 
     async def _read(
+        self, path: str, params: dict[str, Any] | None, *, max_bytes: int
+    ) -> tuple[bytes, str]:
+        try:
+            return await self._read_once(path, params, max_bytes=max_bytes)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as error:
+            if self.backend is None:
+                raise ToolError(
+                    "Cannot reach the configured local Hub API; check HUB_MCP_API_URL."
+                ) from error
+            await asyncio.to_thread(self.backend.ensure_ready)
+            try:
+                return await self._read_once(path, params, max_bytes=max_bytes)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as retry_error:
+                raise ToolError(
+                    "The shared Hub API became unavailable after startup; retry the tool."
+                ) from retry_error
+
+    async def _read_once(
         self, path: str, params: dict[str, Any] | None, *, max_bytes: int
     ) -> tuple[bytes, str]:
         # Paths come exclusively from fixed tool routes, never from API-returned URLs.
@@ -94,13 +122,15 @@ class HubClient:
                                 "Hub response exceeds the allowed size; narrow the request."
                             )
                     return bytes(payload), response.headers.get("content-type", "").split(";")[0]
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                raise
             except httpx.TimeoutException as error:
                 raise ToolError(
                     "Hub read timed out (connect 3s/read 20s); check library_status."
                 ) from error
             except httpx.HTTPError as error:
                 raise ToolError(
-                    "Cannot reach the local Hub API. Start Hub yourself and check HUB_MCP_API_URL."
+                    "Local Hub HTTP read failed; check the shared backend and HUB_MCP_API_URL."
                 ) from error
 
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

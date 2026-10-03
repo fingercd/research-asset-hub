@@ -1,26 +1,32 @@
-"""Serving-scope rules for representations owned by retired sources.
+"""Central serving rules for source retirement and audited representation exclusions.
 
 Source retirement is an immutable provenance event.  It must not soft-delete or
 rewrite the historical source/representation rows, but an active (not rolled
 back) retirement removes those representations from every user-facing serving
 surface.  Keeping the rule here prevents the API and asset gateway from
 silently disagreeing about what is active.
+Representation exclusions live independently in FieldResolution, so importing
+the same frozen source cannot reactivate an excluded representation.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import Select, exists, or_, select
+from sqlalchemy import Select, and_, exists, or_, select
 from sqlalchemy.orm import Session
 
 from packages.domain.models import (
+    FieldResolution,
     Representation,
     SourceRetirement,
     SourceRetirementRepresentationMap,
     SourceRetirementRollback,
 )
+
+SERVING_FIELD_PATH = "/serving"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,15 +36,39 @@ class RepresentationServingStatus:
     active: bool
     retirement_id: UUID | None = None
     successor_representation_id: UUID | None = None
+    exclusion_id: UUID | None = None
 
 
 class RetiredRepresentationError(LookupError):
-    """Raised when a direct serving endpoint targets a retired representation."""
+    """Compatibility error for direct access to retired or excluded representations."""
 
     def __init__(self, status: RepresentationServingStatus) -> None:
-        super().__init__("The representation belongs to a retired source.")
+        self.code = "representation_excluded" if status.exclusion_id else "representation_retired"
+        self.detail = (
+            "The requested representation is excluded from serving by an audited decision "
+            "and is retained only as provenance."
+            if status.exclusion_id
+            else "The requested representation belongs to a retired source and is retained "
+            "only as audit provenance."
+        )
+        super().__init__(
+            self.detail
+            if status.exclusion_id
+            else "The representation belongs to a retired source."
+        )
         self.retirement_id = status.retirement_id
         self.successor_representation_id = status.successor_representation_id
+        self.exclusion_id = status.exclusion_id
+
+
+def serving_resolution(session: Session, representation_id: UUID) -> FieldResolution | None:
+    return session.scalar(
+        select(FieldResolution).where(
+            FieldResolution.entity_type == "representation",
+            FieldResolution.entity_id == representation_id,
+            FieldResolution.field_path == SERVING_FIELD_PATH,
+        )
+    )
 
 
 def active_source_clause(source_id_column: Any) -> Any:
@@ -60,7 +90,16 @@ def active_source_clause(source_id_column: Any) -> Any:
 def active_representation_clause() -> Any:
     """Return the canonical SQL predicate for actively served representations."""
 
-    return active_source_clause(Representation.source_id)
+    excluded = exists(
+        select(FieldResolution.id).where(
+            FieldResolution.entity_type == "representation",
+            FieldResolution.entity_id == Representation.id,
+            FieldResolution.field_path == SERVING_FIELD_PATH,
+            FieldResolution.resolution_kind == "override",
+            FieldResolution.override_value["excluded"].as_boolean().is_(True),
+        )
+    )
+    return and_(active_source_clause(Representation.source_id), ~excluded)
 
 
 def apply_active_representation_scope(statement: Select[Any]) -> Select[Any]:
@@ -74,9 +113,6 @@ def representation_serving_status(
     representation: Representation,
 ) -> RepresentationServingStatus:
     """Resolve active/retired state and a mapped successor without exposing paths."""
-
-    if representation.source_id is None:
-        return RepresentationServingStatus(active=True)
 
     retirement_id = session.scalar(
         select(SourceRetirement.id)
@@ -92,14 +128,23 @@ def representation_serving_status(
         .limit(1)
     )
     if retirement_id is None:
+        control = serving_resolution(session, representation.id)
+        if control is not None and control.resolution_kind == "override":
+            value = cast(dict[str, Any], control.override_value)
+            if value["excluded"]:
+                successor = value.get("successor_representation_id")
+                return RepresentationServingStatus(
+                    active=False,
+                    exclusion_id=control.id,
+                    successor_representation_id=UUID(successor) if successor else None,
+                )
         return RepresentationServingStatus(active=True)
 
     successor_id = session.scalar(
         select(SourceRetirementRepresentationMap.successor_representation_id)
         .where(
             SourceRetirementRepresentationMap.retirement_id == retirement_id,
-            SourceRetirementRepresentationMap.retired_representation_id
-            == representation.id,
+            SourceRetirementRepresentationMap.retired_representation_id == representation.id,
         )
         .limit(1)
     )
@@ -114,7 +159,7 @@ def assert_representation_active(
     session: Session,
     representation: Representation,
 ) -> None:
-    """Reject direct access when the representation's source is actively retired."""
+    """Reject direct access to retired or explicitly excluded representations."""
 
     status = representation_serving_status(session, representation)
     if not status.active:
@@ -169,8 +214,7 @@ def retired_source_ids(session: Session, source_ids: set[UUID]) -> set[UUID]:
                 SourceRetirement.source_id.in_(source_ids),
                 ~exists(
                     select(SourceRetirementRollback.id).where(
-                        SourceRetirementRollback.retirement_id
-                        == SourceRetirement.id,
+                        SourceRetirementRollback.retirement_id == SourceRetirement.id,
                     )
                 ),
             )

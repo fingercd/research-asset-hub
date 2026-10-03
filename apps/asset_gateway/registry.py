@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -210,66 +209,15 @@ class SourceRegistry:
         ]
 
     def root_status(self) -> dict[str, object]:
-        """Return a small diagnostic summary without probing any source contents."""
+        """Describe registration only; historical roots do not measure live availability."""
         self.refresh_if_changed()
         snapshot = self._snapshot
-        configured = [
-            SourceRoot(source_id, root_key, path)
-            for (source_id, root_key), path in sorted(snapshot.roots.items())
-        ]
-        missing: list[SourceRoot] = []
-        invalid: list[dict[str, str]] = []
-        for item in configured:
-            reason = None
-            try:
-                if not stat.S_ISDIR(item.path.stat().st_mode):
-                    reason = "not_directory"
-            except FileNotFoundError:
-                missing.append(item)
-            except OSError as error:
-                reason = type(error).__name__
-            if reason:
-                invalid.append(
-                    {
-                        "source_id": item.source_id,
-                        "root_key": item.root_key,
-                        "path": str(item.path),
-                        "reason": reason,
-                    }
-                )
-        ignored = []
-        applied: set[str] = set()
-        for item in missing:
-            rule = snapshot.exclusions.active_root(item.source_id, item.root_key, snapshot.roots)
-            if rule is not None:
-                applied.add(rule.id)
-                ignored.append(
-                    {
-                        "source_id": item.source_id,
-                        "root_key": item.root_key,
-                        "path": str(item.path),
-                        "rule_id": rule.id,
-                        "reason": rule.reason,
-                    }
-                )
         return {
             "workspace_root": (
                 str(snapshot.workspace_root) if snapshot.workspace_root is not None else None
             ),
-            "configured": len(configured),
-            "existing": len(configured) - len(missing) - len(invalid),
-            "missing": len(missing),
-            "ignored_missing": len(ignored),
-            "actionable_missing": len(missing) - len(ignored),
-            "invalid_roots": invalid,
-            "ignored_missing_roots": ignored,
-            "operational_exclusions": snapshot.exclusions.summary(applied),
-            "missing_roots": [
-                {
-                    "source_id": item.source_id,
-                    "root_key": item.root_key,
-                    "path": str(item.path),
-                }
-                for item in missing
-            ],
+            "configured": len(snapshot.roots),
+            "verification": "registration_only",
+            "source_files_verified": False,
+            "operational_exclusions": snapshot.exclusions.summary(),
         }

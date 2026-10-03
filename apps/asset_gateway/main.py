@@ -476,12 +476,7 @@ def create_app(
         readiness = database_manager.check(force=True)
         secret_ready = len(app_settings.gateway_secret) >= 32
         root_status = source_registry.root_status()
-        roots_ready = root_status["actionable_missing"] == 0 and not root_status["invalid_roots"]
-        status = (
-            "healthy"
-            if readiness.status == "ready" and secret_ready and roots_ready
-            else "degraded"
-        )
+        status = "healthy" if readiness.status == "ready" and secret_ready else "degraded"
         return {
             "service": "research-asset-hub-asset-gateway",
             "status": status,
@@ -536,11 +531,10 @@ def create_app(
             return _problem(
                 410,
                 "表示层已退出服务",
-                "The requested representation belongs to a retired source and is "
-                "retained only as audit provenance.",
+                error.detail,
                 request.url.path,
                 extra={
-                    "code": "representation_retired",
+                    "code": error.code,
                     "successor_representation_id": (
                         str(error.successor_representation_id)
                         if error.successor_representation_id is not None
@@ -665,11 +659,10 @@ def create_app(
             return _problem(
                 410,
                 "表示层已退出服务",
-                "The requested representation belongs to a retired source and is "
-                "retained only as audit provenance.",
+                error.detail,
                 request.url.path,
                 extra={
-                    "code": "representation_retired",
+                    "code": error.code,
                     "successor_representation_id": (
                         str(error.successor_representation_id)
                         if error.successor_representation_id is not None
