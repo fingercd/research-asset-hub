@@ -15,6 +15,7 @@ from packages.domain.models import (
     BackupRun,
     Base,
     DocumentChunk,
+    FieldResolution,
     IndexState,
     Job,
     Representation,
@@ -318,6 +319,26 @@ def test_status_uses_bounded_queries_and_never_selects_chunk_bodies(status_libra
         not statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
         for statement in statements
     )
+
+
+def test_status_keeps_excluded_pdf_in_ledger_but_removes_its_active_coverage(status_library):
+    session, registry, cache_root, settings, _ = status_library
+    pdf = session.scalar(select(Representation).where(Representation.representation_type == "pdf"))
+    session.add(
+        FieldResolution(
+            entity_type="representation",
+            entity_id=pdf.id,
+            field_path="/serving",
+            resolution_kind="override",
+            override_value={"excluded": True, "reason": "wrong original PDF"},
+        )
+    )
+    session.commit()
+    result = build_knowledge_status(session, registry, cache_root, settings, domain="ai-for-math")
+    assert result["counts"]["representations"] == 4
+    assert result["document_chunks"] == 0
+    assert result["extraction"]["representations_with_chunks"] == 0
+    assert result["representations"]["representations_with_registered_root"] == 0
 
 
 @pytest.mark.parametrize("inactive_source", ["disabled", "retired"])

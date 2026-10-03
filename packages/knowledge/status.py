@@ -128,29 +128,40 @@ def _build_status(
             )
         ).all()
     }
-    rep_rows = session.execute(
+    # Resolve serving per representation before aggregation. PostgreSQL rejects
+    # correlated serving predicates in GROUP BY because they read ungrouped IDs.
+    ledger = (
         select(
-            Source.alias,
-            Source.enabled,
-            Representation.root_key,
-            Representation.representation_type,
-            Representation.availability,
-            Representation.path_ref.is_not(None),
-            active_representation_clause(),
-            func.count(Representation.id),
-            func.count(func.distinct(Representation.asset_id)),
+            Source.alias.label("alias"),
+            Source.enabled.label("enabled"),
+            Representation.root_key.label("root_key"),
+            Representation.representation_type.label("representation_type"),
+            Representation.availability.label("availability"),
+            Representation.path_ref.is_not(None).label("local"),
+            active_representation_clause().label("active"),
+            Representation.id.label("id"),
+            Representation.asset_id.label("asset_id"),
         )
         .outerjoin(Source, Source.id == Representation.source_id)
         .where(Representation.id.in_(rep_scope))
-        .group_by(
-            Source.alias,
-            Source.enabled,
-            Representation.root_key,
-            Representation.representation_type,
-            Representation.availability,
-            Representation.path_ref.is_not(None),
-            active_representation_clause(),
+        .subquery()
+    )
+    ledger_columns = (
+        ledger.c.alias,
+        ledger.c.enabled,
+        ledger.c.root_key,
+        ledger.c.representation_type,
+        ledger.c.availability,
+        ledger.c.local,
+        ledger.c.active,
+    )
+    rep_rows = session.execute(
+        select(
+            *ledger_columns,
+            func.count(ledger.c.id),
+            func.count(func.distinct(ledger.c.asset_id)),
         )
+        .group_by(*ledger_columns)
     ).all()
     rep_types: dict[str, dict[str, Any]] = {}
     source_rep_counts: Counter[str] = Counter()
