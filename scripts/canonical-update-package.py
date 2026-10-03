@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
+from packaging.utils import NormalizedName, canonicalize_name
 
 INSTALL = Path("C:/Program Files/ResearchAssetHub")
 RELEASE_HASH = "83fad1540b935b2de09e3bc432e90f4c1742fc4a7c779e9db39fc934264be504"
@@ -68,7 +68,7 @@ def main() -> None:
         for item in requirements
         if canonicalize_name(Requirement(item).name) not in workspace_only
     ]
-    closure: dict[str, set[str]] = {}
+    closure: dict[NormalizedName, set[str]] = {}
     while queue:
         requirement = queue.pop()
         name = canonicalize_name(requirement.name)
@@ -143,7 +143,7 @@ def main() -> None:
             if ".." in record.parts or "__pycache__" in record.parts or record.suffix == ".pyc":
                 skipped_record_paths.append({"distribution": name, "path": str(record)})
                 continue
-            source = Path(dist.locate_file(record)).resolve()
+            source = Path(str(dist.locate_file(record))).resolve()
             if not source.is_relative_to(source_site.resolve()):
                 raise SystemExit(f"Dependency path escapes site-packages: {source}")
             if not source.is_file():
@@ -173,7 +173,7 @@ def main() -> None:
         "installed_python": installed["python"],
         "source_python": sys.version,
         "compiled_python_files": compiled,
-        "files": sorted(files.values(), key=lambda item: item["path"]),
+        "files": sorted(files.values(), key=lambda item: str(item["path"])),
         "protected_config": protected,
         "dependency_closure": dependency_report,
         "excluded_direct_dependencies": [

@@ -115,10 +115,12 @@ def root_paths(registry):
 # the requested override.
 os.environ.pop("HUB_HOST_WORKSPACE_ROOT", None)
 reference = SourceRegistry.load(project_root / "config" / "sources.yaml")
+# Capture the reference before switching the environment: describe() hot-refreshes
+# when HUB_HOST_WORKSPACE_ROOT changes.
+reference_paths = root_paths(reference)
 os.environ["HUB_HOST_WORKSPACE_ROOT"] = str(workspace_root)
 staged = SourceRegistry.load(app_dir / "config" / "sources.yaml")
 
-reference_paths = root_paths(reference)
 staged_paths = root_paths(staged)
 if staged_paths != reference_paths:
     print("  ERROR SourceWorkspaceRoot changes the registered source-root mapping")
@@ -132,13 +134,9 @@ if staged_paths != reference_paths:
 status = staged.root_status()
 print(
     "  source roots: "
-    f"configured={status['configured']} existing={status['existing']} "
-    f"missing={status['missing']} workspace_root={workspace_root}"
+    f"configured={status['configured']} verification={status['verification']} "
+    f"source_files_verified={status['source_files_verified']} workspace_root={workspace_root}"
 )
-if status["missing"]:
-    print("  WARNING configured source roots currently missing; preserving frozen source mapping")
-    for item in status["missing_roots"][:20]:
-        print(f"  MISSING {item['source_id']}/{item['root_key']}: {item['path']}")
 '@
 & $stagedPython -c $rootValidation $appDir $SourceWorkspaceRoot $projectRoot
 if ($LASTEXITCODE -ne 0) {

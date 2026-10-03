@@ -71,6 +71,21 @@ class DomainSchema(BaseModel):
     )
 
 
+def _validate_postgres_text(value: JsonValue, path: str = "record") -> None:
+    """Reject NUL before serialized adapter metadata reaches PostgreSQL JSONB."""
+
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise ValueError(f"{path} contains NUL, which PostgreSQL cannot store")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _validate_postgres_text(key, f"{path}/<key>")
+            _validate_postgres_text(item, f"{path}/{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_postgres_text(item, f"{path}/{index}")
+
+
 def _validate_slug(value: str, *, label: str) -> str:
     normalized = value.strip().lower()
     if not _SLUG_RE.fullmatch(normalized):
@@ -491,6 +506,11 @@ class NormalizedRecord(DomainSchema):
         validation_alias=AliasChoices("raw", "raw_record"),
     )
     normalized_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _text_is_storable_in_postgres(self) -> NormalizedRecord:
+        _validate_postgres_text(self.model_dump(mode="json"))
+        return self
 
     @field_validator("source_id")
     @classmethod

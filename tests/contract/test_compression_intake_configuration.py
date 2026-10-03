@@ -83,6 +83,44 @@ FROZEN_SOURCE_IDS = {
     "image-editing-anchors-2026-code-urls",
     "image-editing-anchors-2026-pdf-additions",
 }
+EXPECTED_FROZEN_RECORDS = {
+    "agent": 72,
+    "infra": 71,
+    "world_model": 46,
+    "reinforcement_learning": 108,
+    "fine_tuning": 67,
+    "generation": 64,
+    "llm_tech_reports": 90,
+    "vln-atlas-20260726": 72,
+    "game-rl-atlas-20260724": 72,
+    "wsvad-atlas-20260724": 45,
+    "domain-portals-20260726": 10,
+    "intake-awarevln-2026": 1,
+    "intake-streamvln-2026": 1,
+    "intake-internvla-n1-2026": 1,
+    "image-editing-2026": 31,
+    "image-editing-anchors-2026": 2,
+    "image-editing-2026-pdf-additions": 4,
+    "image-editing-2026-code-repos": 14,
+    "image-editing-anchors-2026-code-urls": 2,
+    "image-editing-anchors-2026-pdf-additions": 2,
+}
+BASELINE_PORTAL_IDS = {
+    "agent",
+    "infra",
+    "world-model",
+    "reinforcement-learning",
+    "fine-tuning",
+    "generation",
+    "llm-tech-reports",
+    "vision-language-navigation",
+    "game-rl",
+    "wsvad",
+    "image-editing",
+    "video-llm-compression",
+    "embodied-ai-compression",
+    "navigation-compression",
+}
 
 
 def _configured_sources() -> list[SourceConfig]:
@@ -106,31 +144,32 @@ def test_compression_sources_are_additive_core_local_and_guide_free() -> None:
         | EXPECTED_VLN_AUDIT_SOURCES.keys()
     )
     assert expected_live_ids <= by_id.keys()
-    assert len(sources) == 50
+    assert len(sources) == len(by_id)
+    assert EXPECTED_FROZEN_RECORDS.keys() == FROZEN_SOURCE_IDS
+    assert {
+        source_id: by_id[source_id].expected_records for source_id in FROZEN_SOURCE_IDS
+    } == EXPECTED_FROZEN_RECORDS
+    for source in sources:
+        assert source.read_only is True
     assert sum(by_id[source_id].expected_records or 0 for source_id in expected_live_ids) == 1441
     assert {
-        source_id: by_id[source_id].expected_records
-        for source_id in EXPECTED_NEW_SOURCES
+        source_id: by_id[source_id].expected_records for source_id in EXPECTED_NEW_SOURCES
     } == EXPECTED_NEW_SOURCES
     assert {
-        source_id: by_id[source_id].expected_records
-        for source_id in EXPECTED_SUCCESSOR_SOURCES
+        source_id: by_id[source_id].expected_records for source_id in EXPECTED_SUCCESSOR_SOURCES
     } == EXPECTED_SUCCESSOR_SOURCES
     assert {
         source_id: by_id[source_id].expected_records
         for source_id in EXPECTED_TOP_CONFERENCE_SOURCES
     } == EXPECTED_TOP_CONFERENCE_SOURCES
     assert {
-        source_id: by_id[source_id].expected_records
-        for source_id in EXPECTED_AUXILIARY_SOURCES
+        source_id: by_id[source_id].expected_records for source_id in EXPECTED_AUXILIARY_SOURCES
     } == EXPECTED_AUXILIARY_SOURCES
     assert {
-        source_id: by_id[source_id].expected_records
-        for source_id in EXPECTED_EXISTING_CODE_SOURCES
+        source_id: by_id[source_id].expected_records for source_id in EXPECTED_EXISTING_CODE_SOURCES
     } == EXPECTED_EXISTING_CODE_SOURCES
     assert {
-        source_id: by_id[source_id].expected_records
-        for source_id in EXPECTED_VLN_AUDIT_SOURCES
+        source_id: by_id[source_id].expected_records for source_id in EXPECTED_VLN_AUDIT_SOURCES
     } == EXPECTED_VLN_AUDIT_SOURCES
 
     for source_id in (
@@ -171,9 +210,7 @@ def test_top_conference_sidecars_are_complete_and_do_not_forge_repositories() ->
     sources = _configured_sources()
     by_id = {source.source_id: source for source in sources}
     allowlist = yaml.safe_load(
-        (PROJECT_ROOT / "config" / "check-unit-actions-allowlist.yaml").read_text(
-            encoding="utf-8"
-        )
+        (PROJECT_ROOT / "config" / "check-unit-actions-allowlist.yaml").read_text(encoding="utf-8")
     )
     official_local = 0
     no_local_official_code = 0
@@ -182,9 +219,7 @@ def test_top_conference_sidecars_are_complete_and_do_not_forge_repositories() ->
         source = by_id[source_id]
         domain = source.domain_slugs[0]
         repository_specs = [
-            spec
-            for spec in source.options["representations"]
-            if spec["type"] == "repository"
+            spec for spec in source.options["representations"] if spec["type"] == "repository"
         ]
         assert repository_specs == [
             {
@@ -199,9 +234,7 @@ def test_top_conference_sidecars_are_complete_and_do_not_forge_repositories() ->
                 "network_required": True,
             }
         ]
-        allowed_no_code_titles = set(
-            (allowlist.get(domain) or {}).get("no_code_titles") or []
-        )
+        allowed_no_code_titles = set((allowlist.get(domain) or {}).get("no_code_titles") or [])
         manifest_path = PROJECT_ROOT / source.root_path / source.manifest_path
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
         items = document["items"]
@@ -252,12 +285,14 @@ def test_compression_taxonomy_and_portal_registry_are_complete() -> None:
     assert EXPECTED_NEW_DOMAINS <= domain_ids
 
     portal_index = yaml.safe_load(
-        (
-            PROJECT_ROOT / "config" / "domain-portals" / "v2" / "portal-index.yaml"
-        ).read_text(encoding="utf-8")
+        (PROJECT_ROOT / "config" / "domain-portals" / "v2" / "portal-index.yaml").read_text(
+            encoding="utf-8"
+        )
     )
     portals = {item["slug"]: item for item in portal_index["portals"]}
-    assert len(portals) == 14
+    assert len(portals) == len(portal_index["portals"])
+    assert BASELINE_PORTAL_IDS <= portals.keys()
+    assert portals.keys() <= domain_ids
     assert EXPECTED_NEW_DOMAINS <= portals.keys()
     for slug in EXPECTED_NEW_DOMAINS | {"image-editing"}:
         assert portals[slug]["original_selector"]["source_id"] == SOURCE_ID

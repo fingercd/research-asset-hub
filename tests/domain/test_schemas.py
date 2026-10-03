@@ -177,3 +177,34 @@ def test_raw_source_summary_must_be_json_serializable() -> None:
             asset={"title": "Paper"},
             raw={"unexpected": object()},
         )
+
+
+@pytest.mark.parametrize("field", ["attributes", "raw"])
+def test_normalized_record_rejects_nested_nul_before_database_import(field: str) -> None:
+    asset: dict[str, object] = {"title": "Paper"}
+    record: dict[str, object] = {
+        "source_id": "agent",
+        "source_record_id": "p001",
+        "adapter_name": "generic_manifest",
+        "asset": asset,
+    }
+    evidence = {"evidence": [{"excerpt": "PDF formula\x00artifact"}]}
+    if field == "attributes":
+        asset["attributes"] = evidence
+    else:
+        record["raw"] = evidence
+    with pytest.raises(ValidationError, match="contains NUL"):
+        NormalizedRecord.model_validate(record)
+
+
+def test_normalized_record_preserves_unicode_evidence() -> None:
+    record = NormalizedRecord(
+        source_id="agent",
+        source_record_id="p001",
+        adapter_name="generic_manifest",
+        asset={
+            "title": "论文",
+            "attributes": {"evidence": [{"excerpt": "中文公式：α ≥ β\n第二行"}]},
+        },
+    )
+    assert record.asset.attributes["evidence"] == [{"excerpt": "中文公式：α ≥ β\n第二行"}]

@@ -79,9 +79,12 @@ def test_root_validation_allows_correct_root_with_historical_missing_source(
     result = _validate(_staged_app(tmp_path, project_root), project_root, project_root)
 
     assert result.returncode == 0, result.stderr
-    assert "missing=1" in result.stdout
-    assert "WARNING configured source roots currently missing" in result.stdout
-    assert "MISSING retained-history/pdf" in result.stdout
+    assert "configured=2" in result.stdout
+    assert "verification=registration_only" in result.stdout
+    assert "source_files_verified=False" in result.stdout
+    assert f"workspace_root={project_root}" in result.stdout
+    assert "WARNING configured source roots currently missing" not in result.stdout
+    assert "MISSING retained-history/pdf" not in result.stdout
 
 
 def test_root_validation_rejects_parent_directory_even_when_roots_are_missing(

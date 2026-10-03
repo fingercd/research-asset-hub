@@ -205,7 +205,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         )
         retirement_contracts: dict[str, dict[str, Any]] = {}
         retirement_state_checked = False
-        identity_keys = frozenset()
+        identity_keys: frozenset[tuple[str, str, str, str, str]] = frozenset()
         if configured_database_url:
             engine = create_engine(configured_database_url, pool_pre_ping=True)
             try:
