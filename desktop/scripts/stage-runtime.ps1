@@ -91,7 +91,7 @@ Copy-Item -Path (Join-Path $runtimeVenv 'Lib/site-packages/*') -Destination $tar
 function Copy-CodeTree([string]$Relative) {
     $source = [IO.Path]::GetFullPath((Join-Path $projectRoot $Relative))
     foreach ($file in Get-ChildItem -LiteralPath $source -Recurse -File) {
-        if ($file.Extension -notin @('.py', '.sql', '.mako', '.ini')) { continue }
+        if ($file.Extension -notin @('.py', '.sql', '.mako', '.ini', '.css')) { continue }
         if ($file.FullName -match '[\\/](?:__pycache__|node_modules|\.venv)[\\/]') { continue }
         $suffix = $file.FullName.Substring($source.Length).TrimStart('\', '/')
         $destination = Join-Path (Join-Path $appDir $Relative) $suffix
