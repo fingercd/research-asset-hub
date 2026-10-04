@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import re
 from collections import Counter, defaultdict
@@ -17,7 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-import pymupdf
+import pdfplumber
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
@@ -151,10 +152,10 @@ def supplement_official(
                             "metadata_parser_version": 3,
                         }
                         if url == corrected:
-                            with pymupdf.open(  # type: ignore[no-untyped-call]
-                                stream=response.content, filetype="pdf"
+                            with pdfplumber.open(
+                                io.BytesIO(response.content), pages=[1]
                             ) as pdf:
-                                first = pdf[0].get_text()
+                                first = pdf.pages[0].extract_text() or ""
                             excerpt, reason = extract_abstract(first)
                             source.update(
                                 kind="official_author_pdf_labelled_abstract",
@@ -416,10 +417,10 @@ def collect_candidates(*, pdf_fallback: bool = True) -> dict[str, Any]:
                         if rep.sha256 and current_sha != rep.sha256:
                             reasons.append("pdf_source_hash_changed")
                             continue
-                        with pymupdf.open(path) as pdf:  # type: ignore[no-untyped-call]
+                        with pdfplumber.open(path, pages=[1, 2, 3]) as pdf:
                             # Native page text, at most three pages; no full-paper extraction.
-                            pages_read = min(3, len(pdf))
-                            page_texts = [pdf[index].get_text() for index in range(pages_read)]
+                            pages_read = len(pdf.pages)
+                            page_texts = [page.extract_text() or "" for page in pdf.pages]
                             page_text = "\n".join(page_texts)
                         identity = title_identity(asset.title, page_texts[0])
                         if identity["status"] != "verified":

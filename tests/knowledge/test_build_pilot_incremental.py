@@ -56,7 +56,7 @@ def library(tmp_path):
 
 def test_incremental_build_reuses_chunks_and_preserves_existing_files(library, monkeypatch):
     db, asset, rep, registry, root = library
-    monkeypatch.setattr(builder.pymupdf, "open", lambda *_: pytest.fail("must reuse extraction"))
+    monkeypatch.setattr(builder.pdfplumber, "open", lambda *_: pytest.fail("must reuse extraction"))
     item = {"asset_id": str(asset.id), "group": "math-test"}
     first = builder.build_paper(db, registry, item, root / "derivatives")
     directory = root / "derivatives/v1" / str(asset.id)
@@ -83,6 +83,49 @@ def test_repeated_source_and_asset_scopes_deduplicate(library):
     assert items[0]["source_record_id"] == "math-1"
     with pytest.raises(ValueError, match="Unknown or disabled"):
         builder.scoped_selection(db, ["unknown-source"], [])
+
+
+def test_native_pdf_fallback_uses_pdfplumber_and_preserves_original(library):
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    db, asset, rep, registry, root = library
+    path = root / "paper.pdf"
+    writer = PdfWriter()
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_reference = writer._add_object(font)
+    texts = ["First extraction page.", "Second extraction page."]
+    for text in texts:
+        page = writer.add_blank_page(width=600, height=800)
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_reference})}
+        )
+        content = DecodedStreamObject()
+        content.set_data(f"BT /F1 12 Tf 40 750 Td ({text}) Tj ET".encode("ascii"))
+        page[NameObject("/Contents")] = writer._add_object(content)
+    writer.write(path)
+    db.query(DocumentChunk).delete()
+    rep.sha256 = builder.file_hash(path)
+    db.commit()
+    before = path.read_bytes(), path.stat().st_mtime_ns
+
+    result = builder.build_paper(
+        db, registry, {"asset_id": str(asset.id), "group": "math-test"}, root / "native-derivatives"
+    )
+    document_path = root / "native-derivatives/v1" / str(asset.id) / "document.json"
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    assert result["page_count"] == 2
+    assert document["parser"].startswith("pdfplumber ")
+    assert document["extraction_reused"] is False
+    assert [page["text"] for page in document["pages"]] == texts
+    assert [page["anchor"]["page"] for page in document["pages"]] == [1, 2]
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
 def test_invalid_chunk_hash_cannot_be_rebound_to_live_pdf(library):

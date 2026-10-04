@@ -15,7 +15,7 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --extra dev
       - run: uv run --frozen ruff check apps packages scripts tests
-      - run: uv run --frozen pytest -q
+      - run: uv run --frozen python -m pytest -q
   web:
     runs-on: ubuntu-latest
     steps:

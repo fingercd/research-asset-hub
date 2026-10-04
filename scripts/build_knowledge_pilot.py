@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-import pymupdf
+import pdfplumber
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
@@ -284,9 +284,9 @@ def build_paper(
         pages = extracted["pages"] if extracted else []
         warnings = []
         if extracted is None:
-            with pymupdf.open(path) as document:  # type: ignore[no-untyped-call]
-                for index, page in enumerate(document):
-                    content = page.get_text("text", sort=True)
+            with pdfplumber.open(path) as document:
+                for index, page in enumerate(document.pages):
+                    content = page.extract_text() or ""
                     page_number = index + 1
                     if len(content.strip()) < 80:
                         warnings.append(
@@ -313,7 +313,9 @@ def build_paper(
                 "title": asset.title,
                 "source_hash": digest,
                 "source_locator": ref,
-                "parser": extracted["parser"] if extracted else f"PyMuPDF {pymupdf.VersionBind}",
+                "parser": (
+                    extracted["parser"] if extracted else f"pdfplumber {pdfplumber.__version__}"
+                ),
                 "source_type": "original",
                 "extraction_reused": extracted is not None,
                 "quality_status": "page_text_unreviewed",
