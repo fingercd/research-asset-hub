@@ -205,7 +205,7 @@ def test_compression_sources_are_additive_with_frozen_roots_and_no_guides() -> N
                 assert candidate == CORE_ROOT or CORE_ROOT in candidate.parents
             else:
                 candidate = candidate.resolve()
-            assert adapter.resolve_root(root_key) == candidate
+            assert adapter.path_ref(candidate / "fixture.pdf", root_key=root_key) == "fixture.pdf"
 
 
 def test_top_conference_sidecars_are_complete_and_do_not_forge_repositories() -> None:
