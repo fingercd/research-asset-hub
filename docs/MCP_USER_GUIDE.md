@@ -2,7 +2,25 @@
 
 MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它使用官方 Python SDK 的 FastMCP，经 stdio 通信，再用 HTTP GET 读取本机 Hub API。所有七个工具声明 `readOnlyHint=true`，没有数据库写入、导入、批注或运行源码的工具。默认本机 API 未运行时，首次实际读取会按需唤醒现有桌面程序的共享后台。
 
-## 当前安装与启动
+## 0.2.0-rc.1 候选包接入
+
+候选包包含 `apps/mcp_server` 和官方 Python MCP SDK。在“设置 → Agent 接入”复制当前安装位置与资料库生成的配置，加入支持 stdio MCP 的客户端。配置使用随包 Python、`-m apps.mcp_server` 和明确的 `PYTHONPATH`，可从其他工作目录运行，无需克隆源码或另装 Python。实际路径以软件生成的配置为准。
+
+“测试连接”验证桥接构造和实际数据库读取，验证范围为 `bridge_construction_and_database_read`；它不等同于执行了所有 MCP 协议工具。完整协议验收通过官方客户端执行 `initialize`、`list_tools` 和实际 `call_tool`。
+
+本轮已使用随包 Python，在源码目录之外执行 stdio：七个工具均可列出且声明只读；最小 PDF 入库后，搜索、论文元数据、原文页码、代码行号、方法卡查询和状态读取成功；没有科研图时 `get_figure` 返回明确错误。此前正式库既有图的正向读取记录保留在下文，空库错误检查不代表图抽取质量验收。结果见[候选版交付记录](reports/2026-10-05-product-candidate-delivery.md)。
+
+默认读取复用本机共享桌面后台。资料库路径通过 `--data-dir <绝对路径>` 显式传给桌面程序，避免 Explorer 启动时丢失调用方环境变量。未设置 `HUB_DATA_DIR` 时使用桌面保存的目录选择，再回退到用户 `Documents/ResearchAssetHub`。新 API 会返回资料库目录指纹，桥接发现不一致时明确报错；旧 API 不提供该字段时，桥接不会宣称已经核对过目录。
+
+本机正式安装在本轮保留原程序和原客户端配置。生成候选包不等于已经替换该安装；新包冷唤醒、多客户端生命周期和独立干净 Windows 安装各自的验收状态以交付报告为准。
+
+## 历史正式安装与启动（2026-10-04）
+
+### 2026-10-04 实测范围与分发边界
+
+本轮通过当前聊天连接实际检查了全部七个工具：标题检索与翻页、论文元数据、原文第 1 页及来源哈希、代码目录和 README 第 1–15 行、既有图的 PNG 内容块、已审查写作方法卡、全库及指定领域状态，均得到预期响应。多个本地代码表示存在时，工具先要求明确 `representation_id`，选定后读取成功。候选/Agent 审查状态原样保留。这是共享后台已经运行时的抽样检查；本轮没有重新停止后台测试首次唤醒，也没有在干净机器上安装验证。
+
+当前本机注册使用源码目录中的 `.venv/Scripts/python.exe` 和 `scripts/run_knowledge_mcp.py`。检查时正式安装目录 `C:/Program Files/ResearchAssetHub/app/apps` 没有 `mcp_server`，所以**已验证的是当前本机连接，不是无需源码的安装包连接**。公开发行前应提供随包的稳定 MCP 启动入口和客户端配置模板，并验证自定义安装目录、无源码目录与后台未运行三种情况。详细计划见[产品优化方案](plans/2026-10-04-product-optimization-and-public-release.md)。
 
 本机 Codex 配置中的名称为 **research-assets**。配置默认启用；新建聊天后加载，工具列表没有刷新时可重启 Codex。现有聊天的工具列表不会热加载。
 

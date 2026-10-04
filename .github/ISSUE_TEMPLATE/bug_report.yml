@@ -1,0 +1,34 @@
+name: 错误报告
+description: 报告安装、入库、读取或检索中的实际问题
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本与 Windows 版本
+      placeholder: 例如 0.2.0-rc.1 / Windows 11 x64
+    validations:
+      required: true
+  - type: dropdown
+    id: entry
+    attributes:
+      label: 使用入口
+      options:
+        - Windows 安装包
+        - 源码桌面版
+        - Web
+        - MCP
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 操作步骤与实际结果
+      description: 描述怎样触发、希望发生什么、实际发生什么。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 错误信息或相关日志
+      description: 只附与问题相关的片段，移除密钥、个人路径和私有资料；无需上传论文或数据库。

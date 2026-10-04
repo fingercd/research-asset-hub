@@ -1,10 +1,12 @@
 # 研究资产库·桌面版
 
-Tauri 2 壳:双击即用,无浏览器、无 8765 本地网站。数据在 `Documents\ResearchAssetHub\`,卸载/升级均不触碰(可用环境变量 `HUB_DATA_DIR` 覆盖数据目录)。
+Tauri 2 桌面版使用内置页面和随包运行时，生产环境不依赖 8765 本地网站。默认数据目录为 `Documents\ResearchAssetHub\`，可在设置中选择空目录或已有兼容库；切换后原库保留。显式 `HUB_DATA_DIR` 或 `--data-dir <绝对路径>` 固定目录时，界面显示该限制。
+
+当前为 0.2.0-rc.1 本机候选包。实现、测试、性能和安装验收范围见[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)，公开 Release 尚未发布。独立干净 Windows 安装、升级与卸载验收不能用本机原生运行测试替代。
 
 ## 开发
 
-前置:Node.js 20+(仅用于构建前端；启用 corepack 后即得 pnpm,版本由根目录 `package.json` 的 `packageManager` 固定);Rust 工具链 + tauri-cli(`cargo install tauri-cli --locked`,2.x)。
+前置：Node.js 24、根目录 `package.json` 固定的 pnpm、Rust 工具链和 Tauri 2 CLI。构建器使用的 CLI 版本需要与固定的 NSIS 模板匹配，当前模板来自 2.11.4。
 
 ```powershell
 corepack enable                                  # 一次性:启用 pnpm(或直接 npm i -g pnpm)
@@ -37,8 +39,7 @@ Python 入口直接通过 Windows 原生 API 预填系统版本缓存，省去 C
 `logs/desktop-timing.log` 从进程入口记录窗口创建、服务就绪和前端页面加载，避免漏算
 桌面壳初始化时间。
 
-组装脚本会生成 `app/python-startup-<cache_tag>.zip`，其中是标准库与选定纯 Python
-依赖的预编译代码；原生扩展及其资源仍从真实目录加载。更新 Python 依赖后须重新生成：
+运行入口支持可选的 `app/python-startup-<cache_tag>.zip` 导入缓存，公共组装脚本默认不生成它。没有该文件时使用正常 Python 导入。维护既有缓存的本机环境时，依赖变化后可显式重建：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_startup_archive.py --app-dir <本机快速版目录>\app
@@ -56,10 +57,11 @@ HTTP 服务就绪后，后台 worker 留出三秒给首屏取数，再加载任�
 ## 构建安装包
 
 ```powershell
-# 1. 一次性:按 desktop/scripts/README.md 准备 PostgreSQL 与 Meilisearch 并组装
-.\desktop\scripts\stage-runtime.ps1 -PostgresZip ... -MeiliExe ...
-# 2. 打包(自动先构建前端)
-cd desktop/src-tauri && cargo tauri build
+# 1. 按 desktop/scripts/README.md 提供已核验的数据库、搜索、备份工具与 notices 输入
+#    完整参数包括版本、SHA-256 和构建 profile，不能只提供两个二进制路径。
+# 2. 组装成功后打包（自动先构建前端）
+cd desktop/src-tauri
+cargo tauri build --bundles nsis
 # 产物: target/release/bundle/nsis/ResearchAssetHub_<version>_x64-setup.exe
 ```
 
@@ -67,7 +69,11 @@ cd desktop/src-tauri && cargo tauri build
 直接 `cargo build --release` 不会启用 Tauri 的生产资源协议，会仍然访问开发服务器，
 不能把这种构建用于桌面交付或启动性能验收。
 
-安装目录 `C:\Program Files\ResearchAssetHub\`(NSIS perMachine);数据目录独立,卸载保数据。
+发行使用新的暂存目录，不直接打包实际验收运行过的目录。Python 执行会留下字节码缓存，增量复制前端也可能留下旧资源；应从当前白名单源码和完整 `dist` 重新组装。保全旧暂存和构建资源后，打包前核对源码哈希，打包后核对生成的 NSIS 文件清单。Tauri 的配置覆盖会合并资源映射，替换暂存路径时也须确认旧映射已移除。
+
+默认安装目录 `C:\Program Files\ResearchAssetHub\`（NSIS perMachine），日常数据写入用户目录。公共 profile 使用空库配置；已有安装升级会核对来源映射、保留用户配置并将旧 app/runtime 移到同一安装目录下的 `.previous-*`。这些目录不自动删除，详见[发行约束](scripts/RUNTIME-RELEASE.md)。
+
+PostgreSQL 发行副本加入每进程 UTF-8 manifest，输入二进制保持不变，转换前后哈希记录在运行时报告中。候选版要求 Windows 10 1903+ 或 Windows 11 x64。默认 WebView2 缺失时联网准备；离线安装需要按组装文档准备 Microsoft 的离线输入和对应构建配置。
 
 ## 验收清单(发版前逐条跑)
 
