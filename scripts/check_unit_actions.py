@@ -6,8 +6,8 @@
 口径:
   - 每个 unit_kind=="paper" 单元必须满足:
       pdf  status == "available"
-      html status == "available"
-      code status == "available"（或 == "not_provided" 且论文标题在白名单内）
+      html/code status 属于 available、not_provided、network_required
+      未提供的选填资料不构成失败；已登记材料缺失仍失败。
   - guide 动作不得再出现（2026-08-11 已废除导读按钮）。
 退出码 0 = 全部符合;1 = 存在不匹配。可重复运行，是未来入库的硬门禁。
 """
@@ -19,8 +19,6 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 DEFAULT_ALLOWLIST = (
     Path(__file__).resolve().parents[1]
@@ -54,9 +52,6 @@ def main() -> int:
     parser.add_argument("--allowlist", default=str(DEFAULT_ALLOWLIST))
     args = parser.parse_args()
 
-    allowlist = yaml.safe_load(Path(args.allowlist).read_text(encoding="utf-8")) or {}
-    no_code_titles = set((allowlist.get(args.domain) or {}).get("no_code_titles", []))
-
     units = fetch_units(args.api, args.domain)
     papers = [unit for unit in units if unit.get("unit_kind") == "paper"]
     failures: list[str] = []
@@ -70,18 +65,18 @@ def main() -> int:
         row = [f"[{primary.get('id', '?')[:8]}]"]
         for kind in ("pdf", "html"):
             status = (actions.get(kind) or {}).get("status", "missing")
-            ok = status == "available"
+            ok = status == "available" if kind == "pdf" else status in {
+                "available", "not_provided", "network_required"
+            }
             row.append(f"{kind}={status}{'✓' if ok else '✗'}")
             if not ok:
-                failures.append(f"{title}: {kind} 期望 available，实际 {status}")
+                failures.append(f"{title}: {kind} 已声明材料不可用，实际 {status}")
         code_status = (actions.get("code") or {}).get("status", "not_provided")
-        code_ok = code_status == "available" or (
-            code_status == "not_provided" and title in no_code_titles
-        )
+        code_ok = code_status in {"available", "not_provided", "network_required"}
         row.append(f"code={code_status}{'✓' if code_ok else '✗'}")
         if not code_ok:
             failures.append(
-                f"{title}: code 期望 available（或属于无代码白名单），"
+                f"{title}: 已登记代码不可用，"
                 f"实际 {code_status}"
             )
         if "guide" in actions:

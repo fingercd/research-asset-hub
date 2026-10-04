@@ -15,6 +15,10 @@ class ApiSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="HUB_", case_sensitive=False)
 
+    data_dir: Path = Path.home() / "Documents" / "ResearchAssetHub"
+    intake_max_pdf_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
+    intake_reference_roots: list[Path] = Field(default_factory=list)
+
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8767, ge=1, le=65535)
     api_reload: bool = False
@@ -28,7 +32,7 @@ class ApiSettings(BaseSettings):
     )
     # 最低要求的数据库迁移修订（>= 语义：数据库修订是它本身或其后代即可）。
     # tests/domain/test_migrations.py 断言该默认值与最新迁移 head 一致。
-    database_required_revision: str = "0004_source_retirement"
+    database_required_revision: str = "0006_research_workflows"
     database_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     database_require_migrations: bool = True
     meilisearch_url: str = "http://127.0.0.1:7700"

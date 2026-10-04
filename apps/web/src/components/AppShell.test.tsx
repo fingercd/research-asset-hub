@@ -46,12 +46,12 @@ describe("AppShell", () => {
     expect(await screen.findByRole("searchbox", { name: "全局搜索关键词" })).toHaveFocus();
   });
 
-  it("keeps three primary destinations and moves system tools into a panel", async () => {
+  it("includes intake and collections and moves system tools into a panel", async () => {
     vi.spyOn(api, "health").mockRejectedValue(new Error("offline"));
     renderShell();
 
     const navigation = screen.getByRole("navigation", { name: "主导航" });
-    expect(within(navigation).getAllByRole("link")).toHaveLength(3);
+    expect(within(navigation).getAllByRole("link")).toHaveLength(5);
     expect(within(navigation).getByRole("link", { name: "资料库" })).toHaveAttribute(
       "href",
       "/",
@@ -77,7 +77,7 @@ describe("AppShell", () => {
       "href",
       "/conflicts",
     );
-    expect(within(panel).getByRole("link", { name: /诊断信息/ })).toHaveAttribute(
+    expect(within(panel).getByRole("link", { name: /设置与 MCP/ })).toHaveAttribute(
       "href",
       "/settings",
     );

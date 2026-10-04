@@ -1,13 +1,15 @@
 """领域路由：备份。"""
+
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Header, Request, Response
+from fastapi import Body, Header, Request, Response
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
 from apps.api import routes_v1 as _v1
@@ -26,7 +28,13 @@ from apps.api.routes_v1 import (
 )
 from packages.backup import BackupManager, create_platform_backup
 from packages.domain.enums import AuditAction, BackupStatus
-from packages.domain.models import BackupRun
+from packages.domain.models import BackupRun, Representation, Source
+from packages.domain.serving_scope import active_representation_clause
+
+
+class BackupOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    include_external_files: bool = False
 
 
 @router.get("/backups")
@@ -44,9 +52,11 @@ def list_backups(
             len(runs),
         )
 
+
 @router.post("/backups", status_code=201)
 def create_backup(
     request: Request,
+    options: Annotated[BackupOptions | None, Body()] = None,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     database = _v1._database(request)
@@ -87,7 +97,33 @@ def create_backup(
         )
 
     try:
-        result = create_platform_backup(PROJECT_ROOT)
+        settings = _v1._settings(request)
+        external_inputs: dict[str, Path] = {}
+        if options and options.include_external_files:
+            registry = _v1._source_registry(request)
+            managed_library = (settings.data_dir / "library").resolve()
+            with database.session() as session:
+                rows = session.execute(
+                    select(Representation, Source)
+                    .join(Source, Source.id == Representation.source_id)
+                    .where(
+                        Representation.deleted_at.is_(None),
+                        Representation.availability == "available",
+                        Source.enabled.is_(True),
+                        active_representation_clause(),
+                    )
+                )
+                for representation, source in rows:
+                    if not representation.path_ref:
+                        continue
+                    path = registry.resolve(
+                        source.alias, representation.root_key, representation.path_ref
+                    )
+                    if not path.is_relative_to(managed_library):
+                        external_inputs[str(representation.id)] = path
+        result = create_platform_backup(
+            PROJECT_ROOT, data_dir=settings.data_dir, external_inputs=external_inputs
+        )
     except Exception as error:
         with database.session() as session:
             failed = session.get(BackupRun, run_id, with_for_update=True)
@@ -150,6 +186,7 @@ def create_backup(
         )
         return response
 
+
 @router.get("/backups/restore-rehearsal/latest")
 def latest_restore_rehearsal() -> dict[str, Any]:
     root = PROJECT_ROOT / "work" / "restore-tests"
@@ -171,6 +208,7 @@ def latest_restore_rehearsal() -> dict[str, Any]:
     )
     report["report_path"] = str(report_path)
     return report
+
 
 @router.post("/backups/{backup_id}/verify")
 def verify_backup(

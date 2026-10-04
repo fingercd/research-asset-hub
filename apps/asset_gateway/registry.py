@@ -9,6 +9,7 @@ from threading import Lock
 import yaml
 
 from packages.domain.path_exclusions import POLICY_FILENAME, OperationalPathExclusions
+from packages.managed_sources.service import data_directory, load_managed_sources
 
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
@@ -52,6 +53,7 @@ class SourceRegistry:
             exclusions.validate_roots(roots)
         self._snapshot = _RegistrySnapshot(dict(roots), workspace_root, exclusions)
         self._config_path: Path | None = None
+        self._data_dir: Path | None = None
         self._reload_lock = Lock()
 
     @property
@@ -65,7 +67,7 @@ class SourceRegistry:
         return self._config_path
 
     @staticmethod
-    def _signature(config_path: Path) -> tuple[object, ...]:
+    def _signature(config_path: Path, data_dir: Path | None = None) -> tuple[object, ...]:
         def file_signature(path: Path) -> tuple[int, int, int] | None:
             try:
                 info = path.stat()
@@ -77,17 +79,21 @@ class SourceRegistry:
             file_signature(config_path),
             file_signature(config_path.parent / POLICY_FILENAME),
             os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip(),
+            file_signature(data_dir / "config" / "managed-sources.yaml") if data_dir else None,
         )
 
     @classmethod
-    def load(cls, config_path: Path) -> SourceRegistry:
+    def load(cls, config_path: Path, *, data_dir: Path | None = None) -> SourceRegistry:
         registry = cls({})
         registry._config_path = config_path.expanduser().resolve()
+        registry._data_dir = Path(data_dir).expanduser().resolve() if data_dir else data_directory()
         registry.refresh_if_changed()
         return registry
 
-    @classmethod
-    def _read_snapshot(cls, config_path: Path, signature: tuple[object, ...]) -> _RegistrySnapshot:
+    def _read_snapshot(
+        self, config_path: Path, signature: tuple[object, ...]
+    ) -> _RegistrySnapshot:
+        data_dir = self._data_dir
         raw = config_path.read_bytes()
         document = yaml.load(raw.decode("utf-8"), Loader=_YAML_LOADER)
         if not isinstance(document, dict) or not isinstance(document.get("sources"), list):
@@ -99,7 +105,11 @@ class SourceRegistry:
         else:
             workspace_root = (config_dir / str(document.get("workspace_root", "."))).resolve()
         roots: dict[tuple[str, str], Path] = {}
-        for raw_source in document.get("sources", []):
+        sources = [
+            *document.get("sources", []),
+            *(load_managed_sources(data_dir) if data_dir else []),
+        ]
+        for raw_source in sources:
             if not isinstance(raw_source, dict):
                 raise ValueError("Each source must be a mapping.")
             source_id = str(raw_source.get("id", "")).strip()
@@ -124,7 +134,18 @@ class SourceRegistry:
         if exclusions.enabled:
             exclusions.validate_roots(roots)
         return _RegistrySnapshot(
-            roots, workspace_root, exclusions, signature, hashlib.sha256(raw).hexdigest()
+            roots,
+            workspace_root,
+            exclusions,
+            signature,
+            hashlib.sha256(
+                raw
+                + (
+                    (data_dir / "config" / "managed-sources.yaml").read_bytes()
+                    if data_dir and (data_dir / "config" / "managed-sources.yaml").exists()
+                    else b""
+                )
+            ).hexdigest(),
         )
 
     def refresh_if_changed(self) -> bool:
@@ -136,15 +157,15 @@ class SourceRegistry:
         if self._config_path is None:
             return False
         try:
-            signature = self._signature(self._config_path)
+            signature = self._signature(self._config_path, self._data_dir)
             if signature == self._snapshot.signature:
                 return False
             with self._reload_lock:
-                signature = self._signature(self._config_path)
+                signature = self._signature(self._config_path, self._data_dir)
                 if signature == self._snapshot.signature:
                     return False
                 candidate = self._read_snapshot(self._config_path, signature)
-                if self._signature(self._config_path) != signature:
+                if self._signature(self._config_path, self._data_dir) != signature:
                     raise ValueError(
                         "Source configuration changed during reload; retry the request."
                     )
@@ -191,8 +212,19 @@ class SourceRegistry:
 
     def resolve(self, source_id: str, root_key: str, path_ref: str) -> Path:
         root = self.root_for(source_id, root_key)
-        candidate_ref = PurePosixPath(path_ref.replace("\\", "/"))
-        if candidate_ref.is_absolute() or ".." in candidate_ref.parts:
+        normalized = path_ref.replace("\\", "/")
+        # Platform-owned directory representations register the exact selected
+        # directory as their root; no parent or generic-manifest expansion occurs.
+        if normalized == "." and root_key == "repository":
+            return root
+        candidate_ref = PurePosixPath(normalized)
+        if (
+            not normalized
+            or "\0" in normalized
+            or ":" in normalized
+            or any(part in {"", ".", ".."} for part in normalized.split("/"))
+            or candidate_ref.is_absolute()
+        ):
             raise UnsafeAssetPath("Registered path is absolute or contains traversal.")
         candidate = root.joinpath(*candidate_ref.parts).resolve(strict=False)
         try:

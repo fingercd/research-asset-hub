@@ -37,7 +37,13 @@ def test_dashboard_reuses_asset_context_and_counts_only_visible_indexed_assets(
     database = DatabaseManager(settings, engine=engine, require_migrations=False)
 
     with database.session_factory() as session:
-        first = Asset(asset_type="paper", title="First", domain_slugs=["alpha", "beta"])
+        first = Asset(
+            asset_type="paper",
+            title="First",
+            domain_slugs=["alpha", "beta"],
+            content="large original text " * 10_000,
+            attributes={"code_availability": {"audit": "large evidence " * 10_000}},
+        )
         second = Asset(asset_type="paper", title="Second", domain_slugs=["alpha", "gamma"])
         hidden = Asset(
             asset_type="collection",
@@ -90,6 +96,9 @@ def test_dashboard_reuses_asset_context_and_counts_only_visible_indexed_assets(
         assert body["stats"]["annotations"] == 3
         assert body["index_state"]["indexed_assets"] == 1
         assert body["index_state"]["pending_assets"] == 1
+        assert len(response.content) < 100_000
+        assert "content" not in body["recent_assets"][0]
+        assert all("code_availability" not in item["attributes"] for item in body["recent_assets"])
 
         domains = {domain["slug"]: domain for domain in body["domains"]}
         assert domains["alpha"]["asset_count"] == 2
@@ -104,8 +113,9 @@ def test_dashboard_reuses_asset_context_and_counts_only_visible_indexed_assets(
         assert "Hidden portal" not in str(body)
 
         annotation_queries = [sql for sql in statements if "from annotations" in sql]
-        # Summaries, one grouped domain count, and the global dashboard count.
-        assert len(annotation_queries) == 3
+        # Two bounded card contexts, one grouped domain count, and the global
+        # count. The number stays fixed as the number of domains grows.
+        assert len(annotation_queries) == 4
         index_queries = [sql for sql in statements if "from index_states" in sql]
         assert len(index_queries) == 1
         assert "exists" in index_queries[0]

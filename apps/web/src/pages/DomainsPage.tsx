@@ -9,16 +9,25 @@ import {
   LayoutDashboard,
   LibraryBig,
 } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
+import { DomainEditor } from "../components/DomainEditor";
+import { PackageActions } from "../components/PackageActions";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { getAssetDomains } from "../api/types";
 import { DomainOverviewPanel } from "../components/DomainOverviewPanel";
-import { DomainPortalArticle } from "../components/domain-portal/DomainPortalArticle";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { ResearchUnitCard } from "../components/ResearchUnitCard";
 
+const DomainPortalArticle = lazy(() =>
+  import("../components/domain-portal/DomainPortalArticle").then((module) => ({
+    default: module.DomainPortalArticle,
+  })),
+);
+
 export function DomainsPage() {
+  const [editing, setEditing] = useState(false);
   const query = useQuery({
     queryKey: ["domains"],
     queryFn: ({ signal }) => api.domains(signal),
@@ -29,8 +38,19 @@ export function DomainsPage() {
       <PageHeader
         eyebrow="动态目录"
         title="研究领域"
-        description="领域由来源配置动态生成；新增领域后会自动出现在这里。"
+        description="按研究方向组织资料。创建领域后即可添加 PDF，逐步建立阅读目录。"
+        actions={
+          <button
+            className="button primary"
+            type="button"
+            onClick={() => setEditing(true)}
+          >
+            新建领域
+          </button>
+        }
       />
+      <PackageActions />
+      {editing && <DomainEditor onClose={() => setEditing(false)} />}
       {query.isPending ? (
         <LoadingState label="正在加载领域…" />
       ) : query.isError ? (
@@ -78,14 +98,19 @@ export function DomainsPage() {
                 </div>
                 <div>
                   <dt>研究单元</dt>
-                  <dd>{domain.research_unit_count ?? domain.paper_count ?? 0}</dd>
+                  <dd>
+                    {domain.research_unit_count ?? domain.paper_count ?? 0}
+                  </dd>
                 </div>
                 <div>
                   <dt>阅读中</dt>
                   <dd>{domain.reading_counts?.reading ?? 0}</dd>
                 </div>
               </dl>
-              <Link className="text-link" to={`/domains/${encodeURIComponent(domain.slug)}`}>
+              <Link
+                className="text-link"
+                to={`/domains/${encodeURIComponent(domain.slug)}`}
+              >
                 查看领域 <ArrowRight size={14} aria-hidden="true" />
               </Link>
             </article>
@@ -94,7 +119,7 @@ export function DomainsPage() {
       ) : (
         <EmptyState
           title="尚未注册领域"
-          detail="在来源配置中启用领域并完成导入后，此处会显示动态目录。"
+          detail="点击新建领域，再添加第一篇 PDF。"
           kind="index"
         />
       )}
@@ -104,6 +129,7 @@ export function DomainsPage() {
 
 export function DomainDetailPage() {
   const { slug = "" } = useParams();
+  const [editing, setEditing] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedView = searchParams.get("view");
   const activeTab: "overview" | "units" | "recent" | "stats" =
@@ -118,10 +144,15 @@ export function DomainDetailPage() {
     else next.set("view", view);
     setSearchParams(next, { replace: true });
   };
+  const metadata = useQuery({
+    queryKey: ["domain", slug],
+    queryFn: ({ signal }) => api.domain(slug, signal),
+    enabled: Boolean(slug),
+  });
   const domain = useQuery({
     queryKey: ["domain-portal", slug],
     queryFn: ({ signal }) => api.domainPortal(slug, signal),
-    enabled: Boolean(slug),
+    enabled: Boolean(slug) && activeTab === "overview",
   });
   const unitsQuery = useInfiniteQuery({
     queryKey: ["search", "domain", slug, "paper"],
@@ -138,20 +169,30 @@ export function DomainDetailPage() {
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
-    enabled: Boolean(slug),
+    enabled: Boolean(slug) && activeTab === "units",
   });
 
-  if (domain.isPending) return <div className="page"><LoadingState label="正在加载领域…" /></div>;
-  if (domain.isError) {
+  if (metadata.isPending && !domain.data)
     return (
       <div className="page">
-        <ErrorState error={domain.error} retry={() => void domain.refetch()} />
+        <LoadingState label="正在加载领域…" />
+      </div>
+    );
+  if (metadata.isError && !domain.data) {
+    return (
+      <div className="page">
+        <ErrorState
+          error={metadata.error}
+          retry={() => void metadata.refetch()}
+        />
       </div>
     );
   }
 
-  const data = domain.data.domain;
-  const portal = domain.data.portal;
+  const data = { ...domain.data?.domain, ...metadata.data } as NonNullable<
+    typeof metadata.data
+  >;
+  const portal = domain.data?.portal;
   const units = unitsQuery.data?.pages.flatMap((page) => page.items) ?? [];
   const coveredAssetIds = new Set(
     units.flatMap((unit) =>
@@ -261,7 +302,9 @@ export function DomainDetailPage() {
         </div>
         <div>
           <dt>研究单元（聚合视图）</dt>
-          <dd>{data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}</dd>
+          <dd>
+            {data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}
+          </dd>
         </div>
         <div>
           <dt>底层资产（技术统计）</dt>
@@ -287,21 +330,42 @@ export function DomainDetailPage() {
     </section>
   );
 
-  if (portal && domain.data.renderer === "v2") {
+  if (portal && domain.data?.renderer === "v2") {
     return (
       <div className="page domain-portal-page">
         <Link className="back-link" to="/domains">
           <ArrowLeft size={15} aria-hidden="true" /> 返回领域
         </Link>
-        <DomainPortalArticle
-          portal={portal}
-          domain={data}
-          activeView={activeTab}
-          onViewChange={setActiveTab}
-          units={unitsSection}
-          recent={recentSection}
-          stats={statsSection}
-        />
+        <div className="domain-product-actions">
+          <Link
+            className="button primary compact"
+            to={`/intake?domain=${encodeURIComponent(slug)}`}
+          >
+            添加论文
+          </Link>
+          <button
+            className="button secondary compact"
+            type="button"
+            onClick={() => setEditing(true)}
+          >
+            编辑领域
+          </button>
+          <PackageActions domain={slug} />
+        </div>
+        {editing && (
+          <DomainEditor domain={data} onClose={() => setEditing(false)} />
+        )}
+        <Suspense fallback={<LoadingState label="正在加载领域总览视图…" />}>
+          <DomainPortalArticle
+            portal={portal}
+            domain={data}
+            activeView={activeTab}
+            onViewChange={setActiveTab}
+            units={unitsSection}
+            recent={recentSection}
+            stats={statsSection}
+          />
+        </Suspense>
       </div>
     );
   }
@@ -324,6 +388,25 @@ export function DomainDetailPage() {
           </Link>
         }
       />
+      <div className="domain-product-actions">
+        <Link
+          className="button primary compact"
+          to={`/intake?domain=${encodeURIComponent(slug)}`}
+        >
+          添加论文
+        </Link>
+        <button
+          className="button secondary compact"
+          type="button"
+          onClick={() => setEditing(true)}
+        >
+          编辑领域
+        </button>
+        <PackageActions domain={slug} />
+      </div>
+      {editing && (
+        <DomainEditor domain={data} onClose={() => setEditing(false)} />
+      )}
       <section className="domain-hero-stats" aria-label="领域概况">
         <div>
           <BookOpen size={18} aria-hidden="true" />
@@ -338,7 +421,9 @@ export function DomainDetailPage() {
         <div>
           <FolderKanban size={18} aria-hidden="true" />
           <span>研究单元</span>
-          <strong>{data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}</strong>
+          <strong>
+            {data.research_unit_count ?? unitsQuery.data?.pages[0]?.total ?? 0}
+          </strong>
         </div>
         <div>
           <span>阅读中</span>
@@ -380,13 +465,35 @@ export function DomainDetailPage() {
         role="tabpanel"
         aria-labelledby={`domain-tab-${activeTab}`}
       >
-        {activeTab === "overview" && (
-          <DomainOverviewPanel
-            overview={data.overview}
-            domainName={domainName}
-            fallback={unitsSection}
-          />
-        )}
+        {activeTab === "overview" &&
+          (domain.isPending ? (
+            <LoadingState label="正在加载领域总览…" />
+          ) : domain.isError ? (
+            <ErrorState
+              error={domain.error}
+              retry={() => void domain.refetch()}
+            />
+          ) : (
+            <DomainOverviewPanel
+              overview={data.overview}
+              domainName={domainName}
+              fallback={
+                <div className="section-block">
+                  <h2>开始建立这个领域</h2>
+                  <p>
+                    {data.description ??
+                      "添加论文后，研究单元与阅读统计会自动更新。"}
+                  </p>
+                  <Link
+                    className="button secondary"
+                    to={`/domains/${encodeURIComponent(slug)}?view=units`}
+                  >
+                    浏览研究单元
+                  </Link>
+                </div>
+              }
+            />
+          ))}
         {activeTab === "units" && unitsSection}
         {activeTab === "recent" && recentSection}
         {activeTab === "stats" && statsSection}

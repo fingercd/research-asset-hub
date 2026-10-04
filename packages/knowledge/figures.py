@@ -7,15 +7,23 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
-import pymupdf
+import pdfplumber
 from PIL import Image, ImageDraw, ImageFont
 
-EXTRACTOR_NAME = "pymupdf-graphic-clusters"
-EXTRACTOR_VERSION = "1"
+from packages.knowledge.pdf_geometry import (
+    PdfiumRenderer,
+    PdfPageGeometry,
+    read_pdf_page_geometries,
+    unrotate_visible_bbox,
+)
+
+EXTRACTOR_NAME = "pdfplumber-pypdfium2-graphic-clusters"
+EXTRACTOR_VERSION = "2"
 COORDINATE_SYSTEM: Literal["pdf_points_top_left"] = "pdf_points_top_left"
 PREVIEW_MAX_BYTES = 4_500_000
 _FIGURE_CAPTION = re.compile(
@@ -66,6 +74,30 @@ class _Candidate:
     note: str
 
 
+class _FigureRecord(TypedDict, total=False):
+    figure_id: str
+    figure_number: str | None
+    caption: str | None
+    page: int
+    page_index: int
+    bbox: list[float]
+    caption_bbox: list[float] | None
+    coordinate_system: str
+    page_width: float
+    page_height: float
+    rotation: int
+    image_path: str
+    preview_path: str
+    overlay_path: str
+    preview_bytes: int
+    quality_status: str
+    review_notes: str
+    source_clipped: bool
+    caption_bbox_invalid: bool
+    detection_source: str
+    correction_provenance: dict[str, Any] | None
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -86,19 +118,6 @@ def _validate_bbox(bbox: Sequence[float]) -> BBox:
     return values  # type: ignore[return-value]
 
 
-def _unrotate_visible_bbox(bbox: BBox, width: float, height: float, rotation: int) -> BBox:
-    x0, y0, x1, y1 = bbox
-    if rotation == 0:
-        return bbox
-    if rotation == 90:
-        return y0, height - x1, y1, height - x0
-    if rotation == 180:
-        return width - x1, height - y1, width - x0, height - y0
-    if rotation == 270:
-        return width - y1, x0, width - y0, x1
-    raise ValueError("page_rotation must be one of 0, 90, 180, or 270 degrees.")
-
-
 def normalize_bbox(
     bbox: Sequence[float],
     *,
@@ -108,7 +127,7 @@ def normalize_bbox(
     page_rotation: int = 0,
     dpi: float | None = None,
 ) -> BBox:
-    """Convert an external bbox into unrotated, top-left PDF-point coordinates.
+    """Convert an external bbox into unrotated, top-left CropBox point coordinates.
 
     ``page_width`` and ``page_height`` describe the unrotated CropBox in points.
     Normalized, pixel, and visible-point coordinates refer to the rendered page
@@ -149,7 +168,7 @@ def normalize_bbox(
 
     if coordinate_system.endswith("bottom_left"):
         y0, y1 = visible_height - y1, visible_height - y0
-    return _unrotate_visible_bbox((x0, y0, x1, y1), page_width, page_height, page_rotation)
+    return unrotate_visible_bbox((x0, y0, x1, y1), page_width, page_height, page_rotation)
 
 
 def _box_union(boxes: Sequence[BBox]) -> BBox:
@@ -187,84 +206,91 @@ def _merge_graphics(boxes: Sequence[BBox], *, gap: float = 18.0) -> list[BBox]:
     return sorted(merged, key=lambda item: (item[1], item[0], item[3], item[2]))
 
 
-def _text_lines(page: pymupdf.Page) -> list[tuple[str, BBox]]:
+def _text_lines(page: Any, geometry: PdfPageGeometry) -> list[tuple[str, BBox]]:
     lines: list[tuple[str, BBox]] = []
-    for block in page.get_text("dict").get("blocks", []):  # type: ignore[no-untyped-call]
-        if block.get("type") != 0:
-            continue
-        for line in block.get("lines", []):
-            text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
-            cleaned = re.sub(r"\s+", " ", text).strip()
-            if cleaned:
-                lines.append((cleaned, _validate_bbox(line["bbox"])))
-    return sorted(lines, key=lambda item: (item[1][1], item[1][0]))
+    for line in page.extract_text_lines():
+        cleaned = re.sub(r"\s+", " ", str(line.get("text", ""))).strip()
+        if cleaned:
+            if geometry.rotation in {180, 270}:
+                cleaned = cleaned[::-1]
+            bbox = geometry.page_bbox_to_pdf_points(
+                (line["x0"], line["top"], line["x1"], line["bottom"])
+            )
+            lines.append((cleaned, _validate_bbox(bbox)))
+    lines.sort(key=lambda item: (item[1][1], item[1][0]))
+    if geometry.rotation not in {90, 270}:
+        return lines
+
+    merged: list[tuple[str, BBox]] = []
+    for text, bbox in lines:
+        if merged:
+            previous_text, previous_bbox = merged[-1]
+            same_line = (
+                abs(previous_bbox[1] - bbox[1]) <= 2 and abs(previous_bbox[3] - bbox[3]) <= 2
+            )
+            horizontal_gap = bbox[0] - previous_bbox[2]
+            if same_line and -2 <= horizontal_gap <= 18:
+                merged[-1] = (f"{previous_text} {text}", _box_union((previous_bbox, bbox)))
+                continue
+        merged.append((text, bbox))
+    return merged
 
 
-def _captions_from_page(page: pymupdf.Page, lines: Sequence[tuple[str, BBox]]) -> list[_Caption]:
-    text_data = page.get_text("dict")  # type: ignore[no-untyped-call]
-    text_blocks = [block for block in text_data.get("blocks", []) if block.get("type") == 0]
+def _captions_from_page(lines: Sequence[tuple[str, BBox]]) -> list[_Caption]:
     captions: list[_Caption] = []
     seen: set[tuple[str, BBox]] = set()
-    for block in text_blocks:
-        block_lines: list[tuple[str, BBox]] = []
-        for line in block.get("lines", []):
-            text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
-            cleaned = re.sub(r"\s+", " ", text).strip()
-            if cleaned:
-                block_lines.append((cleaned, _validate_bbox(line["bbox"])))
-        for index, (text, bbox) in enumerate(block_lines):
-            match = _FIGURE_CAPTION.match(text)
-            if match is None:
-                continue
-            number = re.sub(r"\s+", "", match.group("number"))
-            collected = [(text, bbox)]
-            prior = bbox
-            for next_text, next_bbox in block_lines[index + 1 :]:
-                if _FIGURE_CAPTION.match(next_text):
-                    break
-                vertical_gap = max(0.0, next_bbox[1] - prior[3])
-                if vertical_gap > 15 or abs(next_bbox[0] - bbox[0]) > 36:
-                    break
-                collected.append((next_text, next_bbox))
-                prior = next_bbox
-            caption_text = " ".join(part[0] for part in collected)
-            caption_bbox = _box_union([part[1] for part in collected])
-            key = number, caption_bbox
-            if key not in seen:
-                captions.append(_Caption(number, caption_text, caption_bbox))
-                seen.add(key)
+    for index, (text, bbox) in enumerate(lines):
+        match = _FIGURE_CAPTION.match(text)
+        if match is None:
+            continue
+        number = re.sub(r"\s+", "", match.group("number"))
+        collected = [(text, bbox)]
+        prior = bbox
+        for next_text, next_bbox in lines[index + 1 :]:
+            if _FIGURE_CAPTION.match(next_text):
+                break
+            vertical_gap = max(0.0, next_bbox[1] - prior[3])
+            if vertical_gap > 15 or abs(next_bbox[0] - bbox[0]) > 36:
+                break
+            collected.append((next_text, next_bbox))
+            prior = next_bbox
+        caption_text = " ".join(part[0] for part in collected)
+        caption_bbox = _box_union([part[1] for part in collected])
+        key = number, caption_bbox
+        if key not in seen:
+            captions.append(_Caption(number, caption_text, caption_bbox))
+            seen.add(key)
     return sorted(captions, key=lambda item: (item.bbox[1], item.bbox[0]))
 
 
-def _graphic_boxes(page: pymupdf.Page) -> tuple[list[BBox], bool]:
+def _graphic_boxes(page: Any, geometry: PdfPageGeometry) -> tuple[list[BBox], bool]:
     boxes: list[BBox] = []
-    try:
-        boxes.extend(
-            _validate_bbox(tuple(rect))
-            for rect in page.cluster_drawings(x_tolerance=8, y_tolerance=8)
-            if rect.width > 0 and rect.height > 0
-        )
-    except (RuntimeError, ValueError):
-        boxes.extend(
-            _validate_bbox(tuple(drawing["rect"]))
-            for drawing in page.get_drawings()
-            if drawing["rect"].width > 0 and drawing["rect"].height > 0
-        )
+    objects = page.objects
+    graphic_objects = [*objects.get("curve", []), *objects.get("rect", [])]
+    image_objects = objects.get("image", [])
 
-    image_boxes = [
-        _validate_bbox(tuple(info["bbox"]))
-        for info in page.get_image_info()
-        if info.get("bbox") is not None
-    ]
+    def object_bbox(item: Mapping[str, Any]) -> BBox | None:
+        x0 = item.get("x0")
+        top = item.get("top")
+        x1 = item.get("x1")
+        bottom = item.get("bottom")
+        if x0 is None or top is None or x1 is None or bottom is None:
+            return None
+        x0, top, x1, bottom = float(x0), float(top), float(x1), float(bottom)
+        if x1 <= x0 or bottom <= top:
+            return None
+        return _validate_bbox(geometry.page_bbox_to_pdf_points((x0, top, x1, bottom)))
+
+    boxes.extend(box for item in graphic_objects if (box := object_bbox(item)) is not None)
+    image_boxes = [box for item in image_objects if (box := object_bbox(item)) is not None]
     boxes.extend(image_boxes)
-    page_box = page.cropbox
-    min_area = max(45.0, page_box.width * page_box.height * 0.00015)
+    min_area = max(45.0, geometry.width * geometry.height * 0.00015)
     groups = [
         box for box in _merge_graphics(boxes) if (box[2] - box[0]) * (box[3] - box[1]) >= min_area
     ]
     full_page_image = any(
-        image[2] - image[0] >= page_box.width * 0.96
-        and image[3] - image[1] >= page_box.height * 0.96
+        image[2] - image[0] >= geometry.width * 0.96
+        and image[3] - image[1] >= geometry.height * 0.96
         for image in image_boxes
     )
     return groups, full_page_image
@@ -312,14 +338,15 @@ def _candidate_rect_for_caption(
 
 
 def _page_candidates(
-    page: pymupdf.Page,
     page_index: int,
+    geometry: PdfPageGeometry,
+    page: Any,
+    text_lines: Sequence[tuple[str, BBox]],
     warnings: list[dict[str, Any]],
 ) -> list[_Candidate]:
     try:
-        text_lines = _text_lines(page)
-        captions = _captions_from_page(page, text_lines)
-        graphics, full_page_image = _graphic_boxes(page)
+        captions = _captions_from_page(text_lines)
+        graphics, full_page_image = _graphic_boxes(page, geometry)
     except Exception as error:
         warnings.append(
             {
@@ -379,7 +406,7 @@ def _page_candidates(
     for score, graphic_index, caption_index in pairs:
         if graphic_index in assignments or caption_index in used_captions:
             continue
-        if score > page.cropbox.height * 0.45:
+        if score > geometry.height * 0.45:
             continue
         assignments[graphic_index] = caption_index
         used_captions.add(caption_index)
@@ -396,15 +423,15 @@ def _page_candidates(
                 graphic,
                 graphics,
                 matched_caption,
-                page_width=page.cropbox.width,
-                page_height=page.cropbox.height,
+                page_width=geometry.width,
+                page_height=geometry.height,
             )
             if matched_caption is not None
             else (
                 max(0.0, graphic[0] - 2),
                 max(0.0, graphic[1] - 2),
-                min(page.cropbox.width, graphic[2] + 2),
-                min(page.cropbox.height, graphic[3] + 2),
+                min(geometry.width, graphic[2] + 2),
+                min(geometry.height, graphic[3] + 2),
             )
         )
         note = (
@@ -582,17 +609,11 @@ def _pdffigures2_candidates(
     return by_page, table_count
 
 
-def _rotated_rect(page: pymupdf.Page, bbox: BBox) -> pymupdf.Rect:
-    rect = pymupdf.Rect(*bbox)  # type: ignore[no-untyped-call]
-    return cast(pymupdf.Rect, rect * page.rotation_matrix)
-
-
-def _render_crop(page: pymupdf.Page, bbox: BBox, dpi: int) -> Image.Image:
-    clip = _rotated_rect(page, bbox) & page.rect
-    if clip.is_empty or clip.is_infinite:
-        raise FigureExtractionError("The bbox does not intersect the visible page.")
-    pixmap = page.get_pixmap(clip=clip, dpi=dpi, alpha=False)
-    return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+def _render_crop(renderer: PdfiumRenderer, page_index: int, bbox: BBox, dpi: int) -> Image.Image:
+    try:
+        return renderer.render_crop(page_index, bbox, dpi)
+    except ValueError as error:
+        raise FigureExtractionError(str(error)) from error
 
 
 def _save_png(image: Image.Image, path: Path, *, max_bytes: int | None = None) -> int:
@@ -611,24 +632,17 @@ def _save_png(image: Image.Image, path: Path, *, max_bytes: int | None = None) -
 
 
 def _render_overlay(
-    page: pymupdf.Page,
+    renderer: PdfiumRenderer,
+    geometry: PdfPageGeometry,
+    page_index: int,
     candidates: Sequence[tuple[str, BBox]],
     dpi: int,
 ) -> Image.Image:
-    pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    image = renderer.render_page(page_index, dpi).copy()
     draw = ImageDraw.Draw(image)
-    scale_x = image.width / page.rect.width
-    scale_y = image.height / page.rect.height
     font = ImageFont.load_default()
     for label, bbox in candidates:
-        visible = _rotated_rect(page, bbox)
-        box = (
-            round(visible.x0 * scale_x),
-            round(visible.y0 * scale_y),
-            round(visible.x1 * scale_x),
-            round(visible.y1 * scale_y),
-        )
+        box = geometry.bbox_to_pixels(bbox, image.size)
         draw.rectangle(box, outline=(235, 30, 70), width=max(2, round(dpi / 60)))
         draw.rectangle(
             (box[0], box[1], min(image.width, box[0] + 90), box[1] + 16), fill=(235, 30, 70)
@@ -860,9 +874,11 @@ def apply_cached_figure_corrections(
     by_id = {record["figure_id"]: record for record in records}
     if len(by_id) != len(records):
         raise ValueError("Cached figure IDs are not unique.")
-    with pymupdf.open(pdf_path) as document:  # type: ignore[no-untyped-call]
-        sizes = {i: (p.cropbox.width, p.cropbox.height) for i, p in enumerate(document)}
-        rotations = {i: p.rotation for i, p in enumerate(document)}
+    with ExitStack() as stack:
+        page_geometries = read_pdf_page_geometries(pdf_path)
+        renderer = stack.enter_context(PdfiumRenderer(pdf_path, page_geometries))
+        sizes = {i: (geometry.width, geometry.height) for i, geometry in enumerate(page_geometries)}
+        rotations = {i: geometry.rotation for i, geometry in enumerate(page_geometries)}
         changes: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
         for figure_id, correction in (corrections or {}).items():
             if "split_figures" in correction:
@@ -919,15 +935,8 @@ def apply_cached_figure_corrections(
             by_id[figure_id] = record
             changes.append((record, row))
         changed_pages = set()
+        changes_by_page: dict[int, list[tuple[dict[str, Any], Mapping[str, Any]]]] = {}
         for record, row in changes:
-            page = document[record["page_index"]]
-            bbox = _validate_bbox(record["bbox"])
-            _save_png(_render_crop(page, bbox, dpi), asset_directory / record["image_path"])
-            record["preview_bytes"] = _save_png(
-                _render_crop(page, bbox, preview_dpi),
-                asset_directory / record["preview_path"],
-                max_bytes=PREVIEW_MAX_BYTES,
-            )
             record["review_notes"] = str(row.get("review_notes") or "Explicit bbox correction.")
             record["correction_provenance"] = {
                 "reviewer": row.get("reviewer"),
@@ -947,8 +956,20 @@ def apply_cached_figure_corrections(
             if record["source_clipped"]:
                 record["quality_status"] = "source_clipped_candidate"
             changed_pages.add(record["page_index"])
+            changes_by_page.setdefault(record["page_index"], []).append((record, row))
         overlays = {r["page_index"]: r for r in manifest.get("review_overlays", [])}
-        for pi in changed_pages:
+        for pi, page_changes in changes_by_page.items():
+            for record, _row in page_changes:
+                bbox = _validate_bbox(record["bbox"])
+                _save_png(
+                    _render_crop(renderer, pi, bbox, dpi),
+                    asset_directory / record["image_path"],
+                )
+                record["preview_bytes"] = _save_png(
+                    _render_crop(renderer, pi, bbox, preview_dpi),
+                    asset_directory / record["preview_path"],
+                    max_bytes=PREVIEW_MAX_BYTES,
+                )
             entries = [
                 (str(r["figure_number"]), _validate_bbox(r["bbox"]))
                 for r in records
@@ -956,13 +977,14 @@ def apply_cached_figure_corrections(
             ]
             relative = f"figures/overlays/page-{pi + 1:04d}.png"
             size = _save_png(
-                _render_overlay(document[pi], entries, preview_dpi),
+                _render_overlay(renderer, page_geometries[pi], pi, entries, preview_dpi),
                 asset_directory / relative,
                 max_bytes=PREVIEW_MAX_BYTES,
             )
             overlays[pi] = dict(
                 page=pi + 1, page_index=pi, path=relative, candidate_count=len(entries), bytes=size
             )
+            renderer.release_page(pi)
         manifest["review_overlays"] = list(overlays.values())
         manifest["last_correction_run"] = dict(
             changed_figures=len(changes), changed_pages=sorted(changed_pages)
@@ -990,16 +1012,19 @@ def extract_pdf_figures(
     add_figures: Sequence[Mapping[str, Any]] = (),
     mark_corrected_reviewed: bool = False,
     pdffigures2_results: Sequence[Mapping[str, Any]] | None = None,
-    run_pymupdf_heuristic: bool = True,
+    run_pdfplumber_heuristic: bool = True,
+    run_pymupdf_heuristic: bool | None = None,
     use_heuristics_for_uncovered_pages: bool = True,
 ) -> dict[str, Any]:
-    """Extract figure crops from PDFFigures2 or a review-only PyMuPDF fallback."""
+    """Extract figure crops from PDFFigures2 or a review-only pdfplumber fallback."""
     pdf_path = Path(pdf_path)
     asset_directory = Path(asset_directory)
     if not pdf_path.is_file():
         raise FigureExtractionError(f"PDF file does not exist: {pdf_path}")
     if dpi < 72 or preview_dpi < 36:
         raise ValueError("dpi must be at least 72 and preview_dpi at least 36.")
+    if run_pymupdf_heuristic is not None:
+        run_pdfplumber_heuristic = run_pymupdf_heuristic
 
     actual_hash = sha256_file(pdf_path)
     if source_hash.casefold() != actual_hash:
@@ -1020,16 +1045,25 @@ def extract_pdf_figures(
     observed_captions: dict[int, list[_Caption]] = {}
     page_sizes: dict[int, tuple[float, float]] = {}
     page_rotations: dict[int, int] = {}
-    with pymupdf.open(pdf_path) as document:  # type: ignore[no-untyped-call]
-        for page_index, page in enumerate(document):
-            page_sizes[page_index] = (page.cropbox.width, page.cropbox.height)
-            page_rotations[page_index] = page.rotation
-            if run_pymupdf_heuristic:
-                page_candidates[page_index] = _page_candidates(page, page_index, warnings)
-            if run_pymupdf_heuristic or pdffigures2_results is not None:
+    with ExitStack() as stack:
+        document = stack.enter_context(pdfplumber.open(pdf_path))
+        page_geometries: list[PdfPageGeometry] = []
+        for page_index, page in enumerate(document.pages):
+            geometry = PdfPageGeometry.from_page(page, page_index)
+            page_geometries.append(geometry)
+            page_sizes[page_index] = (geometry.width, geometry.height)
+            page_rotations[page_index] = geometry.rotation
+            page_candidates[page_index] = []
+            if run_pdfplumber_heuristic or pdffigures2_results is not None:
                 try:
-                    observed_captions[page_index] = _captions_from_page(page, _text_lines(page))
-                    if pdffigures2_results is not None and not page.get_text("text").strip():
+                    cropped_page = page.crop(page.cropbox, strict=False)
+                    text_lines = _text_lines(cropped_page, geometry)
+                    observed_captions[page_index] = _captions_from_page(text_lines)
+                    if run_pdfplumber_heuristic:
+                        page_candidates[page_index] = _page_candidates(
+                            page_index, geometry, cropped_page, text_lines, warnings
+                        )
+                    if pdffigures2_results is not None and not text_lines:
                         warnings.append(
                             {
                                 "code": "page_text_empty_may_hide_figures",
@@ -1050,7 +1084,8 @@ def extract_pdf_figures(
                         }
                     )
             else:
-                page_candidates[page_index] = []
+                observed_captions[page_index] = []
+        renderer = stack.enter_context(PdfiumRenderer(pdf_path, page_geometries))
 
         excluded_table_count = 0
         if pdffigures2_results is not None:
@@ -1075,12 +1110,12 @@ def extract_pdf_figures(
                                     "page_index": page_index,
                                     "figure_number": caption.number,
                                     "message": (
-                                        "PyMuPDF found a Figure/Fig. caption that PDFFigures2 "
+                                        "pdfplumber found a Figure/Fig. caption that PDFFigures2 "
                                         "did not return."
                                     ),
                                 }
                             )
-                elif not (run_pymupdf_heuristic and use_heuristics_for_uncovered_pages):
+                elif not (run_pdfplumber_heuristic and use_heuristics_for_uncovered_pages):
                     page_candidates[page_index] = []
 
             if excluded_table_count:
@@ -1130,7 +1165,7 @@ def extract_pdf_figures(
             }
             for page_index, captions in observed_captions.items():
                 if captions and page_index not in official_pages_with_candidates:
-                    if not (run_pymupdf_heuristic and use_heuristics_for_uncovered_pages):
+                    if not (run_pdfplumber_heuristic and use_heuristics_for_uncovered_pages):
                         warnings.append(
                             {
                                 "code": "caption_page_missing_pdffigures2_candidate",
@@ -1181,8 +1216,9 @@ def extract_pdf_figures(
             )
 
         used_corrections: set[str] = set()
-        figure_records: list[dict[str, Any]] = []
+        figure_records: list[_FigureRecord] = []
         per_page_overlays: dict[int, list[tuple[str, BBox]]] = {}
+        render_jobs: dict[int, list[tuple[_FigureRecord, BBox]]] = {}
         for ordinal, candidate in enumerate(all_candidates, start=1):
             figure_id = figure_ids[ordinal - 1]
             bbox = candidate.bbox
@@ -1195,86 +1231,90 @@ def extract_pdf_figures(
                 )
                 if mark_corrected_reviewed:
                     review_notes += " Explicitly marked reviewed by correction import."
-            page = document[candidate.page_index]
+            geometry = page_geometries[candidate.page_index]
             width, height = page_sizes[candidate.page_index]
-            # Rendering with a rotation-adjusted clip preserves the unrotated
-            # stored bbox while returning pixels in the visible page orientation.
-            crop = _render_crop(page, bbox, dpi)
-            preview = _render_crop(page, bbox, preview_dpi)
             image_rel = Path("figures") / "images" / f"{figure_id}.png"
             preview_rel = Path("figures") / "previews" / f"{figure_id}.png"
-            _save_png(crop, asset_directory / image_rel)
-            preview_size = _save_png(
-                preview,
-                asset_directory / preview_rel,
-                max_bytes=PREVIEW_MAX_BYTES,
-            )
             page_overlay_rel = (
                 Path("figures") / "overlays" / f"page-{candidate.page_index + 1:04d}.png"
             )
             label = candidate.figure_number or f"p{candidate.page_index + 1}-{ordinal}"
             per_page_overlays.setdefault(candidate.page_index, []).append((label, bbox))
-            figure_records.append(
-                {
-                    "figure_id": figure_id,
-                    "figure_number": candidate.figure_number,
-                    "caption": candidate.caption.text if candidate.caption else None,
-                    "page": candidate.page_index + 1,
-                    "page_index": candidate.page_index,
-                    "bbox": [round(value, 2) for value in bbox],
-                    "caption_bbox": (
-                        [round(value, 2) for value in candidate.caption_bbox]
-                        if candidate.caption_bbox is not None
-                        else None
-                    ),
-                    "coordinate_system": COORDINATE_SYSTEM,
-                    "page_width": round(width, 2),
-                    "page_height": round(height, 2),
-                    "rotation": page_rotations[candidate.page_index],
-                    "image_path": image_rel.as_posix(),
-                    "preview_path": preview_rel.as_posix(),
-                    "overlay_path": page_overlay_rel.as_posix(),
-                    "preview_bytes": preview_size,
-                    "quality_status": (
-                        "source_clipped_candidate"
-                        if figure_id in used_corrections
-                        and expanded_corrections[figure_id].get("source_clipped", False)
-                        else "agent_visual_review"
-                        if figure_id in used_corrections
-                        and expanded_corrections[figure_id].get("reviewer") == "agent-visual-review"
-                        and not expanded_corrections[figure_id].get("human_reviewed", False)
-                        else "reviewed"
-                        if mark_corrected_reviewed and figure_id in used_corrections
-                        else "candidate"
-                    ),
-                    "review_notes": review_notes,
-                    "source_clipped": bool((correction or {}).get("source_clipped", False)),
-                    "caption_bbox_invalid": any(
-                        warning["code"] == "pdffigures2_invalid_caption_bbox"
-                        and warning["page_index"] == candidate.page_index
-                        and warning.get("figure_number") == candidate.figure_number
-                        for warning in warnings
-                    ),
-                    "detection_source": candidate.source_kind,
-                    "correction_provenance": (
-                        {
-                            "reviewer": expanded_corrections[figure_id].get("reviewer"),
-                            "human_reviewed": expanded_corrections[figure_id].get(
-                                "human_reviewed", False
-                            ),
-                            "confidence": expanded_corrections[figure_id].get("confidence"),
-                            "review_id": expanded_corrections[figure_id].get("review_id"),
-                        }
-                        if figure_id in used_corrections
-                        else None
-                    ),
-                }
-            )
+            record: _FigureRecord = {
+                "figure_id": figure_id,
+                "figure_number": candidate.figure_number,
+                "caption": candidate.caption.text if candidate.caption else None,
+                "page": candidate.page_index + 1,
+                "page_index": candidate.page_index,
+                "bbox": [round(value, 2) for value in bbox],
+                "caption_bbox": (
+                    [round(value, 2) for value in candidate.caption_bbox]
+                    if candidate.caption_bbox is not None
+                    else None
+                ),
+                "coordinate_system": COORDINATE_SYSTEM,
+                "page_width": round(width, 2),
+                "page_height": round(height, 2),
+                "rotation": geometry.rotation,
+                "image_path": image_rel.as_posix(),
+                "preview_path": preview_rel.as_posix(),
+                "overlay_path": page_overlay_rel.as_posix(),
+                "quality_status": (
+                    "source_clipped_candidate"
+                    if figure_id in used_corrections
+                    and expanded_corrections[figure_id].get("source_clipped", False)
+                    else "agent_visual_review"
+                    if figure_id in used_corrections
+                    and expanded_corrections[figure_id].get("reviewer") == "agent-visual-review"
+                    and not expanded_corrections[figure_id].get("human_reviewed", False)
+                    else "reviewed"
+                    if mark_corrected_reviewed and figure_id in used_corrections
+                    else "candidate"
+                ),
+                "review_notes": review_notes,
+                "source_clipped": bool((correction or {}).get("source_clipped", False)),
+                "caption_bbox_invalid": any(
+                    warning["code"] == "pdffigures2_invalid_caption_bbox"
+                    and warning["page_index"] == candidate.page_index
+                    and warning.get("figure_number") == candidate.figure_number
+                    for warning in warnings
+                ),
+                "detection_source": candidate.source_kind,
+                "correction_provenance": (
+                    {
+                        "reviewer": expanded_corrections[figure_id].get("reviewer"),
+                        "human_reviewed": expanded_corrections[figure_id].get(
+                            "human_reviewed", False
+                        ),
+                        "confidence": expanded_corrections[figure_id].get("confidence"),
+                        "review_id": expanded_corrections[figure_id].get("review_id"),
+                    }
+                    if figure_id in used_corrections
+                    else None
+                ),
+            }
+            figure_records.append(record)
+            render_jobs.setdefault(candidate.page_index, []).append((record, bbox))
 
         overlay_records: list[dict[str, Any]] = []
-        for page_index, entries in per_page_overlays.items():
-            page = document[page_index]
-            overlay = _render_overlay(page, entries, preview_dpi)
+        for page_index, jobs in render_jobs.items():
+            for record, bbox in jobs:
+                _save_png(
+                    _render_crop(renderer, page_index, bbox, dpi),
+                    asset_directory / record["image_path"],
+                )
+                record["preview_bytes"] = _save_png(
+                    _render_crop(renderer, page_index, bbox, preview_dpi),
+                    asset_directory / record["preview_path"],
+                    max_bytes=PREVIEW_MAX_BYTES,
+                )
+            overlay = _render_overlay(
+                renderer,
+                page_geometries[page_index],
+                page_index,
+                per_page_overlays[page_index],
+                preview_dpi,
+            )
             relative = Path("figures") / "overlays" / f"page-{page_index + 1:04d}.png"
             size = _save_png(overlay, asset_directory / relative, max_bytes=PREVIEW_MAX_BYTES)
             overlay_records.append(
@@ -1282,10 +1322,11 @@ def extract_pdf_figures(
                     "page": page_index + 1,
                     "page_index": page_index,
                     "path": relative.as_posix(),
-                    "candidate_count": len(entries),
+                    "candidate_count": len(per_page_overlays[page_index]),
                     "bytes": size,
                 }
             )
+            renderer.release_page(page_index)
 
         manifest: dict[str, Any] = {
             "schema_version": 1,
@@ -1305,7 +1346,7 @@ def extract_pdf_figures(
             ),
             "extractor_version": "0.1.0" if pdffigures2_results is not None else EXTRACTOR_VERSION,
             "coordinate_system": COORDINATE_SYSTEM,
-            "page_count": len(document),
+            "page_count": len(document.pages),
             "pdffigures2_tables_excluded": excluded_table_count,
             "figures": figure_records,
             "review_overlays": overlay_records,

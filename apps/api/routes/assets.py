@@ -1,4 +1,5 @@
 """领域路由：资产、搜索、仪表盘与表示。"""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -8,12 +9,26 @@ from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import Body, Header, Query, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from apps.api import routes_v1 as _v1
+from apps.api.catalog_queries import (
+    catalog_facets,
+    catalog_selection,
+    confirmed_links,
+    domain_counts,
+    domain_membership,
+    hidden_clause,
+    load_catalog_assets,
+    metadata_match,
+    reading_status,
+    serialize_catalog_asset,
+    sorted_selection,
+    visible_clause,
+)
 from apps.api.code_browser import CodeBrowserPathError, list_code_directory, read_code_file
 from apps.api.contracts import AssetCreate, AssetPatch, ReadingStateUpdate
-from apps.api.domain_views import annotate_presentation_domains, presentation_domains
+from apps.api.domain_views import annotate_presentation_domains
 from apps.api.editor import CODE_REPRESENTATION_TYPES
 from apps.api.events import record_mutation, replay_idempotent
 from apps.api.pagination import decode_cursor
@@ -23,15 +38,11 @@ from apps.api.routes_v1 import (
     RepresentationOpenRequest,
     _apply_asset_patch,
     _asset_context,
-    _asset_facets,
     _asset_snapshot,
     _build_research_units,
     _check_if_match,
-    _domains_with_counts,
     _editor_payload,
     _etag,
-    _has_available_action,
-    _is_system_hidden_asset,
     _list_payload,
     _live_asset,
     _local_code_context,
@@ -83,19 +94,14 @@ def _filter_search_hits_for_serving(
         representation_id
         for hits in candidates.values()
         for hit in hits
-        if (
-            representation_id := _uuid_metadata(
-                hit.document.metadata.get("representation_id")
-            )
-        )
+        if (representation_id := _uuid_metadata(hit.document.metadata.get("representation_id")))
         is not None
     }
     source_ids = {
         source_id
         for hits in candidates.values()
         for hit in hits
-        if (source_id := _uuid_metadata(hit.document.metadata.get("source_id")))
-        is not None
+        if (source_id := _uuid_metadata(hit.document.metadata.get("source_id"))) is not None
     }
     active_representations = active_representation_ids(session, representation_ids)
     retired_sources = retired_source_ids(session, source_ids)
@@ -105,8 +111,7 @@ def _filter_search_hits_for_serving(
             raw_representation_id = hit.document.metadata.get("representation_id")
             representation_id = _uuid_metadata(raw_representation_id)
             if raw_representation_id and (
-                representation_id is None
-                or representation_id not in active_representations
+                representation_id is None or representation_id not in active_representations
             ):
                 continue
             raw_source_id = hit.document.metadata.get("source_id")
@@ -126,186 +131,93 @@ def _paper_group_domain_candidate_ids(
 ) -> list[str]:
     """Return the index-visible members of domain-qualified paper units."""
 
-    catalog_assets = [
-        asset
-        for asset in session.scalars(
-            select(Asset).where(Asset.deleted_at.is_(None))
-        ).all()
-        if not _is_system_hidden_asset(asset)
-    ]
-    annotate_presentation_domains(session, catalog_assets)
-    assets_by_id = {asset.id: asset for asset in catalog_assets}
-    paper_repository_ids: dict[UUID, set[UUID]] = defaultdict(set)
-    for relation in session.scalars(
-        select(Relation).where(
-            Relation.relation_type == "implemented_by",
-            Relation.confirmation_status == "confirmed",
-            Relation.deleted_at.is_(None),
+    memberships = domain_membership(session)
+    links = confirmed_links(session)
+    domain_ids = select(memberships.c.asset_id).where(memberships.c.slug == domain)
+    papers = (
+        select(Asset.id)
+        .where(
+            visible_clause(session),
+            Asset.asset_type == "paper",
+            (Asset.id.in_(domain_ids))
+            | Asset.id.in_(select(links.c.paper_id).where(links.c.repository_id.in_(domain_ids))),
         )
-    ):
-        paper = assets_by_id.get(relation.subject_asset_id)
-        repository = assets_by_id.get(relation.object_asset_id)
-        if (
-            paper is not None
-            and paper.asset_type == "paper"
-            and repository is not None
-            and repository.asset_type == "repository"
-        ):
-            paper_repository_ids[paper.id].add(repository.id)
-
-    candidate_ids: set[UUID] = set()
-    for paper in catalog_assets:
-        if paper.asset_type != "paper":
-            continue
-        repository_ids = paper_repository_ids.get(paper.id, set())
-        related_repositories = [
-            assets_by_id[repository_id] for repository_id in repository_ids
-        ]
-        if domain not in presentation_domains(paper) and not any(
-            domain in presentation_domains(repository)
-            for repository in related_repositories
-        ):
-            continue
-        candidate_ids.add(paper.id)
-        candidate_ids.update(repository_ids)
-
+        .cte("domain_papers")
+    )
+    candidate_ids = set(session.scalars(select(papers.c.id)))
+    candidate_ids.update(
+        session.scalars(
+            select(links.c.repository_id).where(links.c.paper_id.in_(select(papers.c.id)))
+        )
+    )
     if include_independent_repositories:
         candidate_ids.update(
-            asset.id
-            for asset in catalog_assets
-            if asset.asset_type == "repository" and domain in presentation_domains(asset)
+            session.scalars(
+                select(Asset.id).where(
+                    visible_clause(session),
+                    Asset.asset_type == "repository",
+                    Asset.id.in_(domain_ids),
+                )
+            )
         )
     return sorted(str(asset_id) for asset_id in candidate_ids)
-
-
-def _first_public_date(asset: Asset) -> date | None:
-    """Return the canonical, day-precision publication date when available."""
-
-    value = (asset.attributes or {}).get("first_public_date")
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if not isinstance(value, str) or not value.strip():
-        return None
-    normalized = value.strip()
-    try:
-        return date.fromisoformat(normalized)
-    except ValueError:
-        try:
-            return datetime.fromisoformat(normalized.replace("Z", "+00:00")).date()
-        except ValueError:
-            return None
-
-
-def _matches_publication_date_range(
-    asset: Asset,
-    *,
-    date_from: date | None,
-    date_to: date | None,
-) -> bool:
-    if date_from is None and date_to is None:
-        return True
-    published = _first_public_date(asset)
-    if published is None:
-        return False
-    return not (
-        (date_from is not None and published < date_from)
-        or (date_to is not None and published > date_to)
-    )
-
-
-def _date_sort_values(asset: Asset) -> tuple[int, int, int]:
-    """Build a deterministic publication-date key with documented fallbacks."""
-
-    published = _first_public_date(asset)
-    if published is not None:
-        primary = published.toordinal() * 86_400_000_000
-    elif asset.year is not None:
-        primary = date(asset.year, 1, 1).toordinal() * 86_400_000_000
-    elif asset.created_at is not None:
-        created = asset.created_at
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
-        primary = (
-            created.date().toordinal() * 86_400_000_000
-            + created.hour * 3_600_000_000
-            + created.minute * 60_000_000
-            + created.second * 1_000_000
-            + created.microsecond
-        )
-    else:
-        primary = 0
-    created_at = asset.created_at
-    if created_at is not None and created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=UTC)
-    created_value = (
-        created_at.date().toordinal() * 86_400_000_000
-        + created_at.hour * 3_600_000_000
-        + created_at.minute * 60_000_000
-        + created_at.second * 1_000_000
-        + created_at.microsecond
-        if created_at is not None
-        else 0
-    )
-    return (
-        primary,
-        asset.year or 0,
-        created_value,
-    )
-
-
-def _sort_assets_by_date(assets: list[Asset], *, descending: bool) -> list[Asset]:
-    direction = -1 if descending else 1
-    return sorted(
-        assets,
-        key=lambda asset: (
-            *(direction * value for value in _date_sort_values(asset)),
-            str(asset.id),
-        ),
-    )
-
-
-def _title_query_priority(asset: Asset, query: str) -> int:
-    normalized = " ".join(query.casefold().split())
-    if not normalized:
-        return 1
-    normalized_titles = [
-        " ".join(value.casefold().split())
-        for value in (asset.title, asset.title_zh or "")
-        if value
-    ]
-    if normalized in normalized_titles:
-        return 0
-    if any(normalized in value for value in normalized_titles):
-        return 1
-    return 2
 
 
 @router.get("/dashboard")
 def dashboard(request: Request) -> dict[str, Any]:
     with _v1._database(request).session() as session:
-        all_assets = session.scalars(
-            select(Asset).where(Asset.deleted_at.is_(None)).order_by(Asset.updated_at.desc())
-        ).all()
-        assets = [
-            asset
-            for asset in all_assets
-            if not _is_system_hidden_asset(asset)
-        ]
-        states, summaries = _asset_context(session, assets)
-        reading_counts = {"unread": 0, "reading": 0, "read": 0}
-        for asset in assets:
-            reading_state = states.get(asset.id)
-            status = reading_state.status if reading_state is not None else "unread"
-            reading_counts[status] = reading_counts.get(status, 0) + 1
-        domains = _domains_with_counts(
-            session,
-            _v1._settings(request),
-            assets,
-            all_assets=list(all_assets),
-            asset_context=(states, summaries),
+        visible = visible_clause(session)
+        index_ready = (
+            select(IndexState.id)
+            .where(
+                IndexState.index_name == "documents",
+                IndexState.entity_type == "asset",
+                IndexState.entity_id == Asset.id,
+                IndexState.status == "ready",
+            )
+            .exists()
         )
+        counts = session.execute(
+            select(
+                func.count().label("assets"),
+                func.sum(case((Asset.asset_type == "paper", 1), else_=0)).label("papers"),
+                *(
+                    func.sum(case((reading_status() == value, 1), else_=0)).label(value)
+                    for value in ("unread", "reading", "read")
+                ),
+                func.sum(case((index_ready, 1), else_=0)).label("indexed"),
+            )
+            .select_from(Asset)
+            .where(visible)
+        ).one()
+        domains = domain_counts(session, _v1._settings(request))
+        recent_ids = list(
+            session.scalars(
+                select(Asset.id).where(visible).order_by(Asset.updated_at.desc(), Asset.id).limit(8)
+            )
+        )
+        reading_ids = list(
+            session.scalars(
+                select(Asset.id)
+                .where(visible, reading_status() == "reading")
+                .order_by(Asset.updated_at.desc(), Asset.id)
+                .limit(8)
+            )
+        )
+        assets = load_catalog_assets(session, list(dict.fromkeys([*recent_ids, *reading_ids])))
+        by_id = {asset.id: asset for asset in assets}
+        states, summaries = _asset_context(session, assets)
+
+        def cards(ids: list[UUID]) -> list[dict[str, Any]]:
+            return [
+                serialize_catalog_asset(
+                    by_id[asset_id],
+                    reading_state=states.get(asset_id),
+                    annotation_summary=summaries.get(asset_id),
+                )
+                for asset_id in ids
+            ]
+
         relation_count = (
             session.scalar(select(func.count(Relation.id)).where(Relation.deleted_at.is_(None)))
             or 0
@@ -314,46 +226,16 @@ def dashboard(request: Request) -> dict[str, Any]:
             session.scalar(select(func.count(Annotation.id)).where(Annotation.deleted_at.is_(None)))
             or 0
         )
-        recent = [
-            serialize_asset(
-                item,
-                reading_state=states.get(item.id),
-                annotation_summary=summaries.get(item.id),
-            )
-            for item in assets[:8]
-        ]
-        continue_reading = [
-            serialize_asset(
-                item,
-                reading_state=states.get(item.id),
-                annotation_summary=summaries.get(item.id),
-            )
-            for item in assets
-            if states.get(item.id) is not None and states[item.id].status == "reading"
-        ][:8]
-        indexed_assets = session.scalar(
-            select(func.count())
-            .select_from(Asset)
-            .where(
-                Asset.id.in_([asset.id for asset in assets]),
-                select(IndexState.id)
-                .where(
-                    IndexState.index_name == "documents",
-                    IndexState.entity_type == "asset",
-                    IndexState.entity_id == Asset.id,
-                    IndexState.status == "ready",
-                )
-                .exists(),
-            )
-        ) or 0
         stats = {
-            "assets": len(assets),
-            "papers": sum(item.asset_type == "paper" for item in assets),
-            **reading_counts,
+            **{
+                name: int(getattr(counts, name) or 0)
+                for name in ("assets", "papers", "unread", "reading", "read")
+            },
             "domains": len(domains),
             "relations": relation_count,
             "annotations": annotation_count,
         }
+        indexed_assets = int(counts.indexed or 0)
         return {
             "stats": stats,
             "total_assets": stats["assets"],
@@ -364,15 +246,16 @@ def dashboard(request: Request) -> dict[str, Any]:
             "domain_count": stats["domains"],
             "relation_count": stats["relations"],
             "annotation_count": stats["annotations"],
-            "recent_assets": recent,
-            "continue_reading": continue_reading,
+            "recent_assets": cards(recent_ids),
+            "continue_reading": cards(reading_ids),
             "domains": domains,
             "index_state": {
                 "status": "ready" if indexed_assets else "building",
                 "indexed_assets": indexed_assets,
-                "pending_assets": max(0, len(assets) - indexed_assets),
+                "pending_assets": max(0, stats["assets"] - indexed_assets),
             },
         }
+
 
 @router.get("/search")
 def search_assets(
@@ -395,6 +278,7 @@ def search_assets(
     has_code: bool | None = None,
     has_guide: bool | None = None,
     has_annotation: bool | None = None,
+    include_facets: bool = True,
     cursor: str | None = None,
 ) -> dict[str, Any]:
     if date_from is not None and date_to is not None and date_from > date_to:
@@ -420,9 +304,7 @@ def search_assets(
     }
     filters = {key: value for key, value in filters.items() if value is not None}
     runtime_filters = (
-        {}
-        if paper_grouping
-        else {key: value for key, value in filters.items() if key != "domain"}
+        {} if paper_grouping else {key: value for key, value in filters.items() if key != "domain"}
     )
     search_hits: dict[UUID, Any] = {}
     search_hit_candidates: dict[UUID, list[Any]] = defaultdict(list)
@@ -481,51 +363,81 @@ def search_assets(
 
     with _v1._database(request).session() as session:
         search_hits = _filter_search_hits_for_serving(session, search_hit_candidates)
-        catalog_assets = [
-            asset
-            for asset in session.scalars(
-                select(Asset)
-                .where(Asset.deleted_at.is_(None))
-                .order_by(Asset.updated_at.desc(), Asset.id)
-            ).all()
-            if not _is_system_hidden_asset(asset)
-        ]
-        annotate_presentation_domains(session, catalog_assets)
-        if search_hits:
-            indexed_assets = {item.id: item for item in catalog_assets if item.id in search_hits}
-            assets = [
-                indexed_assets[asset_id] for asset_id in search_hits if asset_id in indexed_assets
-            ]
-            if not assets:
-                search_hits.clear()
-                search_detail = {
-                    "degraded": True,
-                    "errors": ["keyword-runtime:stale-or-foreign-index"],
-                    "detail": "PostgreSQL metadata fallback is active.",
-                }
-                assets = catalog_assets
+        if search_hits and not session.scalar(
+            select(Asset.id).where(visible_clause(session), Asset.id.in_(search_hits)).limit(1)
+        ):
+            search_hits.clear()
+            search_detail = {
+                "degraded": True,
+                "errors": ["keyword-runtime:stale-or-foreign-index"],
+                "detail": "PostgreSQL metadata fallback is active.",
+            }
+        memberships = domain_membership(session)
+        links = confirmed_links(session)
+        selected = catalog_selection(
+            session,
+            memberships=memberships,
+            links=links,
+            grouped=paper_grouping,
+            query=q,
+            matched_ids=list(search_hits) if search_hits else None,
+            tokens=_tokens(q),
+            domain=domain,
+            asset_type=asset_type,
+            status=status,
+            author=author,
+            year_from=year_from,
+            year_to=year_to,
+            date_from=date_from,
+            date_to=date_to,
+            tags=tag,
+            has_pdf=has_pdf,
+            has_html=has_html,
+            has_code=has_code,
+            has_guide=has_guide,
+            has_annotation=has_annotation,
+        )
+        ordered = sorted_selection(
+            session,
+            selected,
+            sort=sort,
+            grouped=paper_grouping,
+            query=q,
+            hits=search_hits,
+            links=links,
+        )
+        if include_facets:
+            facets = catalog_facets(session, selected, memberships)
+            total = sum(facets["types"].values())
+            page_ids = list(session.scalars(ordered.offset(offset).limit(PAGE_SIZE)))
         else:
-            assets = catalog_assets
-
-        context_assets = catalog_assets if paper_grouping else assets
-        states, summaries = _asset_context(session, context_assets)
-        context_asset_ids = [asset.id for asset in context_assets]
-        annotation_assets = {
-            asset_id
-            for asset_id in session.scalars(
-                select(Annotation.asset_id).where(
-                    Annotation.deleted_at.is_(None),
-                    Annotation.asset_id.in_(context_asset_ids),
-                )
+            rows = session.execute(
+                ordered.add_columns(func.count().over().label("total"))
+                .offset(offset)
+                .limit(PAGE_SIZE)
+            ).all()
+            page_ids = [row.id for row in rows]
+            if rows:
+                total = rows[0].total
+            elif offset:
+                total = session.scalar(select(func.count()).select_from(selected.subquery())) or 0
+            else:
+                total = 0
+        context_ids = list(page_ids)
+        if paper_grouping and page_ids:
+            context_ids.extend(
+                session.scalars(select(links.c.repository_id).where(links.c.paper_id.in_(page_ids)))
             )
-        }
+            context_ids = list(dict.fromkeys(context_ids))
+        context_assets = load_catalog_assets(session, context_ids)
+        states, summaries = _asset_context(session, context_assets)
         representations: dict[UUID, list[Representation]] = defaultdict(list)
-        if context_asset_ids:
+        if context_ids:
             for representation in session.scalars(
                 select(Representation)
                 .where(
                     Representation.deleted_at.is_(None),
-                    Representation.asset_id.in_(context_asset_ids),
+                    Representation.asset_id.in_(context_ids),
                     active_representation_clause(),
                 )
                 .order_by(
@@ -536,82 +448,51 @@ def search_assets(
                 )
             ):
                 representations[representation.asset_id].append(representation)
-        filtered: list[Asset] = []
-        for asset in assets:
-            if not paper_grouping:
-                if domain and domain not in presentation_domains(asset):
-                    continue
-                if asset_type and asset_type != "all" and asset.asset_type != asset_type:
-                    continue
-                if author and not any(
-                    author.casefold() in item.casefold() for item in asset.authors or []
-                ):
-                    continue
-                if year_from is not None and (asset.year is None or asset.year < year_from):
-                    continue
-                if year_to is not None and (asset.year is None or asset.year > year_to):
-                    continue
-                if not _matches_publication_date_range(
-                    asset,
-                    date_from=date_from,
-                    date_to=date_to,
-                ):
-                    continue
-                if tag and not set(tag).intersection(asset.tags or []):
-                    continue
-                reading_state = states.get(asset.id)
-                reading_status = reading_state.status if reading_state is not None else "unread"
-                if status and reading_status != status:
-                    continue
-                if has_annotation is not None and (
-                    (asset.id in annotation_assets) != has_annotation
-                ):
-                    continue
-                asset_representations = representations.get(asset.id, [])
-                availability_flags = {
-                    kind: _has_available_action(asset_representations, kind)
-                    for kind in ("pdf", "html", "code", "guide")
-                }
-                if has_pdf is not None and availability_flags["pdf"] != has_pdf:
-                    continue
-                if has_html is not None and availability_flags["html"] != has_html:
-                    continue
-                if has_code is not None and availability_flags["code"] != has_code:
-                    continue
-                if has_guide is not None and availability_flags["guide"] != has_guide:
-                    continue
-            if q.strip() and not search_hits:
-                haystack = " ".join(
-                    [
-                        asset.title or "",
-                        asset.title_zh or "",
-                        " ".join(asset.authors or []),
-                        asset.abstract or "",
-                        asset.summary or "",
-                        " ".join(asset.tags or []),
-                    ]
-                ).casefold()
-                if q.casefold() not in haystack and not any(
-                    token in haystack for token in _tokens(q)
-                ):
-                    continue
-            filtered.append(asset)
-
+        by_id = {asset.id: asset for asset in context_assets}
+        page = [by_id[asset_id] for asset_id in page_ids]
         if paper_grouping:
-            units, facet_assets = _build_research_units(
+            annotation_assets = (
+                set(
+                    session.scalars(
+                        select(Annotation.asset_id).where(
+                            Annotation.deleted_at.is_(None),
+                            Annotation.asset_id.in_(context_ids),
+                        )
+                    )
+                )
+                if context_ids
+                else set()
+            )
+            if q.strip():
+                matched_ids = (
+                    set(search_hits)
+                    if search_hits
+                    else set(
+                        session.scalars(
+                            select(Asset.id).where(
+                                Asset.id.in_(context_ids), metadata_match(q, _tokens(q))
+                            )
+                        )
+                    )
+                )
+                matched_assets = [asset for asset in context_assets if asset.id in matched_ids]
+                # Keep the search index's tie order for best-match selection.
+                if search_hits:
+                    order = {asset_id: position for position, asset_id in enumerate(search_hits)}
+                    matched_assets.sort(key=lambda asset: order[asset.id])
+            else:
+                matched_assets = page
+            units, _ = _build_research_units(
                 session,
-                catalog_assets=catalog_assets,
-                matched_assets=filtered,
+                catalog_assets=context_assets,
+                matched_assets=matched_assets,
                 search_hits=search_hits,
                 query=q,
                 states=states,
                 summaries=summaries,
                 annotation_assets=annotation_assets,
                 representations=representations,
-                # The default catalog is a paper census: repository-only assets
-                # remain searchable, but must not inflate the no-query paper total.
-                include_independent_repositories=bool(q.strip())
-                and asset_type != "paper",
+                include_independent_repositories=bool(q.strip()) and asset_type != "paper",
                 domain=domain,
                 status=status,
                 author=author,
@@ -625,76 +506,43 @@ def search_assets(
                 has_annotation=has_annotation,
                 source_registry=_v1._source_registry(request),
             )
-            unit_pairs = [
-                (unit, asset)
-                for unit, asset in zip(units, facet_assets, strict=True)
-                if _matches_publication_date_range(
+            units_by_id = {unit["unit_id"]: unit for unit in units}
+            items = [units_by_id[str(asset_id)] for asset_id in page_ids]
+        else:
+            items = []
+            for asset in page:
+                selected_hit = search_hits.get(asset.id)
+                item = serialize_catalog_asset(
                     asset,
-                    date_from=date_from,
-                    date_to=date_to,
+                    reading_state=states.get(asset.id),
+                    annotation_summary=summaries.get(asset.id),
+                    score=round(float(selected_hit.score), 6) if selected_hit is not None else 1.0,
                 )
-            ]
-            if sort != "relevance":
-                direction = -1 if sort == "date_desc" else 1
-                unit_pairs.sort(
-                    key=lambda item: (
-                        _title_query_priority(item[1], q),
-                        *(direction * value for value in _date_sort_values(item[1])),
-                        str(item[1].id),
+                if selected_hit is not None:
+                    item.update(
+                        snippet=" ".join(selected_hit.document.text.split())[:360],
+                        document_kind=selected_hit.document.kind,
+                        anchor=selected_hit.document.metadata.get("anchor"),
+                        representation_id=selected_hit.document.metadata.get("representation_id"),
+                        search_source=selected_hit.source,
+                        exact_match=selected_hit.exact_match,
                     )
-                )
-            units = [unit for unit, _ in unit_pairs]
-            facet_assets = [asset for _, asset in unit_pairs]
-            payload = _list_payload(units[offset : offset + PAGE_SIZE], offset, len(units))
-            payload["mode"] = mode
-            payload["sort"] = sort
+                item["representations"] = [
+                    serialize_representation(representation)
+                    for representation in representations.get(asset.id, [])
+                    if representation.availability == "available"
+                ]
+                items.append(item)
+        payload = _list_payload(items, offset, total)
+        payload.update(mode=mode, sort=sort)
+        if include_facets:
+            payload["facets"] = facets
+        if paper_grouping:
             payload["group_by"] = "paper"
-            payload.update(search_detail)
-            payload.setdefault("degraded", bool(q.strip() and not search_hits))
-            payload["facets"] = _asset_facets(facet_assets, states)
-            return payload
-
-        if sort != "relevance":
-            filtered = _sort_assets_by_date(
-                filtered,
-                descending=sort == "date_desc",
-            )
-        page = filtered[offset : offset + PAGE_SIZE]
-        items: list[dict[str, Any]] = []
-        for asset in page:
-            selected_hit = search_hits.get(asset.id)
-            item = serialize_asset(
-                asset,
-                reading_state=states.get(asset.id),
-                annotation_summary=summaries.get(asset.id),
-                score=(round(float(selected_hit.score), 6) if selected_hit is not None else 1.0),
-            )
-            if selected_hit is not None:
-                item.update(
-                    {
-                        "snippet": " ".join(selected_hit.document.text.split())[:360],
-                        "document_kind": selected_hit.document.kind,
-                        "anchor": selected_hit.document.metadata.get("anchor"),
-                        "representation_id": selected_hit.document.metadata.get(
-                            "representation_id"
-                        ),
-                        "search_source": selected_hit.source,
-                        "exact_match": selected_hit.exact_match,
-                    }
-                )
-            item["representations"] = [
-                serialize_representation(representation)
-                for representation in representations.get(asset.id, [])
-                if representation.availability == "available"
-            ]
-            items.append(item)
-        payload = _list_payload(items, offset, len(filtered))
-        payload["mode"] = mode
-        payload["sort"] = sort
         payload.update(search_detail)
         payload.setdefault("degraded", bool(q.strip() and not search_hits))
-        payload["facets"] = _asset_facets(filtered, states)
         return payload
+
 
 @router.get("/assets")
 def list_assets(
@@ -707,28 +555,28 @@ def list_assets(
 ) -> dict[str, Any]:
     offset = decode_cursor(cursor)
     with _v1._database(request).session() as session:
-        statement = select(Asset).order_by(Asset.updated_at.desc(), Asset.id)
+        statement = select(Asset.id).where(~func.coalesce(hidden_clause(session), False))
         if not include_deleted:
             statement = statement.where(Asset.deleted_at.is_(None))
-        assets = [
-            asset
-            for asset in session.scalars(statement).all()
-            if not _is_system_hidden_asset(asset)
-        ]
-        annotate_presentation_domains(session, assets)
-        states, summaries = _asset_context(session, assets)
-        filtered: list[Asset] = []
-        for asset in assets:
-            if domain and domain not in presentation_domains(asset):
-                continue
-            reading_state = states.get(asset.id)
-            current_status = reading_state.status if reading_state is not None else "unread"
-            if status and current_status != status:
-                continue
-            filtered.append(asset)
-        page = filtered[offset : offset + PAGE_SIZE]
+        if domain:
+            memberships = domain_membership(session)
+            statement = statement.where(
+                Asset.id.in_(select(memberships.c.asset_id).where(memberships.c.slug == domain))
+            )
+        if status:
+            statement = statement.where(reading_status() == status)
+        total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        page_ids = list(
+            session.scalars(
+                statement.order_by(Asset.updated_at.desc(), Asset.id)
+                .offset(offset)
+                .limit(PAGE_SIZE)
+            )
+        )
+        page = load_catalog_assets(session, page_ids)
+        states, summaries = _asset_context(session, page)
         items = [
-            serialize_asset(
+            serialize_catalog_asset(
                 item,
                 reading_state=states.get(item.id),
                 annotation_summary=summaries.get(item.id),
@@ -757,7 +605,8 @@ def list_assets(
                     )
             for item, asset in zip(items, page, strict=True):
                 item["representations"] = page_representations[asset.id]
-        return _list_payload(items, offset, len(filtered))
+        return _list_payload(items, offset, total)
+
 
 @router.post("/assets", status_code=201)
 def create_asset(
@@ -797,6 +646,7 @@ def create_asset(
         )
         response.headers["ETag"] = _etag(asset.row_version)
         return result
+
 
 @router.get("/assets/{asset_id}")
 def get_asset(asset_id: UUID, request: Request, response: Response) -> dict[str, Any]:
@@ -870,8 +720,7 @@ def get_asset(asset_id: UUID, request: Request, response: Response) -> dict[str,
         ):
             member_representations[representation.asset_id].append(representation)
         result["representations"] = [
-            serialize_representation(item)
-            for item in member_representations.get(asset.id, [])
+            serialize_representation(item) for item in member_representations.get(asset.id, [])
         ]
         source_aliases = {
             source.id: source.alias for source in session.scalars(select(Source)).all()
@@ -897,6 +746,7 @@ def get_asset(asset_id: UUID, request: Request, response: Response) -> dict[str,
         ]
         response.headers["ETag"] = _etag(asset.row_version)
         return result
+
 
 @router.get("/asset-redirects/{from_asset_id}")
 @router.get("/assets/{from_asset_id}/redirect")
@@ -940,6 +790,7 @@ def get_asset_redirect(
             ],
         }
 
+
 @router.patch("/assets/{asset_id}")
 def update_asset(
     asset_id: UUID,
@@ -973,6 +824,7 @@ def update_asset(
         response.headers["ETag"] = _etag(asset.row_version)
         return result
 
+
 @router.delete("/assets/{asset_id}", status_code=204)
 def delete_asset(
     asset_id: UUID,
@@ -996,6 +848,7 @@ def delete_asset(
             event_type="asset.deleted",
         )
     return Response(status_code=204)
+
 
 @router.post("/assets/{asset_id}/restore")
 def restore_asset(
@@ -1032,6 +885,7 @@ def restore_asset(
         )
         response.headers["ETag"] = _etag(asset.row_version)
         return result
+
 
 @router.put("/assets/{asset_id}/reading-state")
 def update_reading_state(
@@ -1089,6 +943,7 @@ def update_reading_state(
         response.headers["ETag"] = _etag(state.row_version)
         return serialize_asset(asset, reading_state=state)
 
+
 @router.get("/assets/{asset_id}/representations")
 def list_representations(
     asset_id: UUID,
@@ -1117,13 +972,7 @@ def list_representations(
             source.id: source.alias
             for source in session.scalars(
                 select(Source).where(
-                    Source.id.in_(
-                        {
-                            item.source_id
-                            for item in items
-                            if item.source_id is not None
-                        }
-                    )
+                    Source.id.in_({item.source_id for item in items if item.source_id is not None})
                 )
             ).all()
         }
@@ -1176,6 +1025,7 @@ def list_representations(
             "include_retired": include_retired,
         }
 
+
 @router.get("/representations/{representation_id}/code/tree")
 def code_tree(
     representation_id: UUID,
@@ -1192,6 +1042,7 @@ def code_tree(
     except CodeBrowserPathError as error:
         raise conflict(str(error)) from error
 
+
 @router.get("/representations/{representation_id}/code/file")
 def code_file(
     representation_id: UUID,
@@ -1207,6 +1058,7 @@ def code_file(
         )
     except CodeBrowserPathError as error:
         raise conflict(str(error)) from error
+
 
 @router.post("/representations/{representation_id}/open-actions")
 def open_representation(

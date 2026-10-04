@@ -932,3 +932,8 @@ class SourceRetirementRollback(Base):
     )
 
     retirement: Mapped[SourceRetirement] = relationship(back_populates="rollbacks")
+
+
+# Product-managed domains and drafts share the operational metadata registry.
+from . import product_models as _product_models  # noqa: E402,F401
+from . import workflow_models as _workflow_models  # noqa: E402,F401

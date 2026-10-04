@@ -11,6 +11,8 @@ import {
 } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
+import { SelectionToolbar } from "../components/SelectionToolbar";
+import { SavedSearchControls } from "../components/SavedSearchControls";
 import { ResearchUnitCard } from "../components/ResearchUnitCard";
 import { researchUnitFromAsset } from "../lib/researchUnits";
 
@@ -28,6 +30,8 @@ const sortLabels: Record<SearchSort, string> = {
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const q = searchParams.get("q") ?? "";
+  const [selected, setSelected] = useState<string[]>([]);
+  useEffect(() => setSelected([]), [searchParams]);
   const mode = (searchParams.get("mode") as SearchMode | null) ?? "keyword";
   const sortParam = searchParams.get("sort");
   const sort: SearchSort =
@@ -35,6 +39,7 @@ export function SearchPage() {
       ? sortParam
       : "date_desc";
   const domain = searchParams.get("domain") ?? "";
+  const collectionId = searchParams.get("collection_id") ?? "";
   const status = (searchParams.get("status") as ReadingStatus | null) ?? "";
   const assetType = searchParams.get("type") ?? "";
   const author = searchParams.get("author") ?? "";
@@ -59,10 +64,7 @@ export function SearchPage() {
   });
 
   useEffect(() => setInput(q), [q]);
-  useEffect(
-    () => setAdvanced({ author, tag }),
-    [author, tag],
-  );
+  useEffect(() => setAdvanced({ author, tag }), [author, tag]);
   useEffect(() => {
     if (!searchParams.has("has_guide")) return;
     setSearchParams(
@@ -79,6 +81,10 @@ export function SearchPage() {
     queryKey: ["domains"],
     queryFn: ({ signal }) => api.domains(signal),
   });
+  const collections = useQuery({
+    queryKey: ["collections"],
+    queryFn: ({ signal }) => api.collections(signal),
+  });
   const results = useInfiniteQuery({
     queryKey: [
       "search",
@@ -86,6 +92,7 @@ export function SearchPage() {
       mode,
       sort,
       domain,
+      collectionId,
       status,
       assetType,
       author,
@@ -108,6 +115,7 @@ export function SearchPage() {
           sort,
           group_by: groupBy,
           domain,
+          collection_id: collectionId || undefined,
           status,
           type: assetType,
           author,
@@ -140,10 +148,7 @@ export function SearchPage() {
     });
   };
 
-  const updateDateFilter = (
-    key: "date_from" | "date_to",
-    value: string,
-  ) => {
+  const updateDateFilter = (key: "date_from" | "date_to", value: string) => {
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       const legacyKey = key === "date_from" ? "year_from" : "year_to";
@@ -187,6 +192,7 @@ export function SearchPage() {
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       [
+        "collection_id",
         "author",
         "tag",
         "has_pdf",
@@ -201,6 +207,7 @@ export function SearchPage() {
 
   const advancedActive = Boolean(
     mode !== "keyword" ||
+      collectionId ||
       author ||
       tag ||
       hasPdf ||
@@ -210,6 +217,7 @@ export function SearchPage() {
   );
   const advancedCount = [
     mode !== "keyword",
+    collectionId,
     author,
     tag,
     hasPdf,
@@ -353,6 +361,23 @@ export function SearchPage() {
           </summary>
           <div className="advanced-filter-grid">
             <label>
+              <span>收藏集合</span>
+              <select
+                aria-label="收藏集合筛选"
+                value={collectionId}
+                onChange={(event) =>
+                  updateFilter("collection_id", event.target.value)
+                }
+              >
+                <option value="">全部资料</option>
+                {collections.data?.items.map((item) => (
+                  <option value={item.id} key={item.id}>
+                    {item.label ?? item.name ?? item.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               <span>检索模式</span>
               <select
                 value={mode}
@@ -405,7 +430,10 @@ export function SearchPage() {
                   type="checkbox"
                   checked={Boolean(checked)}
                   onChange={(event) =>
-                    updateFilter(String(key), event.target.checked ? "true" : "")
+                    updateFilter(
+                      String(key),
+                      event.target.checked ? "true" : "",
+                    )
                   }
                 />
                 <span>{String(label)}</span>
@@ -433,21 +461,43 @@ export function SearchPage() {
         </details>
       </form>
 
+      <SavedSearchControls
+        definition={Object.fromEntries(searchParams.entries())}
+      />
+      <SelectionToolbar ids={selected} clear={() => setSelected([])} />
       {results.isPending ? (
-        <LoadingState
-          label={q ? `正在搜索“${q}”…` : "正在加载研究资产…"}
-        />
+        <LoadingState label={q ? `正在搜索“${q}”…` : "正在加载研究资产…"} />
       ) : results.isError ? (
-        <ErrorState error={results.error} retry={() => void results.refetch()} />
+        <ErrorState
+          error={results.error}
+          retry={() => void results.refetch()}
+        />
       ) : units.length ? (
         <section aria-label="搜索结果">
           <h2 className="sr-only">搜索结果</h2>
           <div className="result-summary">
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={
+                  units.length > 0 &&
+                  units.every((u) => selected.includes(u.primary_asset.id))
+                }
+                onChange={(e) =>
+                  setSelected(
+                    e.target.checked
+                      ? units.map((u) => u.primary_asset.id)
+                      : [],
+                  )
+                }
+              />
+              <span>选择当前已加载结果</span>
+            </label>
             <div>
-              <strong>{typeof total === "number" ? total : units.length}</strong>
-              <span>
-                {groupBy === "paper" ? " 个研究单元" : " 条代码仓库"}
-              </span>
+              <strong>
+                {typeof total === "number" ? total : units.length}
+              </strong>
+              <span>{groupBy === "paper" ? " 个研究单元" : " 条代码仓库"}</span>
               <small>
                 {q ? `“${q}”` : "全部资产"} · {modeLabels[mode]} ·{" "}
                 {sortLabels[sort]}
@@ -456,7 +506,27 @@ export function SearchPage() {
           </div>
           <div className="asset-list">
             {units.map((unit) => (
-              <ResearchUnitCard unit={unit} key={unit.unit_id} />
+              <div className="selectable-asset" key={unit.unit_id}>
+                <label className="asset-select">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(unit.primary_asset.id)}
+                    onChange={(e) =>
+                      setSelected((current) =>
+                        e.target.checked
+                          ? [...current, unit.primary_asset.id]
+                          : current.filter(
+                              (id) => id !== unit.primary_asset.id,
+                            ),
+                      )
+                    }
+                  />
+                  <span className="sr-only">
+                    选择 {unit.primary_asset.title}
+                  </span>
+                </label>
+                <ResearchUnitCard unit={unit} />
+              </div>
             ))}
           </div>
           {results.hasNextPage && (

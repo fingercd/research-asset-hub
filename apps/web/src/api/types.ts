@@ -104,6 +104,9 @@ export interface Annotation {
   body_markdown?: string;
   body?: string;
   pinned?: boolean;
+  anchor?: PdfAnchor | null;
+  anchor_kind?: string;
+  anchor_status?: string;
   created_at?: string;
   updated_at?: string;
   row_version?: number;
@@ -317,7 +320,13 @@ export interface Job {
   id: string;
   type?: string;
   name?: string;
-  status?: "pending" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  status?:
+    | "pending"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | string;
   progress?: number | null;
   detail?: string | null;
   error?: string | { detail?: string; message?: string } | null;
@@ -383,5 +392,140 @@ export function getAssetDomains(asset: Asset): string[] {
 }
 
 export function getRepresentationType(representation: Representation): string {
-  return (representation.representation_type ?? representation.type ?? "").toLowerCase();
+  return (
+    representation.representation_type ??
+    representation.type ??
+    ""
+  ).toLowerCase();
+}
+
+export interface PdfAnchor {
+  representation_id: string;
+  source_hash?: string | null;
+  page: number;
+  rects: Array<{ x: number; y: number; width: number; height: number }>;
+  quote?: string;
+}
+export interface IntakeDraft {
+  id: string;
+  domain: string;
+  title?: string;
+  status: string;
+  authors?: string[];
+  summary?: string | null;
+  year?: number | null;
+  doi?: string | null;
+  arxiv_id?: string | null;
+  tags?: string[];
+  html_url?: string | null;
+  reference_path?: string | null;
+  pdf_uploaded?: boolean;
+  commit_plan?: { action: "create" | "attach"; asset_id?: string };
+  storage_mode?: "managed" | "reference";
+  filename?: string;
+  pdf_filename?: string;
+  asset_id?: string;
+  error?: string;
+  [key: string]: unknown;
+}
+export interface IntakePreview {
+  draft: IntakeDraft;
+  duplicates: Array<{
+    asset_id?: string;
+    id?: string;
+    title?: string;
+    reason?: string;
+    [key: string]: unknown;
+  }>;
+  warnings: Array<string | { detail?: string; message?: string }>;
+}
+export interface Collection {
+  id: string;
+  label?: string;
+  title?: string;
+  name?: string;
+  description?: string | null;
+  asset_ids?: string[];
+  assets?: Asset[];
+  member_count?: number;
+  row_version?: number;
+}
+export interface SavedSearch {
+  id: string;
+  title?: string;
+  name?: string;
+  definition: Record<string, unknown>;
+  row_version?: number;
+}
+export interface ReadingPosition {
+  representation_id: string;
+  page: number;
+  source_hash?: string | null;
+  updated_at?: string;
+  row_version?: number;
+}
+export interface McpConfig {
+  server_name: string;
+  config: {
+    mcpServers: Record<
+      string,
+      { command: string; args: string[]; env?: Record<string, string> }
+    >;
+  };
+  tools: string[];
+  read_only: boolean;
+  data_dir: string;
+  bundled_runtime: boolean;
+  module_available: boolean;
+}
+export interface McpCheck {
+  status: string;
+  tool_count: number;
+  tools: string[];
+  read_only: boolean;
+  database: string;
+  verification: string;
+  note: string;
+}
+
+export interface ReadingPositionResponse {
+  position: ReadingPosition | null;
+  stale: boolean;
+  reason?: string;
+  current_source_hash?: string;
+}
+
+export interface PackageImport {
+  id: string;
+  import_id?: string;
+  status: "preview" | "committed";
+  row_version: number;
+  preview: {
+    assets: Array<{
+      id: string;
+      title: string;
+      action: string;
+      target_asset_id?: string;
+      candidates?: Array<{ id?: string; asset_id?: string; title?: string }>;
+    }>;
+    counts?: Record<string, number>;
+    attachment_count?: number;
+    attachment_bytes?: number;
+    omitted_representations?: number;
+    has_user_state?: boolean;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface WorkflowItemResult {
+  id: string;
+  status: "updated" | "unchanged" | "failed";
+  error?: string | { code?: string; message?: string };
+}
+export interface WorkflowResult {
+  items: WorkflowItemResult[];
+  total: number;
+  succeeded: number;
+  failed: number;
 }

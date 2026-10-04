@@ -6,6 +6,8 @@ plugins remain opt-in through ``discover_entry_points``.
 
 from __future__ import annotations
 
+from packages.workflows.adapter import DomainPackageAdapter
+
 from .agent import AgentAdapter
 from .base import AdapterRegistry
 from .canonical_snapshot import CanonicalSnapshotAdapter
@@ -20,6 +22,7 @@ from .world_model import WorldModelAdapter
 def build_default_registry() -> AdapterRegistry:
     registry = AdapterRegistry()
     registry.register("generic_manifest", GenericManifestAdapter)
+    registry.register("domain_package", DomainPackageAdapter)
     registry.register("canonical_snapshot", CanonicalSnapshotAdapter)
     registry.register("agent", AgentAdapter)
     registry.register("infra", InfraAdapter)

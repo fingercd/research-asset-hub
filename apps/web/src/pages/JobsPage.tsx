@@ -13,6 +13,20 @@ import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { formatDate, jobError } from "../lib/format";
 
+const jobLabels: Record<string, string> = {
+  extract_representation: "提取论文内容",
+  index_asset: "更新资料关键词索引",
+  index_representation: "更新文件索引",
+  repository_snapshot: "下载代码快照",
+  "repository.snapshot": "下载代码快照",
+  "representation.extract": "提取论文内容",
+  "representation.index": "更新文件索引",
+  "asset.index": "更新资料关键词索引",
+  export_package: "导出领域包",
+  reindex_assets: "更新关键词索引",
+  import_package: "导入领域包",
+};
+
 const statusLabels: Record<string, string> = {
   pending: "等待中",
   running: "运行中",
@@ -34,7 +48,11 @@ function JobStatus({ job }: { job: Job }) {
             : Clock3;
   return (
     <span className={`job-status status-${job.status ?? "pending"}`}>
-      <Icon className={job.status === "running" ? "spin" : undefined} size={15} aria-hidden="true" />
+      <Icon
+        className={job.status === "running" ? "spin" : undefined}
+        size={15}
+        aria-hidden="true"
+      />
       {statusLabels[job.status ?? "pending"] ?? job.status ?? "等待中"}
     </span>
   );
@@ -52,10 +70,14 @@ function JobRow({ job }: { job: Job }) {
   });
   const error = retry.error ?? cancel.error;
   const storedMessage = jobError(job);
-  const storedMessageClass = job.status === "cancelled" ? "job-note" : "job-error";
+  const storedMessageClass =
+    job.status === "cancelled" ? "job-note" : "job-error";
   const progress =
     typeof job.progress === "number"
-      ? Math.min(100, Math.max(0, job.progress <= 1 ? job.progress * 100 : job.progress))
+      ? Math.min(
+          100,
+          Math.max(0, job.progress <= 1 ? job.progress * 100 : job.progress),
+        )
       : null;
 
   return (
@@ -63,7 +85,9 @@ function JobRow({ job }: { job: Job }) {
       <div className="job-card-header">
         <div>
           <JobStatus job={job} />
-          <h2>{job.name ?? job.type ?? "后台任务"}</h2>
+          <h2>
+            {jobLabels[job.type ?? ""] ?? job.name ?? job.type ?? "后台任务"}
+          </h2>
           <span className="mono">{job.id}</span>
         </div>
         <time>{formatDate(job.created_at, true)}</time>
@@ -71,19 +95,40 @@ function JobRow({ job }: { job: Job }) {
       {job.detail && <p>{job.detail}</p>}
       {progress !== null && (
         <div className="progress-row">
-          <div className="progress-track" aria-label={`进度 ${Math.round(progress)}%`}>
+          <div
+            className="progress-track"
+            aria-label={`进度 ${Math.round(progress)}%`}
+          >
             <span style={{ width: `${progress}%` }} />
           </div>
           <span>{Math.round(progress)}%</span>
         </div>
       )}
-      {storedMessage && <div className={storedMessageClass}>{storedMessage}</div>}
+      {storedMessage && (
+        <div className={storedMessageClass}>{storedMessage}</div>
+      )}
       <footer>
         <span>
-          {job.started_at ? `开始于 ${formatDate(job.started_at, true)}` : "尚未开始"}
-          {job.finished_at ? ` · 结束于 ${formatDate(job.finished_at, true)}` : ""}
+          {job.started_at
+            ? `开始于 ${formatDate(job.started_at, true)}`
+            : "尚未开始"}
+          {job.finished_at
+            ? ` · 结束于 ${formatDate(job.finished_at, true)}`
+            : ""}
         </span>
         <div>
+          {job.status === "succeeded" &&
+            (job.type === "package_export" ||
+              job.type === "domain_export" ||
+              job.type === "export_package") && (
+              <a
+                className="button primary compact"
+                href={api.exportDownloadUrl(job.id)}
+                download
+              >
+                下载领域包
+              </a>
+            )}
           {job.status === "failed" && (
             <button
               className="button secondary compact"
@@ -106,7 +151,9 @@ function JobRow({ job }: { job: Job }) {
           )}
         </div>
       </footer>
-      {error && <span className="inline-error">{getApiErrorMessage(error)}</span>}
+      {error && (
+        <span className="inline-error">{getApiErrorMessage(error)}</span>
+      )}
     </article>
   );
 }
@@ -128,7 +175,7 @@ export function JobsPage() {
       <PageHeader
         eyebrow="运行状态"
         title="后台任务"
-        description="查看导入、索引与嵌入任务；运行中的任务会自动刷新。"
+        description="查看 PDF 抽取、关键词索引、代码快照与领域包任务；运行中的任务会自动刷新。"
         actions={
           <button
             className="button secondary"
@@ -146,7 +193,9 @@ export function JobsPage() {
         <ErrorState error={jobs.error} retry={() => void jobs.refetch()} />
       ) : jobs.data.items.length ? (
         <section className="job-list" aria-label="后台任务列表">
-          {jobs.data.items.map((job) => <JobRow job={job} key={job.id} />)}
+          {jobs.data.items.map((job) => (
+            <JobRow job={job} key={job.id} />
+          ))}
         </section>
       ) : (
         <EmptyState

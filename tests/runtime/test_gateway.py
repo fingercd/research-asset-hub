@@ -644,26 +644,46 @@ def test_directory_representation_lists_code_but_blocks_secrets(
             role="primary",
             materialization_kind="directory",
             availability="available",
-            root_key="html",
+            root_key="repository",
             path_ref=".",
         )
         session.add(representation)
         session.flush()
         representation_id = representation.id
-    token = create_gateway_token(
-        settings.gateway_secret,
-        representation_id,
-        ttl_seconds=60,
-        nonce="directory",
-    )
-    session_response = client.get(
-        f"/session/{representation_id}",
-        params={"token": token},
-        follow_redirects=False,
-    )
-    listing = client.get(session_response.headers["location"])
-    assert listing.status_code == 200
-    assert "app.py" in listing.text
-    assert ".env" not in listing.text
-    blocked = client.get(f"/assets/{representation_id}/.env")
-    assert blocked.status_code == 403
+    # A directory representation publishes its explicitly selected repository
+    # root, rather than borrowing the fixture's HTML file registration.
+    registry = SourceRegistry({("demo", "repository"): page.parent.resolve()})
+    app = create_app(settings, database=database, registry=registry)
+    with TestClient(app) as directory_client:
+        token = create_gateway_token(
+            settings.gateway_secret,
+            representation_id,
+            ttl_seconds=60,
+            nonce="directory",
+        )
+        session_response = directory_client.get(
+            f"/session/{representation_id}",
+            params={"token": token},
+            follow_redirects=False,
+        )
+        listing = directory_client.get(session_response.headers["location"])
+        assert listing.status_code == 200
+        assert "app.py" in listing.text
+        assert ".env" not in listing.text
+        blocked = directory_client.get(f"/assets/{representation_id}/.env")
+        assert blocked.status_code == 403
+
+
+def test_exact_root_directory_reference_requires_explicit_repository_registration(tmp_path: Path):
+    root = tmp_path / "selected-directory"
+    root.mkdir()
+    registry = SourceRegistry({("demo", "html"): root, ("demo", "repository"): root})
+    assert registry.resolve("demo", "repository", ".") == root
+    for key, path in (
+        ("html", "."),
+        ("repository", ".."),
+        ("repository", "./child"),
+        ("repository", "../sibling"),
+    ):
+        with pytest.raises(UnsafeAssetPath):
+            registry.resolve("demo", key, path)

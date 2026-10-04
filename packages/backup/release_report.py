@@ -884,6 +884,9 @@ def collect_database_snapshot(
                     "frozen_manifest_sha256": _sha256_or_none(
                         _mapping(row.config).get("_frozen_manifest_sha256")
                     ),
+                    "frozen_source_config_sha256": _sha256_or_none(
+                        _mapping(row.config).get("_frozen_source_config_sha256")
+                    ),
                 }
                 for row in sources
             ],
@@ -1162,6 +1165,7 @@ def _inventory_summary(
                 "read_only": bool(item.get("read_only")),
                 "manifest_sha256": _mapping(item.get("manifest")).get("sha256"),
                 "manifest_mtime_ns": _mapping(item.get("manifest")).get("mtime_ns"),
+                "source_config_sha256": item.get("source_config_sha256"),
             }
             for alias, item in sorted(current_sources.items())
         ],
@@ -1543,6 +1547,35 @@ def build_release_report(
         and frozen_manifest_by_alias[alias] is not None
         and inventory_manifest_by_alias[alias] != frozen_manifest_by_alias[alias]
     ]
+    inventory_config_by_alias = {
+        str(item["alias"]): _sha256_or_none(item.get("source_config_sha256"))
+        for item in inventory.get("sources", [])
+    }
+    frozen_config_by_alias = {
+        str(item.get("alias")): _sha256_or_none(item.get("frozen_source_config_sha256"))
+        for item in (
+            database_source_items
+            if isinstance(database_source_items, Sequence)
+            and not isinstance(database_source_items, (str, bytes))
+            else []
+        )
+        if isinstance(item, Mapping) and item.get("alias")
+    }
+    common_aliases = inventory_aliases & database_aliases
+    missing_frozen_config_fingerprints = sorted(
+        alias for alias in common_aliases if frozen_config_by_alias[alias] is None
+    )
+    missing_inventory_config_fingerprints = sorted(
+        alias for alias in inventory_aliases if inventory_config_by_alias[alias] is None
+    )
+    frozen_config_fingerprint_mismatches = [
+        {"source": alias, "inventory_sha256": inventory_config_by_alias[alias],
+         "frozen_sha256": frozen_config_by_alias[alias]}
+        for alias in sorted(common_aliases)
+        if inventory_config_by_alias[alias] is not None
+        and frozen_config_by_alias[alias] is not None
+        and inventory_config_by_alias[alias] != frozen_config_by_alias[alias]
+    ]
     frozen_fingerprints_ok = not any(
         (
             missing_database_sources,
@@ -1550,6 +1583,9 @@ def build_release_report(
             missing_frozen_fingerprints,
             missing_inventory_fingerprints,
             frozen_fingerprint_mismatches,
+            missing_frozen_config_fingerprints,
+            missing_inventory_config_fingerprints,
+            frozen_config_fingerprint_mismatches,
         )
     )
     fingerprints_ok = (
@@ -1561,7 +1597,7 @@ def build_release_report(
     gates.append(
         _gate(
             "source-fingerprints",
-            "既有来源 manifest 未变",
+            "来源 manifest 与配置未变",
             "pass" if fingerprints_ok else "fail",
             observed={
                 "changed": changed_fingerprints,
@@ -1573,10 +1609,13 @@ def build_release_report(
                 "missing_frozen_fingerprints": missing_frozen_fingerprints,
                 "missing_inventory_fingerprints": missing_inventory_fingerprints,
                 "frozen_fingerprint_mismatches": frozen_fingerprint_mismatches,
+                "missing_frozen_config_fingerprints": missing_frozen_config_fingerprints,
+                "missing_inventory_config_fingerprints": missing_inventory_config_fingerprints,
+                "frozen_config_fingerprint_mismatches": frozen_config_fingerprint_mismatches,
             },
             expected=(
                 "共同来源 hash/mtime 不变；每个当前来源 inventory SHA-256 "
-                "精确匹配数据库冻结值"
+                "与来源配置 SHA-256 精确匹配数据库冻结值"
             ),
             detail=(
                 "新增来源允许扩展，但首次正式导入后也必须具有冻结 digest；"

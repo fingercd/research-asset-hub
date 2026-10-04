@@ -16,6 +16,7 @@ from apps.api.health import ComponentHealth, HealthResponse, collect_health
 from apps.api.problem import install_problem_handlers
 from apps.api.routes_v1 import router as v1_router
 from apps.api.search_runtime import SearchRuntime
+from packages.version import __version__
 
 
 def create_app(
@@ -40,7 +41,7 @@ def create_app(
 
     application = FastAPI(
         title="Research Asset Hub API",
-        version="0.1.0",
+        version=__version__,
         description="Local-first API for research assets.",
         lifespan=lifespan,
     )

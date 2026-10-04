@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Protocol
 
 import httpx
@@ -62,6 +62,8 @@ def _normalize_scope(value: str) -> ServingScope:
 
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
 PROJECT_NAME_PATTERN = re.compile(r"^rah-restore-[a-z0-9][a-z0-9-]{2,50}$")
 
 
@@ -201,8 +203,7 @@ class MetadataIndexRebuilder:
         expected = len(documents)
         status = (
             "verified"
-            if meili["document_count"] == expected
-            and probe["keyword_exact_hit"]
+            if meili["document_count"] == expected and probe["keyword_exact_hit"]
             else "failed"
         )
         return {
@@ -219,7 +220,9 @@ class MetadataIndexRebuilder:
 
     def _load_assets(self, database_dsn: str) -> list[dict[str, Any]]:
         serving_clause = (
-            "" if self.scope == "all" else """
+            ""
+            if self.scope == "all"
+            else """
             AND (
                 NOT EXISTS (
                     SELECT 1 FROM representations any_rep
@@ -427,13 +430,21 @@ def discover_restored_layout(target: Path) -> RestoredLayout:
     if len(manifests) != 1:
         raise RuntimeError(f"expected one platform backup manifest, found {len(manifests)}")
     manifest_path = manifests[0]
-    if len(manifest_path.parents) < 4:
-        raise RuntimeError("restored backup manifest does not preserve the project layout")
-    project_root = manifest_path.parents[3]
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload["schema"] == "research-asset-hub.backup/v3":
+        project_root = manifest_path.parent
+    elif payload["schema"] == "research-asset-hub.backup/v2":
+        if len(manifest_path.parents) < 4:
+            raise RuntimeError("restored backup manifest does not preserve the project layout")
+        project_root = manifest_path.parents[3]
+    else:
+        raise RuntimeError("unsupported platform backup schema")
     dump_path = manifest_path.parent / "postgres.dump"
     config_path = project_root / "config"
     open_catalog_path = project_root / "outputs" / "open-catalog"
-    required = (dump_path, config_path, open_catalog_path)
+    required: tuple[Path, ...] = (dump_path, config_path, open_catalog_path)
+    if payload["schema"] == "research-asset-hub.backup/v3":
+        required += (project_root / "library",)
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise RuntimeError(f"restored snapshot is incomplete: {missing}")
@@ -457,14 +468,25 @@ def verify_restored_manifest(layout: RestoredLayout) -> dict[str, Any]:
         if not isinstance(relative_path, str) or not isinstance(expected_raw, Mapping):
             mismatches.append({"path": str(relative_path), "reason": "invalid manifest entry"})
             continue
+        parts = relative_path.replace("\\", "/").split("/")
+        if (
+            PureWindowsPath(relative_path).drive
+            or any(part in {"", ".", ".."} for part in parts)
+            or "\0" in relative_path
+        ):
+            mismatches.append({"path": relative_path, "reason": "unsafe-path"})
+            continue
         candidate = layout.project_root / Path(relative_path)
+        if not candidate.resolve().is_relative_to(layout.project_root.resolve()):
+            mismatches.append({"path": relative_path, "reason": "unsafe-path"})
+            continue
         if not candidate.is_file():
             mismatches.append({"path": relative_path, "reason": "missing"})
             continue
         checked += 1
         actual_size = candidate.stat().st_size
         actual_hash = _sha256(candidate)
-        if actual_size != int(expected_raw.get("size", -1)) or actual_hash != str(
+        if actual_size != expected_raw.get("size", -1) or actual_hash != str(
             expected_raw.get("sha256", "")
         ):
             mismatches.append(
@@ -475,6 +497,16 @@ def verify_restored_manifest(layout: RestoredLayout) -> dict[str, Any]:
                     "actual_sha256": actual_hash,
                 }
             )
+    if payload.get("schema") == "research-asset-hub.backup/v3":
+        actual_files = {
+            path.relative_to(layout.project_root).as_posix()
+            for path in layout.project_root.rglob("*")
+            if path.is_file() and path != layout.manifest_path
+        }
+        for path in sorted(actual_files - set(raw_files)):
+            mismatches.append({"path": path, "reason": "unlisted-file"})
+        if "postgres.dump" not in raw_files:
+            mismatches.append({"path": "postgres.dump", "reason": "missing-inventory"})
     return {
         "status": "verified" if not mismatches else "failed",
         "schema": payload.get("schema"),
@@ -484,11 +516,11 @@ def verify_restored_manifest(layout: RestoredLayout) -> dict[str, Any]:
         "open_catalog_files": sum(
             1 for path in raw_files if str(path).startswith("outputs/open-catalog/")
         ),
+        "managed_library_files": sum(1 for path in raw_files if str(path).startswith("library/")),
+        "excluded_external_originals": payload.get("excluded_external_originals"),
         "tree_digests": payload.get("tree_digests", {}),
         "data_scope": payload.get("data_scope"),
-        "retirement_history_included": payload.get(
-            "retirement_history_included"
-        ),
+        "retirement_history_included": payload.get("retirement_history_included"),
     }
 
 
@@ -507,10 +539,9 @@ def compare_database_snapshots(
         if baseline_counts.get(table) != restored_counts.get(table)
     }
     fixed_query_equal = baseline.get("fixed_queries") == restored.get("fixed_queries")
-    retirement_ledger_equal = (
-        _mapping(baseline.get("fixed_queries")).get("retirement_ledger")
-        == _mapping(restored.get("fixed_queries")).get("retirement_ledger")
-    )
+    retirement_ledger_equal = _mapping(baseline.get("fixed_queries")).get(
+        "retirement_ledger"
+    ) == _mapping(restored.get("fixed_queries")).get("retirement_ledger")
     revision_equal = baseline.get("schema_revision") == restored.get("schema_revision")
     invariants = restored.get("invariants", {})
     invariants_valid = all(value == 0 for value in invariants.values())
@@ -914,8 +945,7 @@ def _query_active_database(project_root: Path) -> dict[str, Any]:
         # directly before starting the isolated restore containers.
         database_dsn = os.environ.get(
             "HUB_DATABASE_URL",
-            "postgresql://research_hub:research_hub_local@127.0.0.1:5432/"
-            "research_asset_hub",
+            "postgresql://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub",
         ).replace("postgresql+psycopg://", "postgresql://", 1)
         try:
             with psycopg.connect(database_dsn) as connection:

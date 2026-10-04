@@ -38,8 +38,8 @@ def presentation_domains(asset: Any) -> list[str]:
     return domains
 
 
-def annotate_presentation_domains(session: Session, assets: list[Asset]) -> None:
-    """Assign generation repositories their paper topics using batched metadata."""
+def annotate_presentation_domains(session: Session, assets: list[Any]) -> None:
+    """Assign generation ORM assets or card projections their source-paper topics."""
     by_id = {asset.id: asset for asset in assets}
     repository_ids = {
         asset.id

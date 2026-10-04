@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -12,9 +12,10 @@ from uuid import UUID
 import yaml
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from apps.api.catalog_queries import serialize_catalog_asset
 from apps.api.code_browser import (
     CodeBrowserUnavailable,
     local_code_repository,
@@ -24,7 +25,7 @@ from apps.api.contracts import (
     AssetPatch,
 )
 from apps.api.database import DatabaseManager
-from apps.api.domain_views import annotate_presentation_domains, presentation_domains
+from apps.api.domain_views import presentation_domains
 from apps.api.editor import CODE_REPRESENTATION_TYPES, resolve_editor_path
 from apps.api.events import record_mutation, stable_hash
 from apps.api.pagination import encode_cursor
@@ -69,13 +70,10 @@ from packages.ingestion.safe_tree_policy import path_has_reparse
 router = APIRouter(prefix="/api/v1")
 PAGE_SIZE = 30
 _NO_CODE_ALLOWLIST_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "config"
-    / "check-unit-actions-allowlist.yaml"
+    Path(__file__).resolve().parents[2] / "config" / "check-unit-actions-allowlist.yaml"
 )
 _NO_CODE_AUDIT_REASON = (
-    "经审计暂无本地可用的官方公开实现；"
-    "如存在联网线索，其可能仅为占位项目页或第三方仓库。"
+    "经审计暂无本地可用的官方公开实现；如存在联网线索，其可能仅为占位项目页或第三方仓库。"
 )
 _WORD = re.compile(r"[\w\u3400-\u9fff-]+", re.UNICODE)
 _OVERRIDABLE_ASSET_FIELDS = frozenset(
@@ -135,7 +133,9 @@ def _source_registry(request: Request) -> SourceRegistry:
     registry = getattr(request.app.state, "source_registry", None)
     if isinstance(registry, SourceRegistry):
         return registry
-    registry = SourceRegistry.load(_settings(request).sources_config_path)
+    registry = SourceRegistry.load(
+        _settings(request).sources_config_path, data_dir=_settings(request).data_dir
+    )
     request.app.state.source_registry = registry
     return registry
 
@@ -183,8 +183,7 @@ def _retired_representation_problem(
     headers = (
         {
             "Link": (
-                f'</api/v1/representations/{successor}/open-actions>; '
-                'rel="successor-version"'
+                f'</api/v1/representations/{successor}/open-actions>; rel="successor-version"'
             ),
             "X-Successor-Representation-ID": str(successor),
         }
@@ -199,11 +198,7 @@ def _retired_representation_problem(
         code=error.code,
         headers=headers,
         errors=[
-            {
-                "successor_representation_id": (
-                    str(successor) if successor is not None else None
-                )
-            }
+            {"successor_representation_id": (str(successor) if successor is not None else None)}
         ],
     )
 
@@ -371,23 +366,13 @@ def _is_system_hidden_asset(asset: Asset) -> bool:
     return value is True or (isinstance(value, str) and value.casefold() == "true")
 
 
-def _is_domain_overview_asset(asset: Asset) -> bool:
-    return bool(
-        asset.asset_type == "collection"
-        and _is_system_hidden_asset(asset)
-        and str((asset.attributes or {}).get("kind") or "") == "domain-overview"
-    )
-
-
 _ACTION_REPRESENTATION_TYPES: dict[str, frozenset[str]] = {
     "pdf": frozenset({"pdf"}),
     "html": frozenset({"html", "html_document"}),
     "guide": frozenset({"guide", "analysis", "markdown"}),
     "code": frozenset({"source_code", "repository", "notebook"}),
 }
-_HTML_REPRESENTATION_TYPES = frozenset(
-    {"html", "guide", "analysis", "html_document"}
-)
+_HTML_REPRESENTATION_TYPES = frozenset({"html", "guide", "analysis", "html_document"})
 _REPRESENTATION_ROLE_ORDER = {
     role: index
     for index, role in enumerate(
@@ -418,9 +403,8 @@ def _representation_matches_action(
         )
     if kind == "html":
         return (
-            (representation.role != "guide" or bool(representation.attributes.get("unified_guide")))
-            and representation.representation_type in _ACTION_REPRESENTATION_TYPES["html"]
-        )
+            representation.role != "guide" or bool(representation.attributes.get("unified_guide"))
+        ) and representation.representation_type in _ACTION_REPRESENTATION_TYPES["html"]
     return representation.representation_type in _ACTION_REPRESENTATION_TYPES[kind]
 
 
@@ -503,9 +487,7 @@ def _representation_requires_network(
         source_alias=source_alias,
     ):
         return False
-    return bool(
-        representation.network_required or representation.external_url is not None
-    )
+    return bool(representation.network_required or representation.external_url is not None)
 
 
 def _representation_action_status(
@@ -556,7 +538,8 @@ def _representation_choice_key(
             source_alias=source_alias,
         )
         else 1,
-        -1 if representation.attributes.get("unified_guide")
+        -1
+        if representation.attributes.get("unified_guide")
         else _REPRESENTATION_ROLE_ORDER.get(representation.role, 100),
         0
         if not _representation_requires_network(
@@ -825,9 +808,7 @@ def _research_unit_quick_actions(
                     else None
                 ),
                 missing_relation_type=(
-                    "implemented_by"
-                    if primary_asset.asset_type == "paper"
-                    else relation_type
+                    "implemented_by" if primary_asset.asset_type == "paper" else relation_type
                 ),
                 source_registry=source_registry,
                 source_aliases=source_aliases,
@@ -847,7 +828,7 @@ def _asset_search_snippet(asset: Asset, search_hits: dict[UUID, Any], query: str
         return " ".join(hit.document.text.split())[:360]
     if not query.strip():
         return None
-    fallback = asset.summary or asset.abstract or asset.content or asset.title
+    fallback = asset.abstract or asset.title
     return " ".join(fallback.split())[:360] if fallback else None
 
 
@@ -860,12 +841,14 @@ def _serialize_matched_asset(
     summaries: dict[UUID, str],
 ) -> dict[str, Any]:
     hit = search_hits.get(asset.id)
-    item = serialize_asset(
+    item = serialize_catalog_asset(
         asset,
         reading_state=states.get(asset.id),
         annotation_summary=summaries.get(asset.id),
         score=_asset_search_score(asset.id, search_hits),
     )
+    for field in ("summary", "abstract", "attributes"):
+        item.pop(field, None)
     snippet = _asset_search_snippet(asset, search_hits, query)
     if snippet is not None:
         item["snippet"] = snippet
@@ -949,34 +932,6 @@ def _asset_matches_unit_filters(
     )
 
 
-def _asset_facets(
-    assets: list[Asset],
-    states: dict[UUID, ReadingState],
-) -> dict[str, dict[str, int]]:
-    return {
-        "domains": dict(
-            Counter(
-                domain_slug for asset in assets for domain_slug in presentation_domains(asset)
-            ).most_common()
-        ),
-        "years": dict(
-            sorted(
-                Counter(str(asset.year) for asset in assets if asset.year is not None).items(),
-                reverse=True,
-            )
-        ),
-        "types": dict(Counter(asset.asset_type for asset in assets).most_common()),
-        "reading_status": dict(
-            Counter(
-                states[asset.id].status if asset.id in states else "unread" for asset in assets
-            ).most_common()
-        ),
-        "tags": dict(
-            Counter(tag_value for asset in assets for tag_value in asset.tags or []).most_common(50)
-        ),
-    }
-
-
 def _build_research_units(
     session: Session,
     *,
@@ -1007,8 +962,8 @@ def _build_research_units(
     source_aliases: dict[UUID, str] = {}
     if source_registry is not None:
         source_aliases = {
-            source.id: source.alias
-            for source in session.scalars(select(Source)).all()
+            source_id: alias
+            for source_id, alias in session.execute(select(Source.id, Source.alias))
         }
     paper_repository_ids: dict[UUID, set[UUID]] = defaultdict(set)
     relations = session.scalars(
@@ -1017,6 +972,7 @@ def _build_research_units(
             Relation.relation_type == "implemented_by",
             Relation.confirmation_status == "confirmed",
             Relation.deleted_at.is_(None),
+            Relation.subject_asset_id.in_(assets_by_id),
         )
         .order_by(Relation.subject_asset_id, Relation.object_asset_id, Relation.id)
     ).all()
@@ -1103,13 +1059,13 @@ def _build_research_units(
         payload = serialize_research_unit(
             unit_id=str(paper.id),
             unit_kind="paper",
-            primary_asset=serialize_asset(
+            primary_asset=serialize_catalog_asset(
                 paper,
                 reading_state=states.get(paper.id),
                 annotation_summary=summaries.get(paper.id),
             ),
             related_repositories=[
-                serialize_asset(
+                serialize_catalog_asset(
                     repository,
                     reading_state=states.get(repository.id),
                     annotation_summary=summaries.get(repository.id),
@@ -1185,7 +1141,7 @@ def _build_research_units(
             payload = serialize_research_unit(
                 unit_id=str(repository.id),
                 unit_kind="repository",
-                primary_asset=serialize_asset(
+                primary_asset=serialize_catalog_asset(
                     repository,
                     reading_state=states.get(repository.id),
                     annotation_summary=summaries.get(repository.id),
@@ -1608,62 +1564,6 @@ def _relation_duplicate(
     return session.scalar(statement.order_by(Relation.created_at))
 
 
-def _domain_catalog(settings: ApiSettings) -> list[dict[str, Any]]:
-    document = _load_yaml(settings.taxonomy_config_path)
-    result: list[dict[str, Any]] = []
-    for item in document.get("domains", []):
-        if not isinstance(item, dict):
-            continue
-        slug = str(item.get("id", "")).strip()
-        if slug and not item.get("hidden_from_catalog"):
-            result.append(
-                {
-                    "slug": slug,
-                    "label": str(item.get("label") or slug),
-                    "aliases": list(item.get("aliases", [])),
-                    "description": (
-                        str(item["description"]) if item.get("description") else None
-                    ),
-                    "tags": list(item.get("tags", [])),
-                }
-            )
-    return result
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _local_code_context(
     request: Request,
     representation_id: UUID,
@@ -1700,40 +1600,6 @@ def _local_code_context(
         return representation, root
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _domain_overview_warning(representation: Representation) -> str | None:
     if representation.availability == "available":
         if representation.external_url and not representation.path_ref:
@@ -1764,9 +1630,7 @@ def _domain_overviews(
             representations[representation.asset_id].append(representation)
 
     result: dict[str, dict[str, Any]] = {}
-    domain_slugs = {
-        slug for asset in portal_assets for slug in (asset.domain_slugs or [])
-    }
+    domain_slugs = {slug for asset in portal_assets for slug in (asset.domain_slugs or [])}
     for slug in sorted(domain_slugs):
         matching_assets = sorted(
             (asset for asset in portal_assets if slug in (asset.domain_slugs or [])),
@@ -1821,128 +1685,6 @@ def _domain_overviews(
     return result
 
 
-def _domains_with_counts(
-    session: Session,
-    settings: ApiSettings,
-    assets: list[Asset] | None = None,
-    *,
-    include_overview: bool = False,
-    all_assets: list[Asset] | None = None,
-    asset_context: tuple[dict[UUID, ReadingState], dict[UUID, str]] | None = None,
-) -> list[dict[str, Any]]:
-    if all_assets is None:
-        all_assets = list(
-            session.scalars(select(Asset).where(Asset.deleted_at.is_(None))).all()
-        )
-    annotate_presentation_domains(session, all_assets)
-    portal_assets = [
-        asset for asset in all_assets if _is_domain_overview_asset(asset)
-    ]
-    content_assets = (
-        [asset for asset in all_assets if not _is_system_hidden_asset(asset)]
-        if assets is None
-        else [asset for asset in assets if not _is_system_hidden_asset(asset)]
-    )
-    states, summaries = asset_context or _asset_context(session, content_assets)
-    annotation_counts = {
-        asset_id: count for asset_id, count in session.execute(
-            select(Annotation.asset_id, func.count(Annotation.id))
-            .where(
-                Annotation.asset_id.in_([asset.id for asset in content_assets]),
-                Annotation.deleted_at.is_(None),
-            )
-            .group_by(Annotation.asset_id)
-        )
-    }
-    overviews = _domain_overviews(session, portal_assets)
-    confirmed_repository_ids = set(
-        session.scalars(
-            select(Relation.object_asset_id).where(
-                Relation.relation_type == "implemented_by",
-                Relation.confirmation_status == "confirmed",
-                Relation.deleted_at.is_(None),
-            )
-        ).all()
-    )
-    result: list[dict[str, Any]] = []
-    catalog = _domain_catalog(settings)
-    known = {
-        str(item.get("id"))
-        for item in _load_yaml(settings.taxonomy_config_path).get("domains", [])
-        if isinstance(item, dict)
-    }
-    discovered = {
-        slug
-        for asset in [*content_assets, *portal_assets]
-        for slug in (asset.domain_slugs or [])
-    }
-    for unknown in sorted(discovered - known):
-        catalog.append(
-            {
-                "slug": unknown,
-                "label": unknown,
-                "aliases": [],
-                "description": None,
-                "tags": [],
-            }
-        )
-    unavailable_overview = serialize_domain_overview(
-        asset_id=None,
-        representation_id=None,
-        status="unavailable",
-        default_presentation="original",
-        last_verified_at=None,
-        warning="No domain overview is registered.",
-    )
-    for domain in catalog:
-        slug = str(domain["slug"])
-        matching = [item for item in content_assets if slug in presentation_domains(item)]
-        reading_counts = {"unread": 0, "reading": 0, "read": 0}
-        for asset in matching:
-            reading_state = states.get(asset.id)
-            value = reading_state.status if reading_state is not None else "unread"
-            reading_counts[value] = reading_counts.get(value, 0) + 1
-        annotation_count = sum(annotation_counts.get(item.id, 0) for item in matching)
-        paper_count = sum(item.asset_type == "paper" for item in matching)
-        repository_count = sum(item.asset_type == "repository" for item in matching)
-        independent_repository_count = sum(
-            item.asset_type == "repository" and item.id not in confirmed_repository_ids
-            for item in matching
-        )
-        overview = overviews.get(slug, unavailable_overview)
-        item = {
-            **domain,
-            "name": domain["label"],
-            "asset_count": len(matching),
-            "paper_count": paper_count,
-            "repository_count": repository_count,
-            "research_unit_count": paper_count + independent_repository_count,
-            "annotation_count": annotation_count,
-            "reading_counts": reading_counts,
-            "overview_status": overview["status"],
-            "recent_assets": [
-                serialize_asset(
-                    asset,
-                    reading_state=states.get(asset.id),
-                    annotation_summary=summaries.get(asset.id),
-                )
-                for asset in sorted(
-                    matching, key=lambda asset: asset.updated_at, reverse=True
-                )[:5]
-            ],
-        }
-        if include_overview:
-            item["overview"] = overview
-        result.append(item)
-    return result
-
-
-
-
-
-
-
-
 def _comparison_columns(assets: list[Asset]) -> list[dict[str, Any]]:
     fields: list[tuple[str, str, Any]] = [
         ("year", "年份", lambda item: item.year),
@@ -1960,6 +1702,7 @@ def _comparison_columns(assets: list[Asset]) -> list[dict[str, Any]]:
         }
         for key, label, getter in fields
     ]
+
 
 # 子路由模块在 apps.api.routes/__init__.py 聚合导入；导入该包即向共享
 # router 注册全部路由（必须位于所有辅助定义之后）。

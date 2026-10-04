@@ -9,13 +9,20 @@ import {
   GitCompareArrows,
   LibraryBig,
   Menu,
+  Plus,
   RefreshCcw,
   Search,
   Settings,
   StickyNote,
   X,
 } from "lucide-react";
-import { Suspense, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import {
+  Suspense,
+  useEffect,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError, getApiErrorMessage } from "../api/client";
 import { useCompare } from "../state/CompareContext";
@@ -24,14 +31,16 @@ import { usePageHistory } from "../lib/usePageHistory";
 
 const primaryNavigation = [
   { to: "/", label: "资料库", icon: LibraryBig, end: true },
+  { to: "/intake", label: "添加论文", icon: Plus },
   { to: "/domains", label: "领域", icon: BookOpen },
+  { to: "/collections", label: "收藏集合", icon: LibraryBig },
   { to: "/annotations", label: "笔记", icon: StickyNote },
 ];
 
 const systemLinks = [
   { to: "/jobs", label: "后台任务", icon: BriefcaseBusiness },
   { to: "/conflicts", label: "同步冲突", icon: RefreshCcw },
-  { to: "/settings", label: "诊断信息", icon: Settings },
+  { to: "/settings", label: "设置与 MCP", icon: Settings },
 ];
 
 function NavigationItem({
@@ -97,13 +106,7 @@ function HealthBadge() {
   );
 }
 
-function CommandPalette({
-  open,
-  close,
-}: {
-  open: boolean;
-  close: () => void;
-}) {
+function CommandPalette({ open, close }: { open: boolean; close: () => void }) {
   const navigate = useNavigate();
   const dialogRef = useDialogFocus(open);
   const [value, setValue] = useState("");
@@ -147,7 +150,10 @@ function CommandPalette({
         <div className="command-hints">
           <span>输入关键词后按 Enter 搜索</span>
           <div>
-            <button type="button" onClick={() => (navigate("/domains"), close())}>
+            <button
+              type="button"
+              onClick={() => (navigate("/domains"), close())}
+            >
               领域
             </button>
             <button
@@ -167,13 +173,24 @@ function SystemStatusPanel({ close }: { close: () => void }) {
   const dialogRef = useDialogFocus();
   const health = useHealth();
   const componentLabels: Record<string, string> = {
-    api: "应用服务", database: "数据库", postgres: "数据库", postgresql: "数据库",
-    meilisearch: "关键词搜索", keyword: "关键词搜索", search: "搜索索引",
+    api: "应用服务",
+    database: "数据库",
+    postgres: "数据库",
+    postgresql: "数据库",
+    meilisearch: "关键词搜索",
+    keyword: "关键词搜索",
+    search: "搜索索引",
     full_text_index: "全文索引",
-    gateway: "文件服务", asset_gateway: "文件服务", worker: "后台任务",
+    gateway: "文件服务",
+    asset_gateway: "文件服务",
+    worker: "后台任务",
   };
   return (
-    <div className="system-panel-backdrop" role="presentation" onMouseDown={close}>
+    <div
+      className="system-panel-backdrop"
+      role="presentation"
+      onMouseDown={close}
+    >
       <aside
         ref={dialogRef}
         className="system-panel"
@@ -202,21 +219,47 @@ function SystemStatusPanel({ close }: { close: () => void }) {
           <HealthBadge />
           <p>资料与索引只在当前设备处理。</p>
           {health.isError ? (
-            <p className="inline-error" role="alert">{getApiErrorMessage(health.error)} 可重新检查；如果资料也无法读取，可从托盘重试启动。</p>
+            <p className="inline-error" role="alert">
+              {getApiErrorMessage(health.error)}{" "}
+              可重新检查；如果资料也无法读取，可从托盘重试启动。
+            </p>
           ) : (
             <dl className="service-status-list">
-              {Object.entries(health.data?.components ?? {}).map(([name, component]) => (
-                <div key={name}>
-                  <dt>{componentLabels[name] ?? name}</dt>
-                  <dd className={component.status === "healthy" ? "is-healthy" : "is-degraded"}>
-                    {component.status === "healthy" ? "正常" : component.status === "stale" ? "待更新" : component.status === "disabled" ? "未启用" : "需检查"}
-                  </dd>
-                </div>
-              ))}
+              {Object.entries(health.data?.components ?? {}).map(
+                ([name, component]) => (
+                  <div key={name}>
+                    <dt>{componentLabels[name] ?? name}</dt>
+                    <dd
+                      className={
+                        component.status === "healthy"
+                          ? "is-healthy"
+                          : "is-degraded"
+                      }
+                    >
+                      {component.status === "healthy"
+                        ? "正常"
+                        : component.status === "stale"
+                          ? "待更新"
+                          : component.status === "disabled"
+                            ? "未启用"
+                            : "需检查"}
+                    </dd>
+                  </div>
+                ),
+              )}
             </dl>
           )}
-          <button className="button secondary compact" type="button" disabled={health.isFetching} onClick={() => void health.refetch()}>
-            <RefreshCcw size={14} className={health.isFetching ? "spin" : undefined} aria-hidden="true" />
+          <button
+            className="button secondary compact"
+            type="button"
+            disabled={health.isFetching}
+            onClick={() => void health.refetch()}
+          >
+            <RefreshCcw
+              size={14}
+              className={health.isFetching ? "spin" : undefined}
+              aria-hidden="true"
+            />
             {health.isFetching ? "正在检查…" : "重新检查"}
           </button>
         </section>
@@ -246,7 +289,11 @@ function CompareTray() {
       <div>
         <GitCompareArrows size={17} aria-hidden="true" />
         <strong>{compare.assets.length}/4 篇待对比</strong>
-        <span>{compare.assets.map((asset) => asset.title_zh || asset.title).join(" · ")}</span>
+        <span>
+          {compare.assets
+            .map((asset) => asset.title_zh || asset.title)
+            .join(" · ")}
+        </span>
       </div>
       <NavLink className="button primary compact" to="/compare">
         打开对比
@@ -265,9 +312,22 @@ export function AppShell({ children }: { children?: ReactNode }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
   const history = usePageHistory();
-  const pageLabel = location.pathname.startsWith("/assets/") ? "资料详情"
-    : location.pathname.startsWith("/domains/") ? "领域资料"
-    : ({ "/": "资料库", "/search": "搜索资料", "/domains": "研究领域", "/annotations": "我的笔记", "/compare": "论文对比", "/jobs": "后台任务", "/conflicts": "同步冲突", "/settings": "诊断信息" }[location.pathname] ?? "资料库");
+  const pageLabel = location.pathname.startsWith("/assets/")
+    ? "资料详情"
+    : location.pathname.startsWith("/domains/")
+      ? "领域资料"
+      : ({
+          "/": "资料库",
+          "/search": "搜索资料",
+          "/domains": "研究领域",
+          "/annotations": "我的笔记",
+          "/compare": "论文对比",
+          "/jobs": "后台任务",
+          "/conflicts": "同步冲突",
+          "/settings": "设置",
+          "/intake": "添加论文",
+          "/collections": "收藏集合",
+        }[location.pathname] ?? "资料库");
 
   const openSearch = () => {
     setSystemOpen(false);
@@ -358,15 +418,34 @@ export function AppShell({ children }: { children?: ReactNode }) {
             <span className="sr-only">打开导航</span>
           </button>
           <div className="page-navigation" aria-label="页面历史">
-            <button className="icon-button" type="button" onClick={history.back} disabled={!history.canGoBack} aria-label="返回上一页" title="返回上一页">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={history.back}
+              disabled={!history.canGoBack}
+              aria-label="返回上一页"
+              title="返回上一页"
+            >
               <ArrowLeft size={18} aria-hidden="true" />
             </button>
-            <button className="icon-button" type="button" onClick={history.forward} disabled={!history.canGoForward} aria-label="前进到下一页" title="前进到下一页">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={history.forward}
+              disabled={!history.canGoForward}
+              aria-label="前进到下一页"
+              title="前进到下一页"
+            >
               <ArrowRight size={18} aria-hidden="true" />
             </button>
           </div>
           <strong className="current-page-label">{pageLabel}</strong>
-          <button className="global-search-trigger" type="button" onClick={openSearch} aria-label="搜索全部资料">
+          <button
+            className="global-search-trigger"
+            type="button"
+            onClick={openSearch}
+            aria-label="搜索全部资料"
+          >
             <Search size={17} aria-hidden="true" />
             <span>搜索全部资料</span>
             <kbd>Ctrl K</kbd>
@@ -382,7 +461,13 @@ export function AppShell({ children }: { children?: ReactNode }) {
         </header>
 
         <main id="main-content" tabIndex={-1}>
-          <Suspense fallback={<div className="route-loading" role="status">正在加载页面…</div>}>
+          <Suspense
+            fallback={
+              <div className="route-loading" role="status">
+                正在加载页面…
+              </div>
+            }
+          >
             {children ?? <Outlet />}
           </Suspense>
         </main>

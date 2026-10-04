@@ -38,7 +38,7 @@ def _query_plan(
     constraints: Sequence[str],
 ) -> tuple[str | None, QueryPlan | None]:
     try:
-        selected = normalize_domain(domain, service.taxonomy_path)
+        selected = normalize_domain(domain, service.taxonomy_path, session=service.session)
         if len(keywords) > 8 or len(constraints) > 6:
             raise ValueError("At most 8 keywords and 6 constraints are allowed.")
         plan = (

@@ -138,7 +138,9 @@ def knowledge_status(request: Request, domain: str | None = None) -> dict[str, o
     with _service(request) as service:
         settings = _v1._settings(request)
         try:
-            selected = normalize_domain(domain, settings.taxonomy_config_path)
+            selected = normalize_domain(
+                domain, settings.taxonomy_config_path, session=service.session
+            )
         except ValueError as error:
             raise KnowledgeError("invalid_domain", str(error), 422) from error
         return build_knowledge_status(

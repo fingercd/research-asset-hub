@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from threading import Lock
+from typing import Any, cast
 
 import yaml
 from pydantic import ValidationError
@@ -20,6 +24,7 @@ from .schemas import (
     PortalSection,
     PortalStaleReason,
     ReadingRouteDocument,
+    ReviewStatus,
     TimelineDocument,
 )
 
@@ -75,31 +80,47 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_portal_index(config_root: Path) -> PortalIndex:
-    path = config_root / "portal-index.yaml"
+@lru_cache(maxsize=16)
+def _cached_portal_index(path: Path, version: tuple[int, int]) -> PortalIndex:
     try:
         return PortalIndex.model_validate(_read_yaml(path))
     except ValidationError as error:
         raise DomainPortalLoadError(f"invalid portal index {path}: {error}") from error
 
 
-def _stale_reasons(metadata: PortalMetadata, source_root: Path) -> list[PortalStaleReason]:
+def _file_version(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return -1, -1
+
+
+def load_portal_index(config_root: Path) -> PortalIndex:
+    path = config_root.resolve() / "portal-index.yaml"
+    return _cached_portal_index(path, _file_version(path)).model_copy(deep=True)
+
+
+def _stale_reasons(
+    metadata: PortalMetadata, source_root: Path, *, check_digest: bool = True
+) -> list[PortalStaleReason]:
     reasons: list[PortalStaleReason] = []
     for source_input in metadata.source_inputs:
         path = (source_root / source_input.path).resolve(strict=False)
         try:
             path.relative_to(source_root.resolve())
         except ValueError:
-            reasons.append(
-                PortalStaleReason(path=source_input.path, reason="missing")
-            )
+            reasons.append(PortalStaleReason(path=source_input.path, reason="missing"))
             continue
         if not path.is_file():
-            reasons.append(
-                PortalStaleReason(path=source_input.path, reason="missing")
-            )
+            reasons.append(PortalStaleReason(path=source_input.path, reason="missing"))
             continue
-        stat = path.stat()
+        try:
+            stat = path.stat()
+            digest = _sha256(path) if check_digest else None
+        except OSError:
+            reasons.append(PortalStaleReason(path=source_input.path, reason="missing"))
+            continue
         if stat.st_size != source_input.size_bytes:
             reasons.append(
                 PortalStaleReason(
@@ -109,8 +130,7 @@ def _stale_reasons(metadata: PortalMetadata, source_root: Path) -> list[PortalSt
                     actual=stat.st_size,
                 )
             )
-        digest = _sha256(path)
-        if digest != source_input.sha256:
+        if check_digest and digest != source_input.sha256:
             reasons.append(
                 PortalStaleReason(
                     path=source_input.path,
@@ -148,10 +168,12 @@ def _section(
     )
 
 
-def load_domain_portal(
+def _load_domain_portal(
     config_root: Path,
     source_root: Path,
     slug: str,
+    *,
+    check_source_digest: bool = True,
 ) -> DomainPortalDocument:
     index = load_portal_index(config_root)
     registry = next((item for item in index.portals if item.slug == slug), None)
@@ -180,14 +202,10 @@ def load_domain_portal(
     try:
         metadata = PortalMetadata.model_validate(_read_yaml(required["portal"]))
         timeline = TimelineDocument.model_validate(_read_yaml(required["timeline"]))
-        capability_map = CapabilityMethodDocument.model_validate(
-            _read_yaml(required["map"])
-        )
+        capability_map = CapabilityMethodDocument.model_validate(_read_yaml(required["map"]))
         landmarks = LandmarkDocument.model_validate(_read_yaml(required["landmarks"]))
         routes = ReadingRouteDocument.model_validate(_read_yaml(required["routes"]))
-        benchmarks = BenchmarkDocument.model_validate(
-            _read_yaml(required["benchmarks"])
-        )
+        benchmarks = BenchmarkDocument.model_validate(_read_yaml(required["benchmarks"]))
     except ValidationError as error:
         raise DomainPortalLoadError(f"invalid portal content for {slug}: {error}") from error
     if metadata.slug != slug or metadata.slug != registry.slug:
@@ -195,7 +213,7 @@ def load_domain_portal(
     if metadata.original_selector != registry.original_selector:
         raise DomainPortalLoadError("portal original selector does not match registry")
 
-    stale_reasons = _stale_reasons(metadata, source_root)
+    stale_reasons = _stale_reasons(metadata, source_root, check_digest=check_source_digest)
     status = "needs_review" if stale_reasons else metadata.review_status
     overview = _read_markdown(required["overview"])
     frontiers = _read_markdown(required["frontiers"])
@@ -263,9 +281,7 @@ def load_domain_portal(
             "evidence",
             evidence_status,
             {
-                "source_inputs": [
-                    item.model_dump(mode="json") for item in metadata.source_inputs
-                ],
+                "source_inputs": [item.model_dump(mode="json") for item in metadata.source_inputs],
                 "original_selector": metadata.original_selector.model_dump(mode="json"),
                 "appendices": metadata.appendices,
             },
@@ -283,9 +299,7 @@ def load_domain_portal(
                 "content_digest": content_digest,
                 "review_status": status,
                 "stale": bool(stale_reasons),
-                "stale_reasons": [
-                    item.model_dump(mode="json") for item in stale_reasons
-                ],
+                "stale_reasons": [item.model_dump(mode="json") for item in stale_reasons],
                 "original_selector": metadata.original_selector.model_dump(mode="json"),
                 "sections": [item.model_dump(mode="json") for item in sections],
             }
@@ -296,3 +310,87 @@ def load_domain_portal(
             ensure_ascii=False,
         )
         raise DomainPortalLoadError(f"assembled portal is invalid: {payload}") from error
+
+
+_CONTENT_FILES = (
+    "portal.yaml",
+    "overview.md",
+    "timeline.yaml",
+    "capability-method-map.yaml",
+    "landmarks.yaml",
+    "reading-routes.yaml",
+    "benchmarks.yaml",
+    "open-questions.md",
+)
+_diagnostic_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portal-diagnostics")
+_diagnostic_lock = Lock()
+_diagnostic_futures: OrderedDict[tuple[Any, ...], Future[list[PortalStaleReason]]] = OrderedDict()
+
+
+@lru_cache(maxsize=64)
+def _cached_portal_content(
+    config_root: Path,
+    source_root: Path,
+    slug: str,
+    directory: Path,
+    versions: tuple[tuple[int, int], ...],
+) -> tuple[DomainPortalDocument, PortalMetadata]:
+    portal = _load_domain_portal(config_root, source_root, slug, check_source_digest=False)
+    metadata = PortalMetadata.model_validate(_read_yaml(directory / "portal.yaml"))
+    return portal, metadata
+
+
+def load_domain_portal(
+    config_root: Path,
+    source_root: Path,
+    slug: str,
+    *,
+    defer_source_validation: bool = False,
+) -> DomainPortalDocument:
+    """Cache curated content by file versions; the HTTP path never waits for source SHA."""
+    config_root, source_root = config_root.resolve(), source_root.resolve()
+    index = load_portal_index(config_root)
+    registry = next((item for item in index.portals if item.slug == slug), None)
+    if registry is None:
+        raise DomainPortalLoadError(f"domain portal is not registered: {slug}")
+    directory = (config_root / registry.content_directory).resolve()
+    try:
+        directory.relative_to(config_root)
+    except ValueError as error:
+        raise DomainPortalLoadError("portal content directory escapes config root") from error
+    versions = tuple(
+        _file_version(path)
+        for path in [
+            config_root / "portal-index.yaml",
+            *(directory / name for name in _CONTENT_FILES),
+        ]
+    )
+    cached, metadata = _cached_portal_content(config_root, source_root, slug, directory, versions)
+    source_versions = tuple(
+        _file_version(source_root / item.path) for item in metadata.source_inputs
+    )
+    key = (config_root, source_root, slug, versions, source_versions)
+    with _diagnostic_lock:
+        future = _diagnostic_futures.get(key)
+        if future is None:
+            future = _diagnostic_executor.submit(_stale_reasons, metadata, source_root)
+            _diagnostic_futures[key] = future
+            while len(_diagnostic_futures) > 64:
+                _diagnostic_futures.popitem(last=False)
+        else:
+            _diagnostic_futures.move_to_end(key)
+    if not defer_source_validation or future.done():
+        reasons = future.result()
+    else:
+        reasons = _stale_reasons(metadata, source_root, check_digest=False)
+    portal = cached.model_copy(deep=True)
+    portal.stale = bool(reasons)
+    portal.stale_reasons = reasons
+    portal.review_status = "needs_review" if reasons else metadata.review_status
+    for section in portal.sections:
+        section.status = (
+            cast(ReviewStatus, section.content.get("status", portal.review_status))
+            if section.id == "benchmarks" and not reasons
+            else portal.review_status
+        )
+    return portal

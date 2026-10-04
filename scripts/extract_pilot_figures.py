@@ -47,14 +47,19 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "knowledge-pilot" / "v1",
+        default=PROJECT_ROOT / "outputs" / "knowledge-pilot" / "v2",
     )
     parser.add_argument(
         "--baseline-output-root",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "knowledge-pilot" / "pymupdf-baseline" / "v1",
+        default=PROJECT_ROOT / "outputs" / "knowledge-pilot" / "pdfplumber-baseline" / "v2",
     )
-    parser.add_argument("--extractor", choices=("auto", "pdffigures2", "pymupdf"), default="auto")
+    parser.add_argument(
+        "--extractor",
+        choices=("auto", "pdffigures2", "pdfplumber", "pymupdf"),
+        default="auto",
+        help="'pymupdf' remains accepted as a legacy alias for the pdfplumber/PDFium extractor.",
+    )
     parser.add_argument("--pdffigures2-java", type=Path, default=DEFAULT_JAVA)
     parser.add_argument("--pdffigures2-jar", type=Path, default=DEFAULT_PDFFIGURES2_JAR)
     parser.add_argument("--java-heap", default="768m")
@@ -413,7 +418,7 @@ def main() -> int:
                     add_figures=job["add_figures"],
                     mark_corrected_reviewed=arguments.mark_reviewed,
                     pdffigures2_results=rows,
-                    run_pymupdf_heuristic=False,
+                    run_pdfplumber_heuristic=False,
                 )
             else:
                 cli_report = None
@@ -486,7 +491,7 @@ def main() -> int:
             )
         except Exception as error:
             baseline_results.append(
-                _failure(entry, "failed_pymupdf_baseline", f"{type(error).__name__}: {error}")
+                _failure(entry, "failed_pdfplumber_baseline", f"{type(error).__name__}: {error}")
             )
 
     paper_results.sort(key=lambda item: str(item.get("asset_id", "")))
@@ -532,7 +537,7 @@ def main() -> int:
             for paper in paper_results
         ],
         "figures": aggregate_figures,
-        "pymupdf_baseline": baseline_results,
+        "pdfplumber_baseline": baseline_results,
         "review_required": True,
     }
     _write_json(arguments.output_root / "samefigmanifest.json", samefig_manifest)

@@ -14,8 +14,15 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from apps.asset_gateway.registry import SourceRegistry
+from packages.domain_catalog.service import domain_slugs
 
-from .config import DEFAULT_SOURCES_CONFIG, load_sources, select_sources
+from .config import (
+    DEFAULT_SOURCES_CONFIG,
+    PROJECT_ROOT,
+    load_domain_slugs,
+    load_sources,
+    select_sources,
+)
 from .inspection import (
     build_inventory_report,
     build_preflight_report,
@@ -122,14 +129,13 @@ def _database_url(explicit: str | None = None) -> str:
         or os.environ.get("DATABASE_URL")
         or os.environ.get("HUB_DATABASE_URL")
         or (
-            "postgresql+psycopg://research_hub:research_hub_local"
-            "@127.0.0.1:5432/research_asset_hub"
+            "postgresql+psycopg://research_hub:research_hub_local@127.0.0.1:5432/research_asset_hub"
         )
     )
 
 
 def _run_preflight(args: argparse.Namespace) -> int:
-    report = build_preflight_report(load_sources(args.config))
+    report = build_preflight_report(load_sources(args.config, include_platform=True))
     path = write_report(report, "preflight.json")
     report["report_path"] = str(path)
     _emit(report, args.json)
@@ -137,7 +143,9 @@ def _run_preflight(args: argparse.Namespace) -> int:
 
 
 def _run_inventory(args: argparse.Namespace) -> int:
-    sources = select_sources(load_sources(args.config), getattr(args, "source", None), args.all)
+    sources = select_sources(
+        load_sources(args.config, include_platform=True), getattr(args, "source", None), args.all
+    )
     # Keep the full registry even for a selected source: an approved replacement
     # root may belong to another source.
     report = build_inventory_report(
@@ -171,7 +179,9 @@ def _run_status(args: argparse.Namespace) -> int:
 
 
 def _run_validate(args: argparse.Namespace) -> int:
-    sources = select_sources(load_sources(args.config), args.source, args.all)
+    sources = select_sources(
+        load_sources(args.config, include_platform=True), args.source, args.all
+    )
     preflight = build_preflight_report(sources)
     inventory = build_inventory_report(
         sources,
@@ -206,6 +216,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         retirement_contracts: dict[str, dict[str, Any]] = {}
         retirement_state_checked = False
         identity_keys: frozenset[tuple[str, str, str, str, str]] = frozenset()
+        registered_domains = load_domain_slugs()
         if configured_database_url:
             engine = create_engine(configured_database_url, pool_pre_ping=True)
             try:
@@ -217,6 +228,9 @@ def _run_ingest(args: argparse.Namespace) -> int:
                             require_complete=not bool(args.source),
                         )
                         identity_keys = rejected_identity_keys(retirement_session)
+                        registered_domains = domain_slugs(
+                            retirement_session, PROJECT_ROOT / "config" / "taxonomy.yaml"
+                        )
                     retirement_state_checked = True
                 except OperationalError:
                     pass
@@ -224,6 +238,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
                 engine.dispose()
         report = run_dry_run(
             sources,
+            known_domain_slugs=registered_domains,
             retired_source_contracts=retirement_contracts,
             operational_registry=SourceRegistry.load(args.config),
             rejected_identity_keys=identity_keys,
@@ -258,6 +273,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         retired_source_contracts_for_dry_run,
         run_formal_import,
     )
+
     sources = select_sources(load_sources(args.config), args.source, args.all)
     engine = create_engine(_database_url(), pool_pre_ping=True)
     try:
@@ -278,8 +294,12 @@ def _run_ingest(args: argparse.Namespace) -> int:
         # Missing/unavailable policy tables fail before the pre-import gate.
         with Session(engine) as identity_session:
             identity_keys = rejected_identity_keys(identity_session)
+            registered_domains = domain_slugs(
+                identity_session, PROJECT_ROOT / "config" / "taxonomy.yaml"
+            )
         dry_run_report = run_dry_run(
             sources,
+            known_domain_slugs=registered_domains,
             retired_source_contracts=retirement_contracts,
             operational_registry=SourceRegistry.load(args.config),
             rejected_identity_keys=identity_keys,
@@ -305,16 +325,10 @@ def _run_ingest(args: argparse.Namespace) -> int:
                 report["validated_dry_run"] = {
                     "status": dry_run_report["status"],
                     "generated_at": dry_run_report["generated_at"],
-                    "normalized_records": dry_run_report["totals"][
-                        "normalized_records"
-                    ],
+                    "normalized_records": dry_run_report["totals"]["normalized_records"],
                     "active_sources": dry_run_report["active_sources"],
-                    "retired_sources_verified": dry_run_report[
-                        "retired_sources_verified"
-                    ],
-                    "historical_records_preserved": dry_run_report[
-                        "historical_records_preserved"
-                    ],
+                    "retired_sources_verified": dry_run_report["retired_sources_verified"],
+                    "historical_records_preserved": dry_run_report["historical_records_preserved"],
                     "unapproved_review_groups": len(
                         dry_run_report["reconciliation"]["unapproved_review_groups"]
                     ),
@@ -369,9 +383,7 @@ def _read_external_successor_snippet(path: Path) -> dict[str, Any]:
     companion = path.with_suffix(".json")
     full_document = _read_structured_object(companion)
     if document.get("sources") != full_document.get("sources"):
-        raise ValueError(
-            "YAML external-successor sources do not match the JSON mapping companion"
-        )
+        raise ValueError("YAML external-successor sources do not match the JSON mapping companion")
     return full_document
 
 
@@ -571,9 +583,7 @@ def _resolve_snippet_record(
         ).all()
     )
     if len(matches) != 1:
-        raise ValueError(
-            f"record selector {record_id!r} resolved to {len(matches)} database rows"
-        )
+        raise ValueError(f"record selector {record_id!r} resolved to {len(matches)} database rows")
     return matches[0]
 
 
@@ -714,17 +724,13 @@ def _previews_from_external_successor(
             old_safe_tree = _snippet_safe_tree_integrity(old_selector)
             new_safe_tree = _snippet_safe_tree_integrity(new_selector)
             if old_safe_tree is not None and new_safe_tree is None:
-                raise ValueError(
-                    "safe-tree integrity must be declared on the successor selector"
-                )
+                raise ValueError("safe-tree integrity must be declared on the successor selector")
             if (
                 old_safe_tree is not None
                 and new_safe_tree is not None
                 and old_safe_tree != new_safe_tree
             ):
-                raise ValueError(
-                    "retired and successor safe-tree declarations disagree"
-                )
+                raise ValueError("retired and successor safe-tree declarations disagree")
             if new_safe_tree is not None:
                 if (
                     old_representation.materialization_kind != "directory"
@@ -750,32 +756,20 @@ def _previews_from_external_successor(
         if retired_representation_ids:
             mount_statement = select(RepresentationMount).where(
                 (RepresentationMount.source_id == retired_source_id)
-                | (
-                    RepresentationMount.representation_id.in_(
-                        retired_representation_ids
-                    )
-                )
+                | (RepresentationMount.representation_id.in_(retired_representation_ids))
             )
         retired_mounts = list(session.scalars(mount_statement).all())
         mount_mappings: dict[UUID, UUID] = {}
         for old_mount in retired_mounts:
-            successor_representation_id = representation_mappings.get(
-                old_mount.representation_id
-            )
+            successor_representation_id = representation_mappings.get(old_mount.representation_id)
             if successor_representation_id is None:
-                raise ValueError(
-                    f"retired mount {old_mount.id} has no representation mapping"
-                )
-            successor_representation = new_representations[
-                successor_representation_id
-            ]
+                raise ValueError(f"retired mount {old_mount.id} has no representation mapping")
+            successor_representation = new_representations[successor_representation_id]
             successor_mounts = list(
                 session.scalars(
                     select(RepresentationMount).where(
-                        RepresentationMount.representation_id
-                        == successor_representation_id,
-                        RepresentationMount.source_id
-                        == successor_representation.source_id,
+                        RepresentationMount.representation_id == successor_representation_id,
+                        RepresentationMount.source_id == successor_representation.source_id,
                         RepresentationMount.mount_path == old_mount.mount_path,
                     )
                 ).all()
@@ -841,16 +835,11 @@ def _batch_preview_report(previews: list[Any]) -> dict[str, Any]:
         "previews": [item.as_dict() for item in ordered],
         "counts": {
             "sources": len(ordered),
-            "records": sum(
-                len(item.payload.get("record_mappings", [])) for item in ordered
-            ),
+            "records": sum(len(item.payload.get("record_mappings", [])) for item in ordered),
             "representations": sum(
-                len(item.payload.get("representation_mappings", []))
-                for item in ordered
+                len(item.payload.get("representation_mappings", [])) for item in ordered
             ),
-            "mounts": sum(
-                len(item.payload.get("mount_mappings", [])) for item in ordered
-            ),
+            "mounts": sum(len(item.payload.get("mount_mappings", [])) for item in ordered),
         },
     }
 
@@ -871,9 +860,7 @@ def _run_source_retirement_preview(args: argparse.Namespace) -> int:
             if snippet_mode:
                 previews = _previews_from_external_successor(
                     session,
-                    document=_read_external_successor_snippet(
-                        args.external_successor_snippet
-                    ),
+                    document=_read_external_successor_snippet(args.external_successor_snippet),
                     backup_id=args.backup_id,
                     requested_by=args.requested_by,
                     reason=args.reason,
@@ -887,9 +874,7 @@ def _run_source_retirement_preview(args: argparse.Namespace) -> int:
                     source_id=_source_id(session, args.source),
                     backup_id=args.backup_id,
                     record_mappings=_mapping_values(mappings, "record_mappings"),
-                    representation_mappings=_mapping_values(
-                        mappings, "representation_mappings"
-                    ),
+                    representation_mappings=_mapping_values(mappings, "representation_mappings"),
                     mount_mappings=_mapping_values(mappings, "mount_mappings"),
                     requested_by=args.requested_by,
                     reason=args.reason,
@@ -933,9 +918,7 @@ def _preview_from_document(document: dict[str, Any]) -> Any:
 def _preview_from_file(path: Path, expected_digest: str) -> Any:
     preview = _preview_from_document(_read_json_object(path))
     if expected_digest != preview.payload_digest:
-        raise ValueError(
-            "--expect-preview does not match the canonical preview payload digest"
-        )
+        raise ValueError("--expect-preview does not match the canonical preview payload digest")
     return preview
 
 
@@ -952,11 +935,7 @@ def _preview_collection(
         rows = batch_documents[0].get("previews")
         if not isinstance(rows, list) or not rows:
             raise ValueError("batch preview record contains no source previews")
-        previews = [
-            _preview_from_document(row)
-            for row in rows
-            if isinstance(row, dict)
-        ]
+        previews = [_preview_from_document(row) for row in rows if isinstance(row, dict)]
         if len(previews) != len(rows):
             raise ValueError("batch preview contains a non-object source preview")
         regenerated = _batch_preview_report(previews)
@@ -995,9 +974,7 @@ def _run_source_retirement_apply(args: argparse.Namespace) -> int:
         apply_source_retirement_batch,
     )
 
-    previews, expected_digest, backup_id, batch_mode = _preview_collection(
-        args.preview_file
-    )
+    previews, expected_digest, backup_id, batch_mode = _preview_collection(args.preview_file)
     if args.expect_preview != expected_digest:
         raise ValueError(
             "--expect-preview does not match the canonical "
@@ -1023,9 +1000,7 @@ def _run_source_retirement_apply(args: argparse.Namespace) -> int:
     finally:
         engine.dispose()
     report = (
-        dict(batch_report["items"][0])
-        if not batch_mode and len(previews) == 1
-        else batch_report
+        dict(batch_report["items"][0]) if not batch_mode and len(previews) == 1 else batch_report
     )
     report["backup_id"] = backup_id
     report["expected_preview"] = args.expect_preview
@@ -1083,9 +1058,7 @@ def _run_source_retirement_rollback(args: argparse.Namespace) -> int:
         _emit(preview_report, args.json)
         return 0
     if args.expect_preview != payload_digest:
-        raise ValueError(
-            "--expect-preview is required and must match the rollback payload digest"
-        )
+        raise ValueError("--expect-preview is required and must match the rollback payload digest")
     private_key, registry = _signing_material(args)
     signature = sign_payload(private_key, payload)
     engine = create_engine(_database_url(args.database_url), pool_pre_ping=True)
@@ -1155,19 +1128,13 @@ def _run_source_retirement_status(args: argparse.Namespace) -> int:
                             "retired" if active_retirement is not None else "active"
                         ),
                         "active_retirement_id": (
-                            None
-                            if active_retirement is None
-                            else str(active_retirement.id)
+                            None if active_retirement is None else str(active_retirement.id)
                         ),
                         "backup_id": (
-                            None
-                            if active_retirement is None
-                            else str(active_retirement.backup_id)
+                            None if active_retirement is None else str(active_retirement.backup_id)
                         ),
                         "payload_digest": (
-                            None
-                            if active_retirement is None
-                            else active_retirement.payload_digest
+                            None if active_retirement is None else active_retirement.payload_digest
                         ),
                         "historical_records_preserved": int(
                             session.scalar(

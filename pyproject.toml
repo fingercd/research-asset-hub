@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "research-asset-hub"
-version = "0.1.0"
+version = "0.2.0rc1"
+license = "MIT"
 description = "Local-first research asset management hub"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,7 +27,6 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
   "mcp>=1.28,<2",
   "pywin32>=311; sys_platform == 'win32'",
-  "pymupdf>=1.26,<2",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +68,7 @@ exclude = ["apps/web"]
 cache_dir = "work/cache/mypy"
 
 [tool.pytest.ini_options]
-addopts = "--basetemp=work/pytest"
+addopts = "--basetemp=work/pytest --import-mode=importlib"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 cache_dir = "work/cache/pytest"

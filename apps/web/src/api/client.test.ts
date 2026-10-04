@@ -27,11 +27,7 @@ describe("API mutation guards", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await api.updateAnnotation(
-      "annotation-1",
-      { body_markdown: "更新" },
-      7,
-    );
+    await api.updateAnnotation("annotation-1", { body_markdown: "更新" }, 7);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/annotations/annotation-1",
@@ -67,7 +63,10 @@ describe("API mutation guards", () => {
 
     await api.health();
 
-    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<
+      string,
+      string
+    >;
     expect(headers["X-Research-Hub-CSRF"]).toBeUndefined();
   });
 });
@@ -75,14 +74,30 @@ describe("API mutation guards", () => {
 describe("health API", () => {
   it("accepts a slow but successful database health check", async () => {
     vi.useFakeTimers();
-    vi.stubGlobal("fetch", vi.fn((_path: RequestInfo | URL, init?: RequestInit) =>
-      new Promise<Response>((resolve, reject) => {
-        setTimeout(() => resolve(jsonResponse({
-          service: "research-asset-hub", status: "healthy", components: {},
-        })), 9_000);
-        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
-      }),
-    ));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_path: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            setTimeout(
+              () =>
+                resolve(
+                  jsonResponse({
+                    service: "research-asset-hub",
+                    status: "healthy",
+                    components: {},
+                  }),
+                ),
+              9_000,
+            );
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      ),
+    );
     const result = api.health().then(
       (response) => ({ status: response.status }),
       () => ({ status: "failed" }),
@@ -94,9 +109,11 @@ describe("health API", () => {
 
 describe("search API", () => {
   it("sends paper grouping while allowing an empty browse query", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({ items: [], next_cursor: null, total: 0 }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ items: [], next_cursor: null, total: 0 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     await api.search({
@@ -171,7 +188,9 @@ describe("search API", () => {
 
 describe("resolveApiBase", () => {
   it("prefers the shell-injected value on Tauri", () => {
-    vi.stubGlobal("window", { __HUB_API_BASE__: "http://127.0.0.1:8767/api/v1" } as HubWindow);
+    vi.stubGlobal("window", {
+      __HUB_API_BASE__: "http://127.0.0.1:8767/api/v1",
+    } as HubWindow);
     expect(resolveApiBase()).toBe("http://127.0.0.1:8767/api/v1");
     vi.unstubAllGlobals();
   });
@@ -184,5 +203,133 @@ describe("resolveApiBase", () => {
 
   it("defaults to the dev-proxied relative path", () => {
     expect(resolveApiBase()).toBe("/api/v1");
+  });
+});
+
+describe("product workflow API contracts", () => {
+  it("sends raw PDF bytes with the filename and CSRF marker", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ id: "d1", status: "ready" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["%PDF-1.7"], "论文.pdf", {
+      type: "application/pdf",
+    });
+    await api.uploadIntakePdf("d1", file);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/intake/drafts/d1/pdf?filename=%E8%AE%BA%E6%96%87.pdf",
+      expect.objectContaining({
+        method: "PUT",
+        body: file,
+        headers: expect.objectContaining({
+          "Content-Type": "application/pdf",
+          "X-Research-Hub-CSRF": "1",
+        }),
+      }),
+    );
+  });
+  it("protects reading-position updates with their current version", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({
+          position: { representation_id: "r1", page: 9, row_version: 4 },
+          stale: false,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await api.saveReadingPosition(
+      "a1",
+      { representation_id: "r1", page: 9 },
+      3,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/assets/a1/reading-position",
+      expect.objectContaining({
+        method: "PUT",
+        headers: expect.objectContaining({ "If-Match": 'W/"3"' }),
+      }),
+    );
+  });
+  it("uploads a package as bytes and commits its reviewed identity mapping using If-Match", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          jsonResponse({ id: "i1", status: "preview", row_version: 2 }),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const file = new File(["zip"], "domain.zip", { type: "application/zip" });
+    await api.importPackage(file);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/imports/packages?filename=domain.zip",
+      expect.objectContaining({ body: file }),
+    );
+    await api.commitPackage(
+      "i1",
+      { identity_mapping: { old: null }, include_user_state: false },
+      2,
+    );
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/imports/packages/i1/commit",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "If-Match": 'W/"2"' }),
+        body: JSON.stringify({
+          identity_mapping: { old: null },
+          include_user_state: false,
+        }),
+      }),
+    );
+  });
+});
+
+describe("workflow collection contracts", () => {
+  it("loads the full collection directory across cursors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: "c1", label: "One" }],
+          next_cursor: "next",
+          total: 2,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [{ id: "c2", label: "Two" }],
+          next_cursor: null,
+          total: 2,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await api.collections();
+    expect(result.items.map((item) => item.id)).toEqual(["c1", "c2"]);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/collections?cursor=next",
+      expect.any(Object),
+    );
+  });
+  it("keeps version checks for deleting collections and saved searches", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(null, { status: 204 })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await api.deleteCollection("c1", 4);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/collections/c1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "If-Match": 'W/"4"' }),
+      }),
+    );
+    await api.deleteSavedSearch("s1", 7);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/saved-searches/s1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ "If-Match": 'W/"7"' }),
+      }),
+    );
   });
 });

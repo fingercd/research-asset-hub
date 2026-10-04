@@ -1,4 +1,14 @@
 import type {
+  WorkflowResult,
+  PackageImport,
+  Collection,
+  IntakeDraft,
+  IntakePreview,
+  SavedSearch,
+  ReadingPosition,
+  ReadingPositionResponse,
+  McpConfig,
+  McpCheck,
   Annotation,
   ApiList,
   Asset,
@@ -66,6 +76,7 @@ export class ApiError extends Error {
 interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   timeout?: number;
+  rawBody?: BodyInit;
 }
 
 function params(
@@ -98,7 +109,10 @@ function ifMatch(
   return {};
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
   const method = (options.method ?? "GET").toUpperCase();
   const changesState = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
   const controller = new AbortController();
@@ -113,10 +127,14 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     const response = await fetch(path, {
       ...options,
       signal: controller.signal,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body:
+        options.rawBody ??
+        (options.body === undefined ? undefined : JSON.stringify(options.body)),
       headers: {
         Accept: "application/json, application/problem+json",
-        ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(options.body === undefined
+          ? {}
+          : { "Content-Type": "application/json" }),
         ...(changesState ? { "X-Research-Hub-CSRF": "1" } : {}),
         ...options.headers,
       },
@@ -159,7 +177,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         detail: "本地 API 响应时间过长，请稍后重试。",
       });
     }
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    if (error instanceof DOMException && error.name === "AbortError")
+      throw error;
     throw new ApiError({
       status: 0,
       title: "无法连接本地 API",
@@ -198,6 +217,24 @@ function normalizeList<T>(value: unknown): ApiList<T> {
   };
 }
 
+async function allPages<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ApiList<T>> {
+  const items: T[] = [];
+  let cursor: string | null = null;
+  let total: number | undefined;
+  do {
+    const page: ApiList<T> = normalizeList<T>(
+      await request(`${path}${params({ cursor })}`, { signal }),
+    );
+    items.push(...page.items);
+    total = page.total;
+    cursor = page.next_cursor;
+  } while (cursor);
+  return { items, next_cursor: null, total: total ?? items.length };
+}
+
 export interface SearchParams {
   q: string;
   mode?: SearchMode;
@@ -218,6 +255,7 @@ export interface SearchParams {
   has_guide?: boolean;
   has_annotation?: boolean;
   cursor?: string;
+  collection_id?: string;
 }
 
 type SearchParamsWithoutGrouping = Omit<SearchParams, "group_by">;
@@ -260,6 +298,7 @@ async function search(
         has_guide: searchParams.has_guide,
         has_annotation: searchParams.has_annotation,
         cursor: searchParams.cursor,
+        collection_id: searchParams.collection_id,
       })}`,
       { signal, timeout: SEARCH_TIMEOUT },
     ),
@@ -267,6 +306,202 @@ async function search(
 }
 
 export const api = {
+  createDomain: (body: {
+    label: string;
+    description?: string;
+    aliases?: string[];
+  }) => request<Domain>(`${API_BASE}/domains`, { method: "POST", body }),
+  updateDomain: (
+    slug: string,
+    body: { label?: string; description?: string; aliases?: string[] },
+  ) =>
+    request<Domain>(`${API_BASE}/domains/${encodeURIComponent(slug)}`, {
+      method: "PATCH",
+      body,
+    }),
+  intakeDrafts: async (signal?: AbortSignal) =>
+    normalizeList<IntakeDraft>(
+      await request(`${API_BASE}/intake/drafts`, { signal }),
+    ),
+  createIntakeDraft: (body: Record<string, unknown>) =>
+    request<IntakeDraft>(`${API_BASE}/intake/drafts`, { method: "POST", body }),
+  updateIntakeDraft: (id: string, body: Record<string, unknown>) =>
+    request<IntakeDraft>(
+      `${API_BASE}/intake/drafts/${encodeURIComponent(id)}`,
+      { method: "PATCH", body },
+    ),
+  uploadIntakePdf: (id: string, file: File) =>
+    request<IntakeDraft>(
+      `${API_BASE}/intake/drafts/${encodeURIComponent(id)}/pdf${params({ filename: file.name })}`,
+      {
+        method: "PUT",
+        rawBody: file,
+        headers: { "Content-Type": "application/pdf" },
+        timeout: 120_000,
+      },
+    ),
+  previewIntakeDraft: (id: string) =>
+    request<IntakePreview>(
+      `${API_BASE}/intake/drafts/${encodeURIComponent(id)}/preview`,
+    ),
+  commitIntakeDraft: (
+    id: string,
+    body: { action: "create" | "attach"; asset_id?: string },
+  ) =>
+    request<{ asset_id: string; draft_id: string; status: string }>(
+      `${API_BASE}/intake/drafts/${encodeURIComponent(id)}/commit`,
+      { method: "POST", body, timeout: 120_000 },
+    ),
+  cancelIntakeDraft: (id: string) =>
+    request<void>(`${API_BASE}/intake/drafts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  collections: (signal?: AbortSignal) =>
+    allPages<Collection>(`${API_BASE}/collections`, signal),
+  collection: (id: string, signal?: AbortSignal) =>
+    request<Collection>(`${API_BASE}/collections/${encodeURIComponent(id)}`, {
+      signal,
+    }),
+  createCollection: (body: { label: string; description?: string }) =>
+    request<Collection>(`${API_BASE}/collections`, { method: "POST", body }),
+  updateCollection: (
+    id: string,
+    body: { label: string; description?: string },
+    rowVersion?: number,
+  ) =>
+    request<Collection>(`${API_BASE}/collections/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body,
+      headers: ifMatch(rowVersion, { required: true }),
+    }),
+  deleteCollection: (id: string, rowVersion?: number) =>
+    request<void>(`${API_BASE}/collections/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: ifMatch(rowVersion, { required: true }),
+    }),
+  collectionAssets: async (id: string, signal?: AbortSignal, cursor?: string) =>
+    normalizeList<Asset>(
+      await request(
+        `${API_BASE}/collections/${encodeURIComponent(id)}/members${params({ cursor })}`,
+        { signal },
+      ),
+    ),
+  collectionMembers: (id: string, assetIds: string[], remove = false) =>
+    request<WorkflowResult>(
+      `${API_BASE}/collections/${encodeURIComponent(id)}/members`,
+      { method: remove ? "DELETE" : "POST", body: { asset_ids: assetIds } },
+    ),
+  savedSearches: (signal?: AbortSignal) =>
+    allPages<SavedSearch>(`${API_BASE}/saved-searches`, signal),
+  createSavedSearch: (body: {
+    name: string;
+    definition: Record<string, unknown>;
+  }) =>
+    request<SavedSearch>(`${API_BASE}/saved-searches`, {
+      method: "POST",
+      body,
+    }),
+  updateSavedSearch: (
+    id: string,
+    body: { name: string; definition: Record<string, unknown> },
+    rowVersion?: number,
+  ) =>
+    request<SavedSearch>(
+      `${API_BASE}/saved-searches/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body,
+        headers: ifMatch(rowVersion, { required: true }),
+      },
+    ),
+  deleteSavedSearch: (id: string, rowVersion?: number) =>
+    request<void>(`${API_BASE}/saved-searches/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: ifMatch(rowVersion, { required: true }),
+    }),
+  bulkAssets: (body: Record<string, unknown>) =>
+    request<WorkflowResult>(`${API_BASE}/assets/bulk`, {
+      method: "POST",
+      body,
+    }),
+  readingPosition: (id: string, signal?: AbortSignal) =>
+    request<ReadingPositionResponse>(
+      `${API_BASE}/assets/${encodeURIComponent(id)}/reading-position`,
+      { signal },
+    ),
+  saveReadingPosition: (
+    id: string,
+    body: ReadingPosition,
+    rowVersion?: number,
+  ) =>
+    request<ReadingPositionResponse>(
+      `${API_BASE}/assets/${encodeURIComponent(id)}/reading-position`,
+      { method: "PUT", body, headers: ifMatch(rowVersion) },
+    ),
+  exportPackage: (body: {
+    domain?: string;
+    asset_ids?: string[];
+    include_user_state: boolean;
+  }) =>
+    request<{ job_id: string; status: string }>(`${API_BASE}/exports`, {
+      method: "POST",
+      body,
+    }),
+  importPackage: (file: File) =>
+    request<PackageImport>(
+      `${API_BASE}/imports/packages${params({ filename: file.name })}`,
+      {
+        method: "POST",
+        rawBody: file,
+        headers: { "Content-Type": "application/zip" },
+        timeout: 120_000,
+      },
+    ),
+  commitPackage: (
+    id: string,
+    body: {
+      identity_mapping?: Record<string, string | null>;
+      include_user_state: boolean;
+    },
+    rowVersion: number,
+  ) =>
+    request<PackageImport>(
+      `${API_BASE}/imports/packages/${encodeURIComponent(id)}/commit`,
+      {
+        method: "POST",
+        body,
+        headers: ifMatch(rowVersion, { required: true }),
+        timeout: 120_000,
+      },
+    ),
+  exportDownloadUrl: (id: string) =>
+    `${API_BASE}/exports/${encodeURIComponent(id)}/download`,
+  linkCode: (body: {
+    paper_id: string;
+    url?: string;
+    existing_asset_id?: string;
+    local_directory?: string;
+    kind: string;
+    download: boolean;
+    revision?: string;
+  }) =>
+    request<{
+      repository_asset_id?: string;
+      job_id?: string;
+      [key: string]: unknown;
+    }>(`${API_BASE}/code-links`, { method: "POST", body }),
+  repositorySnapshot: (body: {
+    repository_asset_id: string;
+    revision?: string;
+  }) =>
+    request<{ job_id: string }>(`${API_BASE}/repository-snapshots`, {
+      method: "POST",
+      body,
+    }),
+  mcpConfig: (signal?: AbortSignal) =>
+    request<McpConfig>(`${API_BASE}/integrations/mcp-config`, { signal }),
+  mcpCheck: () =>
+    request<McpCheck>(`${API_BASE}/integrations/mcp-check`, { method: "POST" }),
   health: (signal?: AbortSignal) =>
     // 必须经 API_BASE 拼接:裸相对路径 /api/health 在桌面壳(origin 为
     // tauri://localhost)下会被 SPA fallback 返回 index.html,status 解析为
@@ -414,9 +649,7 @@ export const api = {
     ),
 
   jobs: async (signal?: AbortSignal) =>
-    normalizeList<Job>(
-      await request<unknown>(`${API_BASE}/jobs`, { signal }),
-    ),
+    normalizeList<Job>(await request<unknown>(`${API_BASE}/jobs`, { signal })),
 
   retryJob: (id: string, rowVersion?: number) =>
     request<Job>(`${API_BASE}/jobs/${encodeURIComponent(id)}/retry`, {

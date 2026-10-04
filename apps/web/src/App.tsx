@@ -10,6 +10,16 @@ import { NotFoundPage } from "./pages/NotFoundPage";
 import { SearchPage } from "./pages/SearchPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
+const IntakePage = lazy(() =>
+  import("./pages/IntakePage").then((module) => ({
+    default: module.IntakePage,
+  })),
+);
+const CollectionsPage = lazy(() =>
+  import("./pages/CollectionsPage").then((module) => ({
+    default: module.CollectionsPage,
+  })),
+);
 const AssetDetailPage = lazy(() =>
   import("./pages/AssetDetailPage").then((module) => ({
     default: module.AssetDetailPage,
@@ -27,6 +37,8 @@ export default function App() {
       <Route element={<AppShell />}>
         <Route index element={<HomePage />} />
         <Route path="index.html" element={<Navigate to="/" replace />} />
+        <Route path="collections" element={<CollectionsPage />} />
+        <Route path="intake" element={<IntakePage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="assets/:assetId" element={<AssetDetailPage />} />
         <Route path="domains" element={<DomainsPage />} />

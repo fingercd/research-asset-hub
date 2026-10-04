@@ -28,7 +28,6 @@ from packages.adapters import DEFAULT_REGISTRY
 from packages.cli.config import (
     PROJECT_ROOT,
     LoadedSource,
-    load_domain_slugs,
     unregistered_source_domains,
 )
 from packages.domain.enums import (
@@ -67,6 +66,7 @@ from packages.domain.models import (
     SourceRetirementRollback,
     utc_now,
 )
+from packages.domain.product_models import DomainDefinition
 from packages.domain.schemas import (
     AssetReference,
     NormalizedRecord,
@@ -76,6 +76,7 @@ from packages.domain.schemas import (
     SourceConfig,
 )
 from packages.domain.scope_policy import DomainScopePolicy
+from packages.domain_catalog.service import domain_slugs
 
 from .dry_run import _source_config
 from .reconciliation import (
@@ -196,9 +197,11 @@ def retired_source_contracts_for_dry_run(
                 f"Source {model.alias} has an active retirement but remains enabled"
             )
         config = dict(model.config or {})
-        rolled_back = select(SourceRetirementRollback.id).where(
-            SourceRetirementRollback.retirement_id == SourceRetirement.id
-        ).exists()
+        rolled_back = (
+            select(SourceRetirementRollback.id)
+            .where(SourceRetirementRollback.retirement_id == SourceRetirement.id)
+            .exists()
+        )
         retirement = session.scalar(
             select(SourceRetirement).where(
                 SourceRetirement.source_id == model.id,
@@ -209,12 +212,9 @@ def retired_source_contracts_for_dry_run(
             raise FormalImportValidationError(
                 f"Source {model.alias} retirement state changed during validation"
             )
-        if (
-            retirement.frozen_manifest_sha256
-            != config.get(_FROZEN_MANIFEST_SHA256)
-            or retirement.frozen_source_config_sha256
-            != config.get(_FROZEN_SOURCE_CONFIG_SHA256)
-        ):
+        if retirement.frozen_manifest_sha256 != config.get(
+            _FROZEN_MANIFEST_SHA256
+        ) or retirement.frozen_source_config_sha256 != config.get(_FROZEN_SOURCE_CONFIG_SHA256):
             raise FrozenSourceChangedError(
                 f"Retirement evidence disagrees with frozen source {model.alias}"
             )
@@ -248,9 +248,7 @@ def _partition_sources_for_import(
         {
             model.alias: model
             for model in session.scalars(
-                select(Source).where(
-                    Source.alias.in_([item.source_id for item in sources])
-                )
+                select(Source).where(Source.alias.in_([item.source_id for item in sources]))
             ).all()
         }
         if sources
@@ -355,9 +353,7 @@ def _first(records: Sequence[NormalizedRecord], field_name: str) -> Any:
     return None
 
 
-def _merged_mapping_field(
-    records: Sequence[NormalizedRecord], field_name: str
-) -> dict[str, Any]:
+def _merged_mapping_field(records: Sequence[NormalizedRecord], field_name: str) -> dict[str, Any]:
     """Merge mapping-valued claims without discarding independent enrichments.
 
     Paper metadata commonly arrives from an immutable catalog first and a later
@@ -449,9 +445,7 @@ def identity_groups(
         *reconciliation["approved_review_groups"],
     ]
     for group in approved:
-        keys = [
-            f"{item['source_id']}:{item['source_record_id']}" for item in group["records"]
-        ]
+        keys = [f"{item['source_id']}:{item['source_record_id']}" for item in group["records"]]
         for key in keys[1:]:
             union.union(keys[0], key)
 
@@ -486,8 +480,7 @@ class ImportCounters:
 
     def as_dict(self) -> dict[str, int]:
         return {
-            field_name: int(getattr(self, field_name))
-            for field_name in self.__dataclass_fields__
+            field_name: int(getattr(self, field_name)) for field_name in self.__dataclass_fields__
         }
 
 
@@ -532,8 +525,7 @@ def _validate_loaded_records(
     unknown_sources = sorted(set(counts) - set(configured))
     if unknown_sources:
         raise FormalImportValidationError(
-            "Adapters emitted records for undeclared sources: "
-            f"{unknown_sources}"
+            f"Adapters emitted records for undeclared sources: {unknown_sources}"
         )
 
     count_errors: list[str] = []
@@ -560,8 +552,7 @@ def _validate_loaded_records(
     )
     if missing_domains:
         raise FormalImportValidationError(
-            "Normalized records must declare at least one taxonomy domain: "
-            f"{missing_domains}"
+            f"Normalized records must declare at least one taxonomy domain: {missing_domains}"
         )
 
     unregistered_domains = sorted(
@@ -597,9 +588,7 @@ def _persisted_source_path(path: Path) -> str:
 
 def _upsert_sources(session: Session, sources: Sequence[LoadedSource]) -> dict[str, Source]:
     existing_models = {
-        loaded.source_id: session.scalar(
-            select(Source).where(Source.alias == loaded.source_id)
-        )
+        loaded.source_id: session.scalar(select(Source).where(Source.alias == loaded.source_id))
         for loaded in sources
     }
     freeze_contracts: dict[str, tuple[str, str, str]] = {}
@@ -631,9 +620,7 @@ def _upsert_sources(session: Session, sources: Sequence[LoadedSource]) -> dict[s
         model = existing_models[loaded.source_id]
         config = dict(loaded.raw)
         config["asset_roots"] = dict(config.get("asset_roots") or {})
-        manifest_sha256, config_sha256, source_frozen_at = freeze_contracts[
-            loaded.source_id
-        ]
+        manifest_sha256, config_sha256, source_frozen_at = freeze_contracts[loaded.source_id]
         config[_FROZEN_MANIFEST_SHA256] = manifest_sha256
         config[_FROZEN_SOURCE_CONFIG_SHA256] = config_sha256
         config[_FROZEN_AT] = source_frozen_at
@@ -730,13 +717,11 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
         ctx.dirty_asset_ids.add(asset.id)
     else:
         before = {
-            name: _json_digest(getattr(asset, name))
-            for name in (*values.keys(), "deleted_at")
+            name: _json_digest(getattr(asset, name)) for name in (*values.keys(), "deleted_at")
         }
         _apply_asset_values(ctx.session, asset, values)
         after = {
-            name: _json_digest(getattr(asset, name))
-            for name in (*values.keys(), "deleted_at")
+            name: _json_digest(getattr(asset, name)) for name in (*values.keys(), "deleted_at")
         }
         if before != after:
             ctx.dirty_asset_ids.add(asset.id)
@@ -751,9 +736,10 @@ def _upsert_paper_group(ctx: ImportContext, records: Sequence[NormalizedRecord])
         key = f"{record.source_id}:{record.source_record_id}"
         ctx.record_assets[key] = asset
         for identifier in record.asset.external_identifiers:
-            canonical = identifier.canonical or canonical_identifier(
-                identifier.scheme, identifier.value
-            ).split(":", 1)[-1]
+            canonical = (
+                identifier.canonical
+                or canonical_identifier(identifier.scheme, identifier.value).split(":", 1)[-1]
+            )
             existing = ctx.session.scalar(
                 select(ExternalIdentifierModel).where(
                     ExternalIdentifierModel.scheme == identifier.scheme,
@@ -873,9 +859,7 @@ def _upsert_source_record(
 def _dotted_path_to_pointer(value: str) -> str:
     components = value.split(".")
     encoded = [
-        component.replace("~", "~0").replace("/", "~1")
-        for component in components
-        if component
+        component.replace("~", "~0").replace("/", "~1") for component in components if component
     ]
     return "/" + "/".join(encoded)
 
@@ -1056,10 +1040,7 @@ def _representation_state(
             existing is not None
             and existing.tree_digest is not None
             and (
-                (
-                    candidate.revision is not None
-                    and existing.revision == candidate.revision
-                )
+                (candidate.revision is not None and existing.revision == candidate.revision)
                 or (
                     existing.attributes.get("_source_mtime_ns") == stat.st_mtime_ns
                     and existing.attributes.get("_source_size") == stat.st_size
@@ -1069,8 +1050,7 @@ def _representation_state(
         digest = (
             existing.tree_digest
             if cached and existing is not None
-            else candidate.tree_digest
-            or _directory_digest_cached(str(path), stat.st_mtime_ns)
+            else candidate.tree_digest or _directory_digest_cached(str(path), stat.st_mtime_ns)
         )
         attributes["_fingerprint_strategy"] = (
             "revision-or-stat-cache" if cached else "directory-tree-stat"
@@ -1098,8 +1078,7 @@ def _representation_state(
     digest = (
         existing.sha256
         if cached and existing is not None
-        else candidate.sha256
-        or _sha256_file_cached(str(path), stat.st_size, stat.st_mtime_ns)
+        else candidate.sha256 or _sha256_file_cached(str(path), stat.st_size, stat.st_mtime_ns)
     )
     attributes["_fingerprint_strategy"] = "size-mtime-cache" if cached else "sha256"
     return (
@@ -1299,9 +1278,7 @@ def _upsert_representation(
                 )
             )
 
-    model = ctx.session.scalar(
-        _representation_query(source_model.id, target.id, candidate)
-    )
+    model = ctx.session.scalar(_representation_query(source_model.id, target.id, candidate))
     path = _representation_path(loaded, config, candidate)
     (
         availability,
@@ -1330,9 +1307,7 @@ def _upsert_representation(
             external_url=str(candidate.url) if candidate.url else None,
             entrypoint=candidate.entrypoint,
             revision=candidate.revision,
-            tree_digest=(
-                digest if materialization in directory_materializations else None
-            ),
+            tree_digest=(digest if materialization in directory_materializations else None),
             sha256=digest if materialization not in directory_materializations else None,
             mime_type=mime_type,
             size_bytes=size,
@@ -1369,9 +1344,7 @@ def _upsert_representation(
         ):
             if derived_key in existing_attributes:
                 representation_attributes[derived_key] = existing_attributes[derived_key]
-        persisted_policy = str(
-            representation_attributes.get("sandbox_policy") or ""
-        )
+        persisted_policy = str(representation_attributes.get("sandbox_policy") or "")
         model.asset_id = target.id
         # A logical repository can be referenced by several papers in the same
         # source. Keep the representation's original provenance owner stable;
@@ -1384,9 +1357,7 @@ def _upsert_representation(
         model.external_url = str(candidate.url) if candidate.url else None
         model.entrypoint = candidate.entrypoint
         model.revision = candidate.revision
-        model.tree_digest = (
-            digest if materialization in directory_materializations else None
-        )
+        model.tree_digest = digest if materialization in directory_materializations else None
         model.sha256 = digest if materialization not in directory_materializations else None
         model.mime_type = mime_type
         model.size_bytes = size
@@ -1438,8 +1409,7 @@ def _upsert_representation(
         mount_source = ctx.source_models.get(mount_candidate.source_id)
         if mount_source is None:
             raise FormalImportValidationError(
-                "Representation mount references an unloaded source: "
-                f"{mount_candidate.source_id}"
+                f"Representation mount references an unloaded source: {mount_candidate.source_id}"
             )
         mount = ctx.session.scalar(
             select(RepresentationMount).where(
@@ -1502,9 +1472,7 @@ def _resolve_reference(
     if identifier is None:
         return None
     if identifier.scheme in {"github", "url"}:
-        repository_url = canonical_repository_url(
-            identifier.canonical or identifier.value
-        )
+        repository_url = canonical_repository_url(identifier.canonical or identifier.value)
         return ctx.repository_assets.get(repository_url)
     if identifier.scheme == "source":
         value = identifier.canonical or identifier.value
@@ -1588,10 +1556,7 @@ def _upsert_relation(
         ctx.session.flush()
         ctx.counters.relations_created += 1
         ctx.dirty_asset_ids.update((subject.id, target.id))
-    elif (
-        candidate.confirmed
-        and relation.confirmation_status == ConfirmationStatus.CANDIDATE.value
-    ):
+    elif candidate.confirmed and relation.confirmation_status == ConfirmationStatus.CANDIDATE.value:
         relation.confirmation_status = ConfirmationStatus.CONFIRMED.value
         ctx.dirty_asset_ids.update((subject.id, target.id))
 
@@ -1671,9 +1636,14 @@ def run_formal_import(
     leaves the session ready for rollback, so no partial import becomes visible.
     """
 
+    known_domains = (
+        domain_slugs(session, PROJECT_ROOT / "config" / "taxonomy.yaml")
+        if known_domain_slugs is None
+        else known_domain_slugs | set(session.scalars(select(DomainDefinition.slug)))
+    )
     unregistered_domains = unregistered_source_domains(
         list(sources),
-        known_domain_slugs=known_domain_slugs,
+        known_domain_slugs=known_domains,
     )
     if unregistered_domains:
         raise ValueError(
@@ -1681,15 +1651,12 @@ def run_formal_import(
             f"before formal import: {unregistered_domains}"
         )
 
-    known_domains = (
-        load_domain_slugs() if known_domain_slugs is None else known_domain_slugs
-    )
     scope_policy = domain_scope_policy or DomainScopePolicy.load(
         PROJECT_ROOT / "config" / "domain-scope-exclusions.yaml"
     )
     started = datetime.now(UTC)
-    active_sources, retired_sources, historical_records_preserved = (
-        _partition_sources_for_import(session, sources)
+    active_sources, retired_sources, historical_records_preserved = _partition_sources_for_import(
+        session, sources
     )
     records = _load_all_records(active_sources)
     _validate_loaded_records(
@@ -1758,11 +1725,7 @@ def run_formal_import(
     counters.update(
         {
             "paper_assets_total": len(
-                {
-                    asset.id
-                    for asset in ctx.record_assets.values()
-                    if asset.asset_type == "paper"
-                }
+                {asset.id for asset in ctx.record_assets.values() if asset.asset_type == "paper"}
             ),
             "repository_assets_total": len(ctx.repository_assets),
             "source_record_candidates": len(records),
@@ -1770,9 +1733,7 @@ def run_formal_import(
             "relation_candidates": sum(len(item.relations) for item in records),
             "strong_merge_groups": len(reconciliation["auto_merge_groups"]),
             "reviewed_merge_groups": len(reconciliation["approved_review_groups"]),
-            "unapproved_merge_groups": len(
-                reconciliation["unapproved_review_groups"]
-            ),
+            "unapproved_merge_groups": len(reconciliation["unapproved_review_groups"]),
         }
     )
     run.status = ImportStatus.SUCCEEDED.value
@@ -1830,12 +1791,8 @@ def database_counts(session: Session) -> dict[str, int]:
 
     return {
         "assets": count(Asset, Asset.deleted_at.is_(None)),
-        "papers": count(
-            Asset, Asset.asset_type == "paper", Asset.deleted_at.is_(None)
-        ),
-        "repositories": count(
-            Asset, Asset.asset_type == "repository", Asset.deleted_at.is_(None)
-        ),
+        "papers": count(Asset, Asset.asset_type == "paper", Asset.deleted_at.is_(None)),
+        "repositories": count(Asset, Asset.asset_type == "repository", Asset.deleted_at.is_(None)),
         "source_records": count(SourceRecord),
         "representations": count(Representation, Representation.deleted_at.is_(None)),
         "missing_representations": count(

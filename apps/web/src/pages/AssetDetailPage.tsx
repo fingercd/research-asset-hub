@@ -12,7 +12,7 @@ import {
   StickyNote,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import {
   getAssetDomains,
@@ -20,13 +20,11 @@ import {
   getRepresentationType,
   type Representation,
 } from "../api/types";
+import { AssetCollectionControl } from "../components/AssetCollectionControl";
+import { CodeLinkControl } from "../components/CodeLinkControl";
 import { AnnotationComposer } from "../components/AnnotationComposer";
 import { AssetCard } from "../components/AssetCard";
-import {
-  CodePanel,
-  GuidePanel,
-  HtmlPanel,
-} from "../components/DocumentPanels";
+import { CodePanel, GuidePanel, HtmlPanel } from "../components/DocumentPanels";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { ReadingStatusControl } from "../components/ReadingStatusControl";
 import { ReleaseStatusBadges } from "../components/ReleaseStatusBadges";
@@ -48,13 +46,7 @@ const PdfPanel = lazy(() =>
   })),
 );
 
-type DetailTab =
-  | "overview"
-  | "pdf"
-  | "code"
-  | "guide"
-  | "similar"
-  | "html";
+type DetailTab = "overview" | "pdf" | "code" | "guide" | "similar" | "html";
 
 const tabs: Array<{
   id: DetailTab;
@@ -81,7 +73,12 @@ function firstRepresentation(
 export function AssetDetailPage() {
   const { assetId = "" } = useParams();
   const compare = useCompare();
-  const [activeTab, setActiveTab] = useState<DetailTab>("overview");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedPage = Number(searchParams.get("page")) || undefined;
+  const requestedRepresentation = searchParams.get("representation");
+  const [activeTab, setActiveTab] = useState<DetailTab>(
+    searchParams.get("view") === "pdf" ? "pdf" : "overview",
+  );
   const asset = useQuery({
     queryKey: ["asset", assetId],
     queryFn: ({ signal }) => api.asset(assetId, signal),
@@ -128,25 +125,29 @@ export function AssetDetailPage() {
   const selected = compare.has(data.id);
   const pdf = firstRepresentation(
     reps,
-    (item) => getRepresentationType(item) === "pdf",
+    (item) =>
+      getRepresentationType(item) === "pdf" &&
+      (!requestedRepresentation || item.id === requestedRepresentation),
   );
-  const code = firstRepresentation(reps, (item) =>
-    ["repository", "source_code", "notebook"].includes(
-      getRepresentationType(item),
-    ),
-  ) ?? (() => {
-    const action = data.quick_actions?.find(
-      (item) => item.kind === "code" && item.status === "available",
-    );
-    return action?.representation_id
-      ? {
-          id: action.representation_id,
-          asset_id: action.owner_asset_id ?? undefined,
-          representation_type: "repository",
-          availability: "available",
-        }
-      : undefined;
-  })();
+  const code =
+    firstRepresentation(reps, (item) =>
+      ["repository", "source_code", "notebook"].includes(
+        getRepresentationType(item),
+      ),
+    ) ??
+    (() => {
+      const action = data.quick_actions?.find(
+        (item) => item.kind === "code" && item.status === "available",
+      );
+      return action?.representation_id
+        ? {
+            id: action.representation_id,
+            asset_id: action.owner_asset_id ?? undefined,
+            representation_type: "repository",
+            availability: "available",
+          }
+        : undefined;
+    })();
   const guide = preferGuide(reps);
   const html = firstRepresentation(
     reps,
@@ -189,7 +190,9 @@ export function AssetDetailPage() {
                   {domain}
                 </Link>
               ))}
-              {data.tags?.map((tag) => <span key={tag}>#{tag}</span>)}
+              {data.tags?.map((tag) => (
+                <span key={tag}>#{tag}</span>
+              ))}
             </div>
           )}
         </div>
@@ -221,6 +224,7 @@ export function AssetDetailPage() {
         )}
       </header>
 
+      <AssetCollectionControl assetId={data.id} />
       <div className="asset-tabs" role="tablist" aria-label="资产阅读视图">
         {tabs.map(({ id, label, icon: Icon }) => (
           <button
@@ -300,7 +304,33 @@ export function AssetDetailPage() {
                           </time>
                         </div>
                         {annotation.title && <h3>{annotation.title}</h3>}
+                        {annotation.anchor?.quote &&
+                          annotation.anchor.quote !==
+                            annotationBody(annotation) && (
+                            <blockquote>{annotation.anchor.quote}</blockquote>
+                          )}
                         <p>{annotationBody(annotation) || "空批注"}</p>
+                        {annotation.anchor?.page && (
+                          <button
+                            type="button"
+                            className="text-link"
+                            onClick={() => {
+                              setSearchParams({
+                                view: "pdf",
+                                page: String(annotation.anchor!.page),
+                                ...(annotation.representation_id
+                                  ? {
+                                      representation:
+                                        annotation.representation_id,
+                                    }
+                                  : {}),
+                              });
+                              setActiveTab("pdf");
+                            }}
+                          >
+                            回到 PDF 第 {annotation.anchor.page} 页
+                          </button>
+                        )}
                       </article>
                     ))}
                   </div>
@@ -395,10 +425,54 @@ export function AssetDetailPage() {
 
         {activeTab === "pdf" && (
           <Suspense fallback={<LoadingState label="正在加载 PDF 阅读器…" />}>
-            <PdfPanel representation={pdf} />
+            {reps.filter((item) => getRepresentationType(item) === "pdf")
+              .length > 1 && (
+              <label className="pdf-representation-picker">
+                <span>选择 PDF 版本</span>
+                <select
+                  value={pdf?.id ?? ""}
+                  onChange={(event) =>
+                    setSearchParams({
+                      view: "pdf",
+                      representation: event.target.value,
+                    })
+                  }
+                >
+                  {reps
+                    .filter((item) => getRepresentationType(item) === "pdf")
+                    .map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {representationLabel(item)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+            {requestedRepresentation && !pdf && (
+              <p className="inline-warning">
+                这条批注所对应的 PDF 当前不可用。可在概览中核对原文件与版本。
+              </p>
+            )}
+            <PdfPanel
+              representation={pdf}
+              assetId={data.id}
+              initialPage={requestedPage}
+              annotations={notes}
+            />
           </Suspense>
         )}
-        {activeTab === "code" && <CodePanel representation={code} />}
+        {activeTab === "code" && (
+          <>
+            <CodeLinkControl
+              paperId={data.id}
+              repositoryId={
+                code?.asset_id ??
+                (data.asset_type === "repository" ? data.id : undefined)
+              }
+            />
+            <CodePanel representation={code} />
+          </>
+        )}
         {activeTab === "guide" && <GuidePanel representation={guide} />}
         {activeTab === "html" && <HtmlPanel representation={html} />}
 

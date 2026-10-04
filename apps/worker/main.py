@@ -134,7 +134,9 @@ class WorkerRuntime:
     ) -> None:
         self.settings = settings
         self.database = database or DatabaseManager(settings)
-        self.registry = registry or SourceRegistry.load(settings.sources_config_path)
+        self.registry = registry or SourceRegistry.load(
+            settings.sources_config_path, data_dir=settings.data_dir
+        )
         self.worker_id = worker_id or (
             f"{socket.gethostname()}:{os.getpid()}:{os.urandom(4).hex()}"
         )

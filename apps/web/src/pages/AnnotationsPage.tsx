@@ -16,10 +16,14 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
   const [body, setBody] = useState(annotationBody(annotation));
   const update = useMutation({
     mutationFn: () =>
-      api.updateAnnotation(annotation.id, {
-        title: title.trim() || null,
-        body_markdown: body.trim(),
-      }, annotation.row_version),
+      api.updateAnnotation(
+        annotation.id,
+        {
+          title: title.trim() || null,
+          body_markdown: body.trim(),
+        },
+        annotation.row_version,
+      ),
     onSuccess: () => {
       setEditing(false);
       invalidateResearchData(queryClient, {
@@ -29,7 +33,8 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
     },
   });
   const remove = useMutation({
-    mutationFn: () => api.deleteAnnotation(annotation.id, annotation.row_version),
+    mutationFn: () =>
+      api.deleteAnnotation(annotation.id, annotation.row_version),
     onSuccess: () =>
       invalidateResearchData(queryClient, {
         annotations: true,
@@ -42,18 +47,37 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
       <article className="annotation-card is-editing">
         <label>
           <span className="sr-only">批注标题</span>
-          <input value={title} onChange={(event) => setTitle(event.target.value)} />
+          <input
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+          />
         </label>
         <label>
           <span className="sr-only">批注内容</span>
-          <textarea rows={5} value={body} onChange={(event) => setBody(event.target.value)} />
+          <textarea
+            rows={5}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+          />
         </label>
         <div className="annotation-actions">
-          {update.isError && <span className="inline-error">{getApiErrorMessage(update.error)}</span>}
-          <button className="button primary compact" type="button" onClick={() => update.mutate()}>
+          {update.isError && (
+            <span className="inline-error">
+              {getApiErrorMessage(update.error)}
+            </span>
+          )}
+          <button
+            className="button primary compact"
+            type="button"
+            onClick={() => update.mutate()}
+          >
             <Check size={14} aria-hidden="true" /> 保存
           </button>
-          <button className="button ghost compact" type="button" onClick={() => setEditing(false)}>
+          <button
+            className="button ghost compact"
+            type="button"
+            onClick={() => setEditing(false)}
+          >
             <X size={14} aria-hidden="true" /> 取消
           </button>
         </div>
@@ -65,17 +89,32 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
     <article className="annotation-card">
       <div>
         <span className="annotation-kind">{annotation.kind ?? "comment"}</span>
-        <time>{formatDate(annotation.updated_at ?? annotation.created_at, true)}</time>
+        <time>
+          {formatDate(annotation.updated_at ?? annotation.created_at, true)}
+        </time>
       </div>
       {annotation.title && <h3>{annotation.title}</h3>}
+      {annotation.anchor?.quote &&
+        annotation.anchor.quote !== annotationBody(annotation) && (
+          <blockquote>{annotation.anchor.quote}</blockquote>
+        )}
       <p>{annotationBody(annotation) || "空批注"}</p>
       <footer>
-        <Link to={`/assets/${encodeURIComponent(annotation.asset_id)}`}>
-          查看资产
+        <Link
+          to={`/assets/${encodeURIComponent(annotation.asset_id)}${annotation.anchor?.page ? `?view=pdf&page=${annotation.anchor.page}${annotation.representation_id ? `&representation=${encodeURIComponent(annotation.representation_id)}` : ""}` : ""}`}
+        >
+          {annotation.anchor?.page
+            ? `回到 PDF 第 ${annotation.anchor.page} 页`
+            : "查看资产"}
         </Link>
         <div>
-          <button className="icon-button" type="button" onClick={() => setEditing(true)}>
-            <Pencil size={15} aria-hidden="true" /><span className="sr-only">编辑批注</span>
+          <button
+            className="icon-button"
+            type="button"
+            onClick={() => setEditing(true)}
+          >
+            <Pencil size={15} aria-hidden="true" />
+            <span className="sr-only">编辑批注</span>
           </button>
           <button
             className="icon-button danger"
@@ -85,7 +124,8 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
               if (window.confirm("确定删除这条批注？")) remove.mutate();
             }}
           >
-            <Trash2 size={15} aria-hidden="true" /><span className="sr-only">删除批注</span>
+            <Trash2 size={15} aria-hidden="true" />
+            <span className="sr-only">删除批注</span>
           </button>
         </div>
       </footer>
@@ -128,7 +168,13 @@ export function AnnotationsPage() {
     const value = filter.trim().toLocaleLowerCase();
     if (!value) return annotations.data?.items ?? [];
     return (annotations.data?.items ?? []).filter((annotation) =>
-      [annotation.title, annotation.summary, annotationBody(annotation), annotation.asset_id]
+      [
+        annotation.title,
+        annotation.summary,
+        annotationBody(annotation),
+        annotation.anchor?.quote,
+        annotation.asset_id,
+      ]
         .filter(Boolean)
         .some((item) => item?.toLocaleLowerCase().includes(value)),
     );
@@ -146,7 +192,11 @@ export function AnnotationsPage() {
         title="全部批注"
         description="集中查看、检索和维护论文总结、问题、摘录与评论。"
         actions={
-          <button className="button primary" type="button" onClick={() => setShowCreate(true)}>
+          <button
+            className="button primary"
+            type="button"
+            onClick={() => setShowCreate(true)}
+          >
             <Plus size={16} aria-hidden="true" /> 新建批注
           </button>
         }
@@ -156,27 +206,52 @@ export function AnnotationsPage() {
         <form className="section-block annotation-create" onSubmit={submit}>
           <div className="section-heading">
             <h2>新建批注</h2>
-            <button className="icon-button" type="button" onClick={() => setShowCreate(false)}>
-              <X size={17} aria-hidden="true" /><span className="sr-only">关闭</span>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setShowCreate(false)}
+            >
+              <X size={17} aria-hidden="true" />
+              <span className="sr-only">关闭</span>
             </button>
           </div>
           <div className="form-row">
             <label className="grow">
               <span>资产 ID</span>
-              <input required value={assetId} onChange={(event) => setAssetId(event.target.value)} />
+              <input
+                required
+                value={assetId}
+                onChange={(event) => setAssetId(event.target.value)}
+              />
             </label>
             <label className="grow">
               <span>标题（可选）</span>
-              <input value={title} onChange={(event) => setTitle(event.target.value)} />
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+              />
             </label>
           </div>
           <label>
             <span>内容</span>
-            <textarea required rows={5} value={body} onChange={(event) => setBody(event.target.value)} />
+            <textarea
+              required
+              rows={5}
+              value={body}
+              onChange={(event) => setBody(event.target.value)}
+            />
           </label>
           <div className="form-actions">
-            {create.isError && <span className="inline-error">{getApiErrorMessage(create.error)}</span>}
-            <button className="button primary" type="submit" disabled={create.isPending}>
+            {create.isError && (
+              <span className="inline-error">
+                {getApiErrorMessage(create.error)}
+              </span>
+            )}
+            <button
+              className="button primary"
+              type="submit"
+              disabled={create.isPending}
+            >
               {create.isPending ? "保存中…" : "保存批注"}
             </button>
           </div>
@@ -197,7 +272,10 @@ export function AnnotationsPage() {
       {annotations.isPending ? (
         <LoadingState label="正在加载批注…" />
       ) : annotations.isError ? (
-        <ErrorState error={annotations.error} retry={() => void annotations.refetch()} />
+        <ErrorState
+          error={annotations.error}
+          retry={() => void annotations.refetch()}
+        />
       ) : visible.length ? (
         <section className="annotation-grid" aria-label="批注列表">
           {visible.map((annotation) => (
@@ -207,7 +285,9 @@ export function AnnotationsPage() {
       ) : (
         <EmptyState
           title={filter ? "没有匹配的批注" : "还没有批注"}
-          detail={filter ? "尝试其他筛选词。" : "打开任一资产详情即可记录第一条批注。"}
+          detail={
+            filter ? "尝试其他筛选词。" : "打开任一资产详情即可记录第一条批注。"
+          }
           kind={filter ? "search" : "empty"}
         />
       )}

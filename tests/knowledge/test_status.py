@@ -313,7 +313,8 @@ def test_status_uses_bounded_queries_and_never_selects_chunk_bodies(status_libra
     result = build_knowledge_status(session, registry, cache_root, settings)
     assert result["counts"]["papers"] == 4
     assert result["jobs"]["counts"] == {"pending": 1, "running": 1, "failed": 1}
-    assert len(statements) <= 10
+    # The persistent domain registry adds one bounded query over definitions.
+    assert len(statements) <= 11
     assert all("document_chunks.text_content" not in statement for statement in statements)
     assert all(
         not statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))

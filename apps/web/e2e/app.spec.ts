@@ -390,13 +390,14 @@ test("搜索卡片默认保持简洁，更多菜单提供快捷打开", async ({
   await page.getByText("更多筛选", { exact: true }).click();
   await page.getByLabel("资产类型").selectOption("paper");
   await page.getByLabel("作者").fill("研究者甲");
-  await page.getByLabel("起始年份").fill("2020");
+  await page.getByLabel("起始日期").fill("2020-01-01");
   await page.getByRole("checkbox", { name: "PDF", exact: true }).click();
   await expect(page).toHaveURL(/has_pdf=true/);
+  await expect(page).toHaveURL(/date_from=2020-01-01/);
   await page.getByRole("button", { name: "应用筛选" }).click();
   await expect(page).toHaveURL(/type=paper/);
   await expect(page).toHaveURL(/author=%E7%A0%94%E7%A9%B6%E8%80%85%E7%94%B2/);
-  await expect(page).toHaveURL(/year_from=2020/);
+  await expect(page).toHaveURL(/date_from=2020-01-01/);
   await expect(page).toHaveURL(/has_pdf=true/);
 });
 

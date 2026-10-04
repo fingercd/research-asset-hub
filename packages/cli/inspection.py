@@ -13,6 +13,7 @@ from typing import Any
 
 from apps.asset_gateway.registry import SourceRegistry
 from packages.domain.path_exclusions import OperationalPathExclusions
+from packages.managed_sources.service import canonical_bytes
 
 from .config import PROJECT_ROOT, LoadedSource
 
@@ -35,6 +36,22 @@ def record_list(document: Any) -> list[Any]:
             if isinstance(value, list):
                 return value
     raise ValueError("Manifest root must be an array or contain papers/items/records/assets")
+
+
+def _manifest_record_count(source: LoadedSource, document: Any) -> int:
+    if source.adapter != "managed_repository":
+        return len(record_list(document))
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or document.get("source_kind") not in {"user_selected_directory", "public_commit_archive"}
+        or not isinstance(document.get("source_record_id"), str)
+        or not document["source_record_id"]
+    ):
+        raise ValueError("Managed repository manifest requires its native source identity")
+    # This provenance manifest describes a registered repository representation;
+    # it is not an adapter record batch and creates no SourceRecord rows.
+    return 0
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -185,10 +202,10 @@ def source_preflight(source: LoadedSource) -> dict[str, Any]:
         return result
 
     try:
-        records = record_list(load_json(source.manifest))
-        result["record_count"] = len(records)
+        record_count = _manifest_record_count(source, load_json(source.manifest))
+        result["record_count"] = record_count
         result["record_count_matches"] = (
-            source.expected_records is None or len(records) == source.expected_records
+            source.expected_records is None or record_count == source.expected_records
         )
         if not result["record_count_matches"]:
             result["warnings"].append("record_count_changed")
@@ -305,7 +322,7 @@ def source_inventory(
     applied_rules: set[str] | None = None,
 ) -> dict[str, Any]:
     document = load_json(source.manifest)
-    records = record_list(document)
+    record_count = _manifest_record_count(source, document)
     stat = source.manifest.stat()
     formal_patterns = source.raw.get("formal_html") or []
     asset_roots = source.raw.get("asset_roots") or {}
@@ -352,13 +369,14 @@ def source_inventory(
         "label": source.label,
         "domain": source.domain,
         "adapter": source.adapter,
+        "source_config_sha256": hashlib.sha256(canonical_bytes(source.raw)).hexdigest(),
         "root": str(source.root),
         "manifest": {
             "path": str(source.manifest),
             "bytes": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
             "sha256": sha256_file(source.manifest),
-            "records": len(records),
+            "records": record_count,
         },
         "asset_roots": {
             role: {

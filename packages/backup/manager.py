@@ -21,6 +21,15 @@ def default_backup_repository() -> Path:
 
 
 def _find_restic() -> Path:
+    configured = os.environ.get("HUB_RESTIC_PATH", "").strip()
+    app_root = Path(__file__).resolve().parents[2]
+    for candidate in (
+        Path(configured) if configured else None,
+        app_root.parent / "runtime" / "restic.exe",
+        app_root / "runtime" / "restic.exe",
+    ):
+        if candidate is not None and candidate.is_file():
+            return candidate
     executable = shutil.which("restic")
     if executable:
         return Path(executable)

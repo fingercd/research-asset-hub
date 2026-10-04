@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from packages.managed_sources.service import data_directory, load_managed_sources
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCES_CONFIG = PROJECT_ROOT / "config" / "sources.yaml"
 DEFAULT_TAXONOMY_CONFIG = PROJECT_ROOT / "config" / "taxonomy.yaml"
@@ -37,11 +39,28 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_sources(path: Path = DEFAULT_SOURCES_CONFIG) -> list[LoadedSource]:
+def load_sources(
+    path: Path = DEFAULT_SOURCES_CONFIG,
+    *,
+    data_dir: Path | None = None,
+    include_platform: bool = False,
+) -> list[LoadedSource]:
     document = load_yaml(path)
     raw_sources = document.get("sources")
     if not isinstance(raw_sources, list):
         raise ValueError(f"'sources' must be a list: {path}")
+    # Platform repository snapshots have their own immutable ledger and do not
+    # implement a formal adapter contract. PDF and domain-package manifests join
+    # the formal adapter pipeline. Read-only inspection explicitly includes all
+    # registered platform manifests without dispatching them through adapters.
+    raw_sources = [
+        *raw_sources,
+        *[
+            item
+            for item in load_managed_sources(data_dir or data_directory())
+            if include_platform or item.get("adapter") in {"generic_manifest", "domain_package"}
+        ],
+    ]
 
     loaded: list[LoadedSource] = []
     seen_ids: set[str] = set()

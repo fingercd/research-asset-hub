@@ -151,7 +151,7 @@ class KnowledgeService:
             raise KnowledgeError("invalid_source_type", "Unknown evidence source type.", 422)
         query = query.strip()
         try:
-            domain = normalize_domain(domain, self.taxonomy_path)
+            domain = normalize_domain(domain, self.taxonomy_path, session=self.session)
             plan = (
                 plan_query(query, keywords=keywords, constraints=constraints)
                 if query or keywords

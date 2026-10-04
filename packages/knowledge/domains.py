@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
+from sqlalchemy.orm import Session
 
 from apps.api.domain_views import presentation_domains
+from packages.domain_catalog.service import list_domain_definitions
 
 _HISTORICAL = {"generation", "navigation-compression"}
 _SOURCE_CANDIDATES = {
@@ -17,14 +20,23 @@ _SOURCE_CANDIDATES = {
 }
 
 
-def normalize_domain(value: str | None, taxonomy_path: Path | None) -> str | None:
+def normalize_domain(
+    value: str | None, taxonomy_path: Path | None, *, session: Session | None = None
+) -> str | None:
     if value is None or not value.strip():
         return None
     value = value.strip()
     if taxonomy_path is None:
         return value
-    data = yaml.safe_load(taxonomy_path.read_text(encoding="utf-8"))
-    rows = data["domains"]
+    if session is not None:
+        settings = SimpleNamespace(taxonomy_config_path=taxonomy_path)
+        rows = [
+            {**item, "id": item["slug"]}
+            for item in list_domain_definitions(session, settings, include_hidden=True)
+        ]
+    else:
+        data = yaml.safe_load(taxonomy_path.read_text(encoding="utf-8"))
+        rows = data["domains"]
     # A stable identifier wins over an alias shared by more than one domain.
     for item in rows:
         if value.casefold() == item["id"].casefold():

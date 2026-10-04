@@ -393,7 +393,9 @@ def create_app(
     app_settings = settings or get_settings()
     database_manager = database or DatabaseManager(app_settings)
     owns_database = database is None
-    source_registry = registry or SourceRegistry.load(app_settings.sources_config_path)
+    source_registry = registry or SourceRegistry.load(
+        app_settings.sources_config_path, data_dir=app_settings.data_dir
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

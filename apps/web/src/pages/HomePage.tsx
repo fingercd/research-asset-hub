@@ -19,7 +19,10 @@ import {
   LoadingState,
 } from "../components/PageState";
 
-function count(dashboard: Dashboard, key: keyof NonNullable<Dashboard["stats"]>) {
+function count(
+  dashboard: Dashboard,
+  key: keyof NonNullable<Dashboard["stats"]>,
+) {
   const direct: Partial<Record<typeof key, number | undefined>> = {
     assets: dashboard.total_assets,
     papers: dashboard.total_papers,
@@ -75,13 +78,24 @@ export function HomePage() {
             placeholder="搜索论文、代码或笔记"
           />
           <kbd>Ctrl K</kbd>
-          <button className="button primary library-search-submit" type="submit">
+          <button
+            className="button primary library-search-submit"
+            type="submit"
+          >
             搜索
             <ArrowRight size={16} aria-hidden="true" />
           </button>
         </form>
       </section>
 
+      <div className="home-product-actions">
+        <Link className="button primary" to="/intake">
+          ＋ 添加论文
+        </Link>
+        <Link className="button secondary" to="/collections">
+          收藏集合
+        </Link>
+      </div>
       {dashboard.isPending ? (
         <LoadingState label="正在整理你的资料库…" />
       ) : dashboard.isError ? (
@@ -128,7 +142,10 @@ export function HomePage() {
               >
                 <div className="library-section-heading">
                   <div>
-                    <span className="section-icon is-neutral" aria-hidden="true">
+                    <span
+                      className="section-icon is-neutral"
+                      aria-hidden="true"
+                    >
                       <Clock3 size={17} />
                     </span>
                     <div>
@@ -157,7 +174,7 @@ export function HomePage() {
                     detail={
                       continueReading.length
                         ? "正在阅读的资料已放在上方，这里不再重复。"
-                        : "完成首次只读导入后，最近论文与阅读进度会出现在这里。"
+                        : "点击添加论文，上传 PDF 并确认题名即可开始使用。"
                     }
                     kind="index"
                     action={

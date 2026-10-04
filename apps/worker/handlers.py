@@ -27,6 +27,7 @@ from packages.domain.models import (
     DocumentChunk,
     Job,
     OutboxEvent,
+    ReadingState,
     Representation,
     Source,
 )
@@ -114,6 +115,8 @@ class RuntimeHandlers:
         job_id: UUID | None = None,
     ) -> dict[str, object]:
         handlers: dict[str, JobHandler] = {
+            "repository.snapshot": self.repository_snapshot,
+            "export_package": self.export_package,
             "extract_representation": self.extract_representation,
             "representation.extract": self.extract_representation,
             "index_representation": self.index_representation,
@@ -149,6 +152,16 @@ class RuntimeHandlers:
                         ),
                     }
         return result
+
+    def repository_snapshot(self, parameters: dict[str, object]) -> dict[str, object]:
+        from packages.repository_snapshots import run_repository_snapshot
+
+        return run_repository_snapshot(self.database, self.settings, self.registry, parameters)
+
+    def export_package(self, parameters: dict[str, object]) -> dict[str, object]:
+        from packages.workflows.packages import export_package
+
+        return export_package(self.database, self.settings, self.registry, parameters)
 
     def _retirement_result(
         self,
@@ -613,6 +626,10 @@ def dispatch_outbox_once(
                     after = event.payload.get("after")
                     if isinstance(after, dict):
                         asset_id_value = after.get("asset_id")
+                if not asset_id_value and event.aggregate_type == "reading_state":
+                    reading = session.get(ReadingState, event.aggregate_id)
+                    if reading is not None:
+                        asset_id_value = reading.asset_id
                 if asset_id_value:
                     asset_id = UUID(str(asset_id_value))
                     job_type = (

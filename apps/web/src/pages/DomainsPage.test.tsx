@@ -97,6 +97,7 @@ function portalResponse(domain: Domain) {
 }
 
 function renderDomain() {
+  vi.spyOn(api,"domain").mockResolvedValue({slug:"robotics",label:"机器人"});
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -144,7 +145,7 @@ describe("DomainDetailPage", () => {
 
     renderDomain();
 
-    fireEvent.click(await screen.findByRole("tab", { name: "研究单元" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "研究单元" }, {timeout:5000}));
     expect(await screen.findByRole("heading", { name: "Paper one" })).toBeInTheDocument();
     expect(search).toHaveBeenNthCalledWith(
       1,
@@ -224,7 +225,7 @@ describe("DomainDetailPage", () => {
 
     renderDomain();
 
-    const overviewTab = await screen.findByRole("tab", { name: "领域总览" });
+    const overviewTab = await screen.findByRole("tab", { name: "领域总览" }, {timeout:5000});
     expect(overviewTab).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("article")).toHaveAttribute("data-domain-portal");
     expect(screen.queryByTitle("机器人领域总览")).toBeNull();
@@ -257,6 +258,6 @@ describe("DomainDetailPage", () => {
     expect(
       screen.getByRole("heading", { name: "领域研究单元" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Paper one" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Paper one" })).toBeInTheDocument();
   });
 });

@@ -4,29 +4,56 @@ import hashlib
 import re
 from pathlib import Path
 
-import pymupdf
 import pytest
 from PIL import Image
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from packages.knowledge.figures import (
+    EXTRACTOR_NAME,
+    EXTRACTOR_VERSION,
+    PREVIEW_MAX_BYTES,
     SourceHashMismatch,
     apply_cached_figure_corrections,
     apply_caption_review_warnings,
     extract_pdf_figures,
     normalize_bbox,
 )
+from packages.knowledge.pdf_geometry import read_pdf_page_geometries
 
 
-def _pdf(path: Path, *, rotation: int = 0) -> Path:
-    document = pymupdf.open()
-    page = document.new_page(width=400, height=300)
-    page.draw_rect(pymupdf.Rect(40, 50, 120, 100), color=(0.8, 0.1, 0.1), width=2)
-    page.draw_line((45, 95), (115, 55), color=(0.1, 0.1, 0.8), width=1.5)
-    page.insert_text((40, 140), "Figure 1: A small vector figure", fontsize=10)
+def _pdf(
+    path: Path,
+    *,
+    rotation: int = 0,
+    cropbox: tuple[int, int, int, int] = (0, 0, 400, 300),
+) -> Path:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=400, height=300)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        }
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"q 0.8 0.1 0.1 RG 2 w 40 200 80 50 re S Q\n"
+        b"q 0.1 0.1 0.8 RG 1.5 w 45 205 m 115 245 l S Q\n"
+        b"BT /F1 10 Tf 40 140 Td (Figure 1: A small vector figure) Tj ET\n"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    page.cropbox.lower_left = (cropbox[0], cropbox[1])
+    page.cropbox.upper_right = (cropbox[2], cropbox[3])
     if rotation:
-        page.set_rotation(rotation)
-    document.save(path)
-    document.close()
+        page.rotate(rotation)
+    writer.write(path)
     return path
 
 
@@ -57,7 +84,7 @@ def test_normalize_bbox_converts_units_and_rotation() -> None:
     ) == pytest.approx((10, 230, 110, 280))
 
 
-def test_pymupdf_candidate_has_caption_stable_id_and_relative_crops(tmp_path: Path) -> None:
+def test_pdfplumber_candidate_has_caption_stable_id_and_relative_crops(tmp_path: Path) -> None:
     pdf_path = _pdf(tmp_path / "paper.pdf")
     asset_id = "00000000-0000-0000-0000-000000000001"
     manifest = extract_pdf_figures(
@@ -79,13 +106,19 @@ def test_pymupdf_candidate_has_caption_stable_id_and_relative_crops(tmp_path: Pa
     assert re.fullmatch(r"[A-Za-z0-9_-]+", figure["figure_id"])
     assert (tmp_path / "derived" / asset_id / figure["image_path"]).is_file()
     assert (tmp_path / "derived" / asset_id / figure["preview_path"]).is_file()
-    assert figure["preview_bytes"] <= 5 * 1024 * 1024
+    assert figure["preview_bytes"] <= PREVIEW_MAX_BYTES
     assert figure["overlay_path"].endswith("page-0001.png")
     assert manifest["source_hash"] == _sha256(pdf_path)
+    assert manifest["extractor"] == {"name": EXTRACTOR_NAME, "version": EXTRACTOR_VERSION}
 
 
-def test_rotated_page_crop_uses_unrotated_bbox_and_rotated_render_clip(tmp_path: Path) -> None:
-    pdf_path = _pdf(tmp_path / "rotated.pdf", rotation=90)
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_cropbox_local_bbox_renders_in_page_rotation(tmp_path: Path, rotation: int) -> None:
+    pdf_path = _pdf(
+        tmp_path / f"rotated-{rotation}.pdf",
+        rotation=rotation,
+        cropbox=(20, 30, 380, 270),
+    )
     asset_id = "00000000-0000-0000-0000-000000000003"
     manifest = extract_pdf_figures(
         pdf_path,
@@ -93,16 +126,23 @@ def test_rotated_page_crop_uses_unrotated_bbox_and_rotated_render_clip(tmp_path:
         asset_id=asset_id,
         representation_id="00000000-0000-0000-0000-000000000004",
         source_hash=_sha256(pdf_path),
-        dpi=72,
+        dpi=144,
         preview_dpi=72,
     )
     figure = manifest["figures"][0]
 
-    assert figure["rotation"] == 90
-    bbox = pymupdf.Rect(*figure["bbox"])
-    rotated = bbox * pymupdf.Matrix(0, 1, -1, 0, 300, 0)
+    assert figure["rotation"] == rotation
+    assert figure["figure_number"] == "1"
+    assert figure["caption"].startswith("Figure 1: A small vector figure")
+    bbox = tuple(figure["bbox"])
+    geometry = read_pdf_page_geometries(pdf_path)[0]
+    visible = geometry.pdf_points_to_visible_bbox(bbox)
+    assert bbox == pytest.approx((18, 18, 102, 72))
     with Image.open(tmp_path / "derived" / asset_id / figure["image_path"]) as image:
-        assert image.size == (round(rotated.width), round(rotated.height))
+        assert image.size == (
+            round((visible[2] - visible[0]) * 2),
+            round((visible[3] - visible[1]) * 2),
+        )
 
 
 def test_pdffigures2_import_excludes_tables_and_preserves_page_bbox(tmp_path: Path) -> None:
@@ -215,7 +255,7 @@ def test_multiple_caption_labels_require_split_before_review(tmp_path: Path) -> 
         "representation_id": "00000000-0000-0000-0000-000000000012",
         "source_hash": _sha256(pdf_path),
         "pdffigures2_results": rows,
-        "run_pymupdf_heuristic": False,
+        "run_pdfplumber_heuristic": False,
     }
     initial = extract_pdf_figures(pdf_path, root, **arguments)
     original = initial["figures"][0]
@@ -289,7 +329,7 @@ def test_valid_figure_survives_invalid_caption_box(
         asset_id="paper",
         representation_id="pdf",
         source_hash=_sha256(path),
-        run_pymupdf_heuristic=False,
+        run_pdfplumber_heuristic=False,
         pdffigures2_results=[
             {
                 "figType": "Figure",
@@ -401,7 +441,7 @@ def test_explicit_addition_preserves_agent_review_status_in_fresh_extraction(
         representation_id="pdf",
         source_hash=_sha256(path),
         pdffigures2_results=[],
-        run_pymupdf_heuristic=False,
+        run_pdfplumber_heuristic=False,
         mark_corrected_reviewed=True,
         add_figures=[
             {

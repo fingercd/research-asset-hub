@@ -53,6 +53,7 @@ def _database() -> dict[str, object]:
                         "read_only": True,
                         "enabled": True,
                         "frozen_manifest_sha256": f"{index:x}" * 64,
+                        "frozen_source_config_sha256": "d" * 64,
                     }
                     for index in range(6)
                 ],
@@ -61,6 +62,7 @@ def _database() -> dict[str, object]:
                     "read_only": True,
                     "enabled": True,
                     "frozen_manifest_sha256": "b" * 64,
+                    "frozen_source_config_sha256": "d" * 64,
                 },
             ],
         },
@@ -143,6 +145,7 @@ def _inventory(*, source_count: int, records: int, include_new: bool) -> dict[st
         {
             "id": f"legacy-{index}",
             "read_only": True,
+            "source_config_sha256": "d" * 64,
             "manifest": {
                 "records": 428 // 6,
                 "sha256": f"{index:x}" * 64,
@@ -156,6 +159,7 @@ def _inventory(*, source_count: int, records: int, include_new: bool) -> dict[st
             {
                 "id": "new-domain",
                 "read_only": True,
+                "source_config_sha256": "d" * 64,
                 "manifest": {
                     "records": 90,
                     "sha256": "b" * 64,
@@ -175,12 +179,8 @@ def _inventory(*, source_count: int, records: int, include_new: bool) -> dict[st
 
 def _reports() -> dict[str, dict[str, object]]:
     return {
-        "inventory_current": _inventory(
-            source_count=7, records=518, include_new=True
-        ),
-        "inventory_baseline": _inventory(
-            source_count=6, records=428, include_new=False
-        ),
+        "inventory_current": _inventory(source_count=7, records=518, include_new=True),
+        "inventory_baseline": _inventory(source_count=6, records=428, include_new=False),
         "formal_import": {
             "schema_version": 2,
             "status": "passed",
@@ -299,11 +299,7 @@ def _reports() -> dict[str, dict[str, object]]:
 def _gate(report: dict[str, object], identifier: str) -> dict[str, object]:
     gates = report["gates"]
     assert isinstance(gates, list)
-    result = next(
-        item
-        for item in gates
-        if isinstance(item, dict) and item.get("id") == identifier
-    )
+    result = next(item for item in gates if isinstance(item, dict) and item.get("id") == identifier)
     return result
 
 
@@ -315,12 +311,8 @@ def test_new_domain_growth_does_not_fail_legacy_exact_counts() -> None:
             generated_at=datetime(2026, 7, 24, tzinfo=UTC),
         )
     )
-    legacy_gate = next(
-        item for item in report["gates"] if item["id"] == "legacy-asset-floor"
-    )
-    fingerprint_gate = next(
-        item for item in report["gates"] if item["id"] == "source-fingerprints"
-    )
+    legacy_gate = next(item for item in report["gates"] if item["id"] == "legacy-asset-floor")
+    fingerprint_gate = next(item for item in report["gates"] if item["id"] == "source-fingerprints")
     assert legacy_gate["status"] == "pass"
     assert fingerprint_gate["status"] == "pass"
     assert report["scope"]["growth"]["domain_delta"] == 1
@@ -346,9 +338,7 @@ def test_missing_representation_gate_allows_resolved_historical_item() -> None:
     counts["files_verified"] = 2400
     counts["missing_confirmed"] = 8
 
-    report = build_release_report(
-        ReleaseReportInputs(database=database, reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=database, reports=reports))
     gate = _gate(report, "missing-representations-visible")
     assert gate["status"] == "pass"
     evidence = gate["evidence"]
@@ -392,9 +382,7 @@ def test_missing_representation_gate_rejects_new_item_above_historical_baseline(
     counts["files_verified"] = 2398
     counts["missing_confirmed"] = 10
 
-    report = build_release_report(
-        ReleaseReportInputs(database=database, reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=database, reports=reports))
     gate = _gate(report, "missing-representations-visible")
     assert gate["status"] == "fail"
     evidence = gate["evidence"]
@@ -412,9 +400,7 @@ def test_missing_representation_gate_cross_checks_source_integrity_count() -> No
     assert isinstance(counts, dict)
     counts["missing_confirmed"] = 8
 
-    report = build_release_report(
-        ReleaseReportInputs(database=database, reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=database, reports=reports))
     gate = _gate(report, "missing-representations-visible")
     assert gate["status"] == "fail"
     evidence = gate["evidence"]
@@ -437,6 +423,7 @@ def test_database_snapshot_projects_frozen_manifest_digest_without_source_config
                 enabled=True,
                 config={
                     "_frozen_manifest_sha256": "A" * 64,
+                    "_frozen_source_config_sha256": "B" * 64,
                     "private_config_value": "must-not-be-exported",
                 },
             )
@@ -452,6 +439,7 @@ def test_database_snapshot_projects_frozen_manifest_digest_without_source_config
             "read_only": True,
             "enabled": True,
             "frozen_manifest_sha256": "a" * 64,
+            "frozen_source_config_sha256": "b" * 64,
         }
     ]
     assert "private_config_value" not in json.dumps(snapshot)
@@ -464,6 +452,9 @@ def test_database_snapshot_projects_frozen_manifest_digest_without_source_config
         ("mismatch", "frozen_fingerprint_mismatches"),
         ("missing_database_source", "missing_database_sources"),
         ("missing_inventory_source", "missing_inventory_sources"),
+        ("missing_frozen_config", "missing_frozen_config_fingerprints"),
+        ("missing_inventory_config", "missing_inventory_config_fingerprints"),
+        ("config_mismatch", "frozen_config_fingerprint_mismatches"),
     ],
 )
 def test_source_fingerprint_gate_requires_frozen_digest_for_every_current_source(
@@ -480,7 +471,11 @@ def test_source_fingerprint_gate_requires_frozen_digest_for_every_current_source
     current_sources = current_inventory["sources"]
     assert isinstance(current_sources, list)
 
-    if failure_kind == "missing_inventory_source":
+    if failure_kind == "missing_inventory_config":
+        next(item for item in current_sources if item["id"] == "new-domain").pop(
+            "source_config_sha256"
+        )
+    elif failure_kind == "missing_inventory_source":
         current_sources[:] = [
             item
             for item in current_sources
@@ -496,12 +491,14 @@ def test_source_fingerprint_gate_requires_frozen_digest_for_every_current_source
             new_database_source.pop("frozen_manifest_sha256")
         elif failure_kind == "mismatch":
             new_database_source["frozen_manifest_sha256"] = "c" * 64
+        elif failure_kind == "missing_frozen_config":
+            new_database_source.pop("frozen_source_config_sha256")
+        elif failure_kind == "config_mismatch":
+            new_database_source["frozen_source_config_sha256"] = "e" * 64
         else:
             database_items.remove(new_database_source)
 
-    report = build_release_report(
-        ReleaseReportInputs(database=database, reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=database, reports=reports))
     gate = _gate(report, "source-fingerprints")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -528,20 +525,14 @@ def test_source_representation_mismatch_is_a_release_failure() -> None:
         }
     ]
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
-    gate = next(
-        item
-        for item in report["gates"]
-        if item["id"] == "source-representation-integrity"
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
+    gate = next(item for item in report["gates"] if item["id"] == "source-representation-integrity")
 
     assert gate["status"] == "fail"
     assert report["status"] == "fail"
-    assert report["failures"]["source_representation_mismatches"][0][
-        "reasons"
-    ] == ["sha256_mismatch"]
+    assert report["failures"]["source_representation_mismatches"][0]["reasons"] == [
+        "sha256_mismatch"
+    ]
 
 
 def test_unapproved_weak_merge_is_a_release_failure() -> None:
@@ -551,12 +542,8 @@ def test_unapproved_weak_merge_is_a_release_failure() -> None:
     assert isinstance(counters, dict)
     counters["unapproved_merge_groups"] = 1
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
-    gate = next(
-        item for item in report["gates"] if item["id"] == "idempotent-import"
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
+    gate = next(item for item in report["gates"] if item["id"] == "idempotent-import")
 
     assert gate["status"] == "fail"
     assert report["status"] == "fail"
@@ -573,9 +560,7 @@ def test_formal_import_gate_rejects_missing_or_old_schema(
     else:
         formal_import["schema_version"] = schema_version
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
     gate = _gate(report, "idempotent-import")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -613,9 +598,7 @@ def test_formal_import_gate_requires_successful_validated_dry_run(
         else:
             validated_dry_run[field_name] = field_value
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
     gate = _gate(report, "idempotent-import")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -637,9 +620,7 @@ def test_formal_import_gate_rejects_each_missing_required_counter(
     assert isinstance(counters, dict)
     counters.pop(counter_name)
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
     gate = _gate(report, "idempotent-import")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -668,9 +649,7 @@ def test_formal_import_gate_rejects_invalid_required_counter(
     assert isinstance(counters, dict)
     counters[counter_name] = invalid_value
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
     gate = _gate(report, "idempotent-import")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -690,9 +669,7 @@ def test_formal_import_gate_rejects_each_nonzero_idempotency_counter(
     assert isinstance(counters, dict)
     counters[counter_name] = 1
 
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=reports)
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=reports))
     gate = _gate(report, "idempotent-import")
     observed = gate["observed"]
     assert isinstance(observed, dict)
@@ -719,9 +696,7 @@ def test_report_exposes_failures_without_private_text_or_absolute_paths() -> Non
     database["database_url"] = "postgresql://user:password@localhost/private"
     database["root_path"] = r"D:\private\papers"
     database["text_content"] = "private paper body"
-    report = build_release_report(
-        ReleaseReportInputs(database=database, reports=_reports())
-    )
+    report = build_release_report(ReleaseReportInputs(database=database, reports=_reports()))
     rendered = json.dumps(report, ensure_ascii=False)
     assert "DataError" in rendered
     assert "postgresql://" not in rendered
@@ -732,9 +707,7 @@ def test_report_exposes_failures_without_private_text_or_absolute_paths() -> Non
 
 
 def test_write_json_and_markdown_reports(tmp_path: Path) -> None:
-    report = build_release_report(
-        ReleaseReportInputs(database=_database(), reports=_reports())
-    )
+    report = build_release_report(ReleaseReportInputs(database=_database(), reports=_reports()))
     validation = tmp_path / "work" / "validation" / "release-report.json"
     artifacts = write_release_report(
         report,
@@ -743,18 +716,12 @@ def test_write_json_and_markdown_reports(tmp_path: Path) -> None:
     )
     json_path = Path(artifacts["json"])
     markdown_path = Path(artifacts["markdown"])
-    assert json.loads(json_path.read_text(encoding="utf-8"))["schema"].endswith(
-        "/v1"
-    )
+    assert json.loads(json_path.read_text(encoding="utf-8"))["schema"].endswith("/v1")
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "新增第七领域" in markdown
     assert "发布门禁" in markdown
-    assert validation.read_text(encoding="utf-8") == json_path.read_text(
-        encoding="utf-8"
-    )
-    assert render_release_markdown(report).startswith(
-        "# Research Asset Hub v1 发布报告"
-    )
+    assert validation.read_text(encoding="utf-8") == json_path.read_text(encoding="utf-8")
+    assert render_release_markdown(report).startswith("# Research Asset Hub v1 发布报告")
 
 
 def test_release_discovery_prefers_production_html_and_keyword_index(

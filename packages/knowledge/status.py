@@ -10,7 +10,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import yaml
 from sqlalchemy import func, or_, select, tuple_, union_all
 from sqlalchemy.orm import Session, load_only
 
@@ -27,19 +26,11 @@ from packages.domain.models import (
     Source,
 )
 from packages.domain.serving_scope import active_representation_clause
+from packages.domain_catalog.service import list_domain_definitions
 
 
-def _catalog(settings: Any) -> list[dict[str, Any]]:
-    document = yaml.safe_load(Path(settings.taxonomy_config_path).read_text(encoding="utf-8"))
-    return [
-        {
-            "slug": item["id"],
-            "label": item.get("label") or item["id"],
-            "aliases": item.get("aliases", []),
-        }
-        for item in document.get("domains", [])
-        if not item.get("hidden_from_catalog")
-    ]
+def _catalog(session: Session, settings: Any) -> list[dict[str, Any]]:
+    return list_domain_definitions(session, settings)
 
 
 def build_knowledge_status(
@@ -95,7 +86,7 @@ def _build_status(
         if asset.deleted_at is None
         and str((asset.attributes or {}).get("system_hidden", "")).casefold() != "true"
     ]
-    domains = _catalog(settings)
+    domains = _catalog(session, settings)
     known = {item["slug"] for item in domains}
     # New taxonomy entries and previously uncatalogued presentation slugs remain visible.
     discovered = {slug for asset in assets for slug in presentation_domains(asset)}
@@ -160,8 +151,7 @@ def _build_status(
             *ledger_columns,
             func.count(ledger.c.id),
             func.count(func.distinct(ledger.c.asset_id)),
-        )
-        .group_by(*ledger_columns)
+        ).group_by(*ledger_columns)
     ).all()
     rep_types: dict[str, dict[str, Any]] = {}
     source_rep_counts: Counter[str] = Counter()
