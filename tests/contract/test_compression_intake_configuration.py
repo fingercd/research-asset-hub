@@ -130,7 +130,7 @@ def _configured_sources() -> list[SourceConfig]:
     return [SourceConfig.model_validate(value) for value in document["sources"]]
 
 
-def test_compression_sources_are_additive_core_local_and_guide_free() -> None:
+def test_compression_sources_are_additive_with_frozen_roots_and_no_guides() -> None:
     sources = _configured_sources()
     by_id = {source.source_id: source for source in sources}
 
@@ -197,13 +197,15 @@ def test_compression_sources_are_additive_core_local_and_guide_free() -> None:
             ]
         else:
             assert guide_specs == []
-        for root in source.asset_roots.values():
+        adapter = DEFAULT_REGISTRY.create(source.adapter, source, base_dir=PROJECT_ROOT)
+        for root_key, root in source.asset_roots.items():
             candidate = Path(root)
             if not candidate.is_absolute():
                 candidate = (PROJECT_ROOT / source.root_path / candidate).resolve()
+                assert candidate == CORE_ROOT or CORE_ROOT in candidate.parents
             else:
                 candidate = candidate.resolve()
-            assert candidate == CORE_ROOT or CORE_ROOT in candidate.parents
+            assert adapter.resolve_root(root_key) == candidate
 
 
 def test_top_conference_sidecars_are_complete_and_do_not_forge_repositories() -> None:
@@ -298,7 +300,7 @@ def test_compression_taxonomy_and_portal_registry_are_complete() -> None:
         assert portals[slug]["original_selector"]["source_id"] == SOURCE_ID
 
 
-def test_available_compression_sidecars_match_declared_counts() -> None:
+def test_available_compression_sidecars_match_declared_counts(local_research_assets: None) -> None:
     sources = _configured_sources()
     by_id = {source.source_id: source for source in sources}
     manifests = {

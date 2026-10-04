@@ -36,7 +36,7 @@ BASELINE_SOURCE_IDS = frozenset(
 BASELINE_MIN_RECORDS = 518
 
 
-def test_all_configured_sources_are_read_only_and_present() -> None:
+def test_all_configured_sources_are_read_only_and_present(local_research_assets: None) -> None:
     sources = load_sources()
 
     configured_ids = {source.source_id for source in sources}
@@ -48,7 +48,7 @@ def test_all_configured_sources_are_read_only_and_present() -> None:
     assert {source.domain for source in sources}.issubset(load_domain_slugs())
 
 
-def test_preflight_accounts_for_all_source_records() -> None:
+def test_preflight_accounts_for_all_source_records(local_research_assets: None) -> None:
     sources = load_sources()
     report = build_preflight_report(sources)
 
@@ -125,7 +125,7 @@ def test_docker_status_checks_wsl_backend_without_requiring_host_docker(
         assert status["wsl_error"] == "WSL_E_DISTRO_NOT_FOUND"
 
 
-def test_inventory_accounts_for_configured_source_records() -> None:
+def test_inventory_accounts_for_configured_source_records(local_research_assets: None) -> None:
     report = build_inventory_report(load_sources())
 
     assert report["status"] == "passed"
@@ -135,7 +135,9 @@ def test_inventory_accounts_for_configured_source_records() -> None:
     assert report["totals"]["declared_html_files"] >= 500
 
 
-def test_system_portal_source_does_not_count_all_workspace_files_as_its_assets() -> None:
+def test_system_portal_source_does_not_count_all_workspace_files_as_its_assets(
+    local_research_assets: None,
+) -> None:
     report = build_inventory_report(load_sources())
     portal = next(
         source for source in report["sources"] if source["id"] == "domain-portals-20260726"

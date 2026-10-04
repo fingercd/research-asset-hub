@@ -3,7 +3,7 @@ from __future__ import annotations
 from scripts.build_domain_portal_snapshot import PORTALS, SOURCE_ID, build_snapshot
 
 
-def test_domain_portal_snapshot_is_complete_and_fail_closed() -> None:
+def test_domain_portal_snapshot_is_complete_and_fail_closed(local_research_assets: None) -> None:
     first = build_snapshot()
     second = build_snapshot()
 

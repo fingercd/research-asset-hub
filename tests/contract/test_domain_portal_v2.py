@@ -43,7 +43,7 @@ def _asset_ids(value: Any, *, key: str | None = None) -> set[str]:
     return set()
 
 
-def test_all_registered_domain_portals_are_complete_and_fresh() -> None:
+def test_all_registered_domain_portals_are_complete_and_fresh(local_research_assets: None) -> None:
     index = load_portal_index(CONFIG_ROOT)
 
     assert len(index.portals) == 16
@@ -59,7 +59,7 @@ def test_all_registered_domain_portals_are_complete_and_fresh() -> None:
         assert all(section.status == expected_status for section in portal.sections)
 
 
-def test_every_portal_asset_reference_exists_in_its_domain() -> None:
+def test_every_portal_asset_reference_exists_in_its_domain(local_research_assets: None) -> None:
     catalog_path = PROJECT_ROOT / "outputs" / "open-catalog" / "catalog.jsonl"
     domains_by_asset: dict[str, set[str]] = {}
     imported_source_ids: set[str] = set()

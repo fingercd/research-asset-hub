@@ -1,6 +1,9 @@
 name: checks
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   pull_request:
 permissions:
   contents: read
@@ -15,7 +18,7 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --extra dev
       - run: uv run --frozen ruff check apps packages scripts tests
-      - run: uv run --frozen python -m pytest -q
+      - run: uv run --frozen python -m pytest -q -rs
   web:
     runs-on: ubuntu-latest
     steps:

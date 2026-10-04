@@ -66,7 +66,7 @@ class _Client:
         return response
 
 
-def test_dataset_hash_and_frozen_inputs_are_valid() -> None:
+def test_dataset_hash_and_frozen_inputs_are_valid(local_research_assets: None) -> None:
     dataset = evaluation.read_json(V3_DATASET)
     evaluation.validate_dataset(dataset)
     digest = evaluation.sha256_file(V3_DATASET)

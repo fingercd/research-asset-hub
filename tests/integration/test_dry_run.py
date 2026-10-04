@@ -10,7 +10,9 @@ from packages.ingestion.dry_run import run_dry_run
 BASELINE_MIN_RECORDS = 518
 
 
-def test_full_dry_run_accounts_for_sources_without_modifying_manifests() -> None:
+def test_full_dry_run_accounts_for_sources_without_modifying_manifests(
+    local_research_assets: None,
+) -> None:
     sources = load_sources()
     before = {source.source_id: sha256_file(source.manifest) for source in sources}
 
