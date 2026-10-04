@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 
 from apps.api.events import record_mutation
 from apps.api.problem import ApiProblem, not_found
-from apps.api.routes_v1 import _ensure_override_base_claim, _live_asset, _serialize_override
 from apps.api.serialization import serialize_asset
 from packages.domain.enums import AuditAction
 from packages.domain.models import Asset, FieldResolution, ReadingState, Relation
@@ -42,6 +41,8 @@ def audit(
 
 
 def live_collection(session: Session, collection_id: UUID) -> Asset:
+    from apps.api.routes_v1 import _live_asset
+
     item = _live_asset(session, collection_id)
     if item.asset_type != "collection":
         raise not_found("Collection", collection_id)
@@ -112,6 +113,8 @@ def membership_snapshot(relation: Relation) -> dict[str, Any]:
 def override_list(
     session: Session, asset: Asset, field: str, value: list[str], request_id: str | None
 ) -> bool:
+    from apps.api.routes_v1 import _ensure_override_base_claim, _serialize_override
+
     if getattr(asset, field) == value:
         return False
     asset_before = serialize_asset(asset)
@@ -201,6 +204,8 @@ def update_reading_status(
 def apply_bulk_item(
     session: Session, asset_id: UUID, payload: BulkUpdate, request_id: str | None
 ) -> str:
+    from apps.api.routes_v1 import _live_asset
+
     asset = _live_asset(session, asset_id)
     session.refresh(asset, with_for_update=True)
     changed = False
