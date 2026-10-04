@@ -4,8 +4,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from packages.managed_sources.service import default_data_directory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -15,7 +17,7 @@ class ApiSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="HUB_", case_sensitive=False)
 
-    data_dir: Path = Path.home() / "Documents" / "ResearchAssetHub"
+    data_dir: Path = Field(default_factory=default_data_directory)
     intake_max_pdf_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
     intake_reference_roots: list[Path] = Field(default_factory=list)
 
@@ -67,15 +69,26 @@ class ApiSettings(BaseSettings):
     sources_config_path: Path = PROJECT_ROOT / "config" / "sources.yaml"
     host_workspace_root: Path = PROJECT_ROOT
     taxonomy_config_path: Path = PROJECT_ROOT / "config" / "taxonomy.yaml"
-    domain_portal_config_path: Path = (
-        PROJECT_ROOT / "config" / "domain-portals" / "v2"
-    )
+    domain_portal_config_path: Path = PROJECT_ROOT / "config" / "domain-portals" / "v2"
     domain_portal_renderer: Literal["v1", "v2"] = "v2"
     web_dist_path: Path = PROJECT_ROOT / "apps" / "web" / "dist"
     obsidian_vault_path: Path = Path.home() / "Documents" / "Obsidian Vault"
     obsidian_hub_directory: str = "00_Home/Research Asset Hub"
     zotero_base_url: str = "http://127.0.0.1:23119"
     zotero_export_path: Path = PROJECT_ROOT / "outputs" / "zotero"
+
+    @model_validator(mode="after")
+    def use_user_configuration(self) -> ApiSettings:
+        config = self.data_dir / "config"
+        if (config / "sources.yaml").is_file():
+            for field, relative in (
+                ("sources_config_path", "sources.yaml"),
+                ("taxonomy_config_path", "taxonomy.yaml"),
+                ("domain_portal_config_path", "domain-portals/v2"),
+            ):
+                if field not in self.model_fields_set:
+                    setattr(self, field, config / relative)
+        return self
 
     @field_validator("desktop_origins", mode="before")
     @classmethod
@@ -84,6 +97,7 @@ class ApiSettings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> ApiSettings:

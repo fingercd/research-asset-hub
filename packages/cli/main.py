@@ -17,8 +17,8 @@ from apps.asset_gateway.registry import SourceRegistry
 from packages.domain_catalog.service import domain_slugs
 
 from .config import (
-    DEFAULT_SOURCES_CONFIG,
-    PROJECT_ROOT,
+    default_sources_config,
+    default_taxonomy_config,
     load_domain_slugs,
     load_sources,
     select_sources,
@@ -55,7 +55,7 @@ def _base_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_SOURCES_CONFIG,
+        default=default_sources_config(),
         help="Path to sources.yaml",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -229,7 +229,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
                         )
                         identity_keys = rejected_identity_keys(retirement_session)
                         registered_domains = domain_slugs(
-                            retirement_session, PROJECT_ROOT / "config" / "taxonomy.yaml"
+                            retirement_session, default_taxonomy_config()
                         )
                     retirement_state_checked = True
                 except OperationalError:
@@ -294,9 +294,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         # Missing/unavailable policy tables fail before the pre-import gate.
         with Session(engine) as identity_session:
             identity_keys = rejected_identity_keys(identity_session)
-            registered_domains = domain_slugs(
-                identity_session, PROJECT_ROOT / "config" / "taxonomy.yaml"
-            )
+            registered_domains = domain_slugs(identity_session, default_taxonomy_config())
         dry_run_report = run_dry_run(
             sources,
             known_domain_slugs=registered_domains,

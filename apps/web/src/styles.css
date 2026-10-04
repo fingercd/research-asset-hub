@@ -5247,3 +5247,41 @@ textarea {
 .pdf-page-surface .textLayer br::selection {
   background: transparent;
 }
+
+.library-location-settings {
+  margin-bottom: 24px;
+}
+.library-location-settings h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.library-directory {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 14px;
+  margin: 18px 0;
+}
+.library-directory dt {
+  color: var(--muted, #777);
+  font-size: 13px;
+}
+.library-directory dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+.library-location-preview {
+  margin-top: 18px;
+  border: 1px solid #d8e1d8;
+  background: #f4f7f4;
+  padding: 18px;
+  border-radius: 10px;
+}
+@media (max-width: 600px) {
+  .library-directory {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}

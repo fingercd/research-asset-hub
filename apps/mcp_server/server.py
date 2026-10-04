@@ -13,6 +13,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field
 
 from apps.mcp_server.client import HubClient
+from packages.version import __version__
 
 Query = Annotated[str, Field(min_length=1, max_length=500)]
 Domain = Annotated[str, Field(min_length=1, max_length=64)]
@@ -131,6 +132,9 @@ def create_server(client: HubClient | None = None) -> FastMCP:
         ),
         log_level="WARNING",
     )
+    # FastMCP has no application-version constructor argument. Its underlying
+    # protocol server otherwise advertises the SDK version during initialize.
+    server._mcp_server.version = __version__
 
     @server.tool(annotations=READ_ONLY)
     async def search_assets(

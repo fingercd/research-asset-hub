@@ -116,8 +116,7 @@ def docker_status() -> dict[str, Any]:
                 "--",
                 "sh",
                 "-lc",
-                "docker version --format '{{.Server.Version}}' "
-                "&& docker compose version --short",
+                "docker version --format '{{.Server.Version}}' && docker compose version --short",
             ],
             check=False,
             capture_output=True,
@@ -337,10 +336,7 @@ def source_inventory(
         else None
     )
     registry_roots = (
-        {
-            (item.source_id, item.root_key): item.path
-            for item in operational_registry.describe()
-        }
+        {(item.source_id, item.root_key): item.path for item in operational_registry.describe()}
         if operational_registry is not None
         else {}
     )

@@ -442,6 +442,25 @@ def test_worker_snapshot_reuses_sha_and_preserves_old_versions(runtime, monkeypa
         assert registry.resolve(source.alias, "repository", SHA) == path
 
 
+def test_restored_snapshot_reuses_managed_tree_without_original_files(
+    runtime, tmp_path, monkeypatch
+):
+    result = create_link(runtime, download=True)
+    database, settings, registry, _ = runtime
+    mocked_client(monkeypatch)
+    parameters = {"repository_asset_id": result["repository_asset_id"]}
+    first = run_repository_snapshot(database, settings, registry, parameters)
+    original = settings.data_dir
+    restored = tmp_path / "restored-library"
+    shutil.copytree(original, restored)
+    original.rename(tmp_path / "preserved-original-library")
+    settings.data_dir = restored
+    recovered_registry = SourceRegistry.load(settings.sources_config_path, data_dir=restored)
+    reused = run_repository_snapshot(database, settings, recovered_registry, parameters)
+    assert reused["status"] == "reused"
+    assert reused["representation_id"] == first["representation_id"]
+
+
 def test_http_failure_and_cancellation_never_register_snapshot(runtime, monkeypatch):
     result = create_link(runtime, download=True)
     database, settings, registry, _ = runtime

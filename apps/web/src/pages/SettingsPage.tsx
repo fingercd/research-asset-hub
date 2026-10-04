@@ -6,6 +6,7 @@ import {
   Search,
   Settings2,
 } from "lucide-react";
+import { LibraryLocationSettings } from "../components/LibraryLocationSettings";
 import { McpSettings } from "../components/McpSettings";
 import { api } from "../api/client";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
@@ -98,6 +99,7 @@ export function SettingsPage() {
           <span>来源目录按只读方式接入；本页不会显示密钥或认证值。</span>
         </div>
       </div>
+      <LibraryLocationSettings />
       <McpSettings />
       {settings.isPending ? (
         <LoadingState label="正在加载设置…" />

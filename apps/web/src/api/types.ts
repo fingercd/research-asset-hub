@@ -529,3 +529,13 @@ export interface WorkflowResult {
   succeeded: number;
   failed: number;
 }
+
+export interface DataDirectoryInfo {
+  path: string;
+  locked_by_environment: boolean;
+}
+
+export interface DataDirectorySelection {
+  path: string;
+  is_existing_library: boolean;
+}

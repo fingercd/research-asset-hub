@@ -1,0 +1,2 @@
+# Preserve the pinned upstream download byte-for-byte for its SHA-256 check.
+installer.upstream.nsi -text

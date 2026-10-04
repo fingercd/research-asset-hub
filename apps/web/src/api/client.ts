@@ -256,6 +256,7 @@ export interface SearchParams {
   has_annotation?: boolean;
   cursor?: string;
   collection_id?: string;
+  include_facets?: boolean;
 }
 
 type SearchParamsWithoutGrouping = Omit<SearchParams, "group_by">;
@@ -284,6 +285,7 @@ async function search(
         sort: searchParams.sort ?? "date_desc",
         group_by: searchParams.group_by,
         domain: searchParams.domain,
+        include_facets: searchParams.include_facets,
         status: searchParams.status,
         author: searchParams.author,
         type: searchParams.type,

@@ -74,6 +74,7 @@ async def test_real_stdio_initialize_list_and_call() -> None:
             async with ClientSession(read, write) as session:
                 result = await session.initialize()
                 assert result.serverInfo.name == "Research Asset Hub"
+                assert result.serverInfo.version == "0.2.0-rc.1"
                 tools = await session.list_tools()
                 assert len(tools.tools) == 7
                 assert all(tool.annotations.readOnlyHint for tool in tools.tools)

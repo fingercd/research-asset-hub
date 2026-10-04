@@ -89,8 +89,59 @@ fn prepare_host_workspace_root(app_config_dir: &Path) {
     }
 }
 
+fn copy_initial_configuration(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_initial_configuration(&entry.path(), &target)?;
+        } else if entry.file_type()?.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Public first boot uses empty bundled defaults. Existing user configuration
+/// wins on every upgrade. Personal/legacy hints preserve frozen relative roots.
+fn prepare_user_configuration(data_root: &Path, app_config_dir: &Path) -> io::Result<PathBuf> {
+    let user_config = data_root.join("config");
+    if user_config.join("sources.yaml").is_file() {
+        return Ok(user_config);
+    }
+    let packaged = app_config_dir.join("release-profile.txt").is_file()
+        || app_config_dir.join(WORKSPACE_ROOT_HINT_FILE).is_file();
+    if packaged && app_config_dir.join("sources.yaml").is_file() {
+        if user_config.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "User configuration exists without sources.yaml; inspect it before initializing",
+            ));
+        }
+        copy_initial_configuration(app_config_dir, &user_config)?;
+        return Ok(user_config);
+    }
+    Ok(app_config_dir.to_path_buf())
+}
+
 pub fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::Result<()> {
-    prepare_host_workspace_root(app_config_dir);
+    let data_root = crate::data_dir::data_root();
+    std::env::set_var("HUB_DATA_DIR", &data_root);
+    let config = prepare_user_configuration(&data_root, app_config_dir)?;
+    prepare_host_workspace_root(&config);
+    for (key, filename) in [
+        ("HUB_SOURCES_CONFIG_PATH", "sources.yaml"),
+        ("HUB_TAXONOMY_CONFIG_PATH", "taxonomy.yaml"),
+        ("HUB_DOMAIN_PORTAL_CONFIG_PATH", "domain-portals/v2"),
+    ] {
+        if std::env::var(key)
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            std::env::set_var(key, config.join(filename));
+        }
+    }
     if std::env::var("HUB_GATEWAY_SECRET")
         .map(|v| v.trim().is_empty())
         .unwrap_or(true)
@@ -172,6 +223,11 @@ mod tests {
     /// 本模块全部测试用同一把锁串行化。
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::Result<()> {
+        std::env::set_var("HUB_DATA_DIR", secrets_dir.join("test-data"));
+        super::prepare(ports, secrets_dir, app_config_dir)
+    }
+
     /// 逐实例唯一的临时 secrets 目录,避免并行 remove_dir_all 冲突。
     static SECRETS_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -197,9 +253,33 @@ mod tests {
             "DATABASE_URL",
             "HUB_WORKER_HEARTBEAT_PATH",
             "HUB_HOST_WORKSPACE_ROOT",
+            "HUB_DATA_DIR",
+            "HUB_SOURCES_CONFIG_PATH",
+            "HUB_TAXONOMY_CONFIG_PATH",
+            "HUB_DOMAIN_PORTAL_CONFIG_PATH",
         ] {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn public_initial_configuration_is_copied_once_and_user_changes_survive_upgrade() {
+        let root = temp_secrets();
+        let bundled = root.join("app/config");
+        let data = root.join("user-data");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("release-profile.txt"), "public").unwrap();
+        std::fs::write(bundled.join("sources.yaml"), "sources: []\n").unwrap();
+        let config = prepare_user_configuration(&data, &bundled).unwrap();
+        assert_eq!(config, data.join("config"));
+        std::fs::write(config.join("sources.yaml"), "sources: [user-managed]\n").unwrap();
+        std::fs::write(bundled.join("sources.yaml"), "sources: [new-default]\n").unwrap();
+        assert_eq!(prepare_user_configuration(&data, &bundled).unwrap(), config);
+        assert_eq!(
+            std::fs::read_to_string(config.join("sources.yaml")).unwrap(),
+            "sources: [user-managed]\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

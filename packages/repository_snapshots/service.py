@@ -94,11 +94,14 @@ def _reuse_snapshot(
         raise SnapshotError(
             "The existing immutable snapshot is unavailable; it cannot be overwritten."
         )
-    source_root = Path(source.root_path)
+    from packages.managed_sources.service import managed_source_origin, relocated_managed_path
+
+    frozen = source.config
+    origin = managed_source_origin(frozen)
+    source_root = relocated_managed_path(source.root_path, origin, data_dir)
     manifest = managed_path(
         data_dir, *source_root.relative_to(data_dir.resolve()).parts, "manifest.json"
     )
-    frozen = source.config
     declaration = {key: value for key, value in frozen.items() if not key.startswith("_frozen_")}
     if (
         hashlib.sha256(canonical_bytes(declaration)).hexdigest()
@@ -108,7 +111,7 @@ def _reuse_snapshot(
         != frozen.get("_frozen_manifest_sha256")
     ):
         raise SnapshotError("The existing immutable snapshot source evidence has changed.")
-    selected_root = Path(frozen["asset_roots"]["repository"])
+    selected_root = relocated_managed_path(frozen["asset_roots"]["repository"], origin, data_dir)
     relative = selected_root.relative_to(data_dir.resolve()).parts
     path = managed_path(data_dir, *relative, str(representation.path_ref))
     registered = registry.resolve(source.alias, representation.root_key, representation.path_ref)

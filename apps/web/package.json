@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
+    "@tauri-apps/api": "2.12.1",
     "@vitejs/plugin-react": "^4.5.2",
     "lucide-react": "^1.26.0",
     "pdfjs-dist": "^6.1.200",

@@ -52,10 +52,95 @@ pub struct OrchestratorEntry {
 
 pub struct AppState {
     pub background: bool,
+    pub data_dir_from_environment: bool,
     pub force_exit: AtomicBool,
     pub orchestrator: Mutex<Option<OrchestratorEntry>>,
     pub startup_progress: Mutex<Vec<StartupProgress>>,
     pub startup_ready: AtomicBool,
+}
+
+#[derive(Serialize)]
+struct LibraryLocation {
+    path: String,
+    locked_by_environment: bool,
+}
+
+#[derive(Serialize)]
+struct LibrarySelection {
+    path: String,
+    is_existing_library: bool,
+}
+
+#[tauri::command]
+fn get_data_directory(state: tauri::State<'_, AppState>) -> LibraryLocation {
+    LibraryLocation {
+        path: data_dir::data_root().to_string_lossy().to_string(),
+        locked_by_environment: state.data_dir_from_environment,
+    }
+}
+
+#[tauri::command]
+async fn choose_data_directory(app: tauri::AppHandle) -> Result<Option<LibrarySelection>, String> {
+    if app.state::<AppState>().data_dir_from_environment {
+        return Err("资料库目录由启动配置固定，当前会话无法切换".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let chosen = app
+            .dialog()
+            .file()
+            .set_title("选择空目录或已有资料库")
+            .blocking_pick_folder();
+        let Some(chosen) = chosen else {
+            return Ok(None);
+        };
+        let path = chosen.into_path().map_err(|error| error.to_string())?;
+        let resources = app
+            .path()
+            .resource_dir()
+            .map_err(|error| error.to_string())?;
+        let (path, existing) = data_dir::validate_library(&path, &resources)?;
+        Ok(Some(LibrarySelection {
+            path: path.to_string_lossy().to_string(),
+            is_existing_library: existing,
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn switch_data_directory(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    if app.state::<AppState>().data_dir_from_environment {
+        return Err("资料库目录由启动配置固定，当前会话无法切换".into());
+    }
+    let resources = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let (selected, _) = data_dir::validate_library(std::path::Path::new(&path), &resources)?;
+    data_dir::save_library(&selected)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.force_exit.store(true, Ordering::SeqCst);
+        shutdown_orchestrator(&state);
+        // Runtime preparation sets these per launch; the new process must
+        // derive them from the newly saved library rather than inherit old ones.
+        for key in [
+            "HUB_DATA_DIR",
+            "HUB_DATABASE_URL",
+            "DATABASE_URL",
+            "HUB_MEILISEARCH_API_KEY",
+            "HUB_SOURCES_CONFIG_PATH",
+            "HUB_TAXONOMY_CONFIG_PATH",
+            "HUB_DOMAIN_PORTAL_CONFIG_PATH",
+            "HUB_WORKER_HEARTBEAT_PATH",
+            "HUB_HOST_WORKSPACE_ROOT",
+        ] {
+            std::env::remove_var(key);
+        }
+        app.restart();
+    });
+    Ok(())
 }
 
 fn background_requested(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
@@ -269,8 +354,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![get_data_directory, choose_data_directory, switch_data_directory])
         .manage(AppState {
             background,
+            data_dir_from_environment: std::env::var("HUB_DATA_DIR").map(|value| !value.trim().is_empty()).unwrap_or(false),
             force_exit: AtomicBool::new(false),
             orchestrator: Mutex::new(None),
             startup_progress: Mutex::new(Vec::new()),

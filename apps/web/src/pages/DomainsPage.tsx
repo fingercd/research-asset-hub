@@ -163,6 +163,7 @@ export function DomainDetailPage() {
           mode: "keyword",
           group_by: "paper",
           domain: slug,
+          include_facets: false,
           cursor: pageParam,
         },
         signal,

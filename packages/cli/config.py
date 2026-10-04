@@ -1,16 +1,37 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from packages.managed_sources.service import data_directory, load_managed_sources
+from packages.managed_sources.service import (
+    data_directory,
+    load_managed_sources,
+    managed_source_origin,
+    relocated_managed_path,
+    source_workspace_root,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCES_CONFIG = PROJECT_ROOT / "config" / "sources.yaml"
 DEFAULT_TAXONOMY_CONFIG = PROJECT_ROOT / "config" / "taxonomy.yaml"
+
+
+def default_sources_config() -> Path:
+    if value := os.environ.get("HUB_SOURCES_CONFIG_PATH"):
+        return Path(value)
+    configured = data_directory() / "config" / "sources.yaml"
+    return configured if configured.is_file() else DEFAULT_SOURCES_CONFIG
+
+
+def default_taxonomy_config() -> Path:
+    if value := os.environ.get("HUB_TAXONOMY_CONFIG_PATH"):
+        return Path(value)
+    configured = data_directory() / "config" / "taxonomy.yaml"
+    return configured if configured.is_file() else DEFAULT_TAXONOMY_CONFIG
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,9 +47,14 @@ class LoadedSource:
     expected_records: int | None
     read_only: bool
     raw: dict[str, Any]
+    managed_origin: Path | None = None
+    managed_data_dir: Path | None = None
 
     def resolve_source_path(self, value: str | Path) -> Path:
-        return (self.root / Path(value)).resolve()
+        path = self.root / Path(value)
+        if self.managed_origin is not None and self.managed_data_dir is not None:
+            path = relocated_managed_path(path, self.managed_origin, self.managed_data_dir)
+        return path.resolve()
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -40,12 +66,14 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_sources(
-    path: Path = DEFAULT_SOURCES_CONFIG,
+    path: Path | None = None,
     *,
     data_dir: Path | None = None,
     include_platform: bool = False,
 ) -> list[LoadedSource]:
+    path = path or default_sources_config()
     document = load_yaml(path)
+    workspace = source_workspace_root(path, document)
     raw_sources = document.get("sources")
     if not isinstance(raw_sources, list):
         raise ValueError(f"'sources' must be a list: {path}")
@@ -53,11 +81,14 @@ def load_sources(
     # implement a formal adapter contract. PDF and domain-package manifests join
     # the formal adapter pipeline. Read-only inspection explicitly includes all
     # registered platform manifests without dispatching them through adapters.
+    managed_data_dir = data_dir or data_directory()
+    managed = load_managed_sources(managed_data_dir)
+    managed_ids = {item["id"] for item in managed}
     raw_sources = [
         *raw_sources,
         *[
             item
-            for item in load_managed_sources(data_dir or data_directory())
+            for item in managed
             if include_platform or item.get("adapter") in {"generic_manifest", "domain_package"}
         ],
     ]
@@ -79,7 +110,11 @@ def load_sources(
         if not isinstance(root_value, str) or not isinstance(manifest_value, str):
             raise ValueError(f"Source {source_id} requires string root and manifest")
 
-        root = (PROJECT_ROOT / root_value).resolve()
+        root = (workspace / root_value).resolve()
+        origin = None
+        if source_id in managed_ids:
+            origin = managed_source_origin(item)
+            root = relocated_managed_path(root, origin, managed_data_dir).resolve()
         manifest = (root / manifest_value).resolve()
         loaded.append(
             LoadedSource(
@@ -96,12 +131,15 @@ def load_sources(
                 ),
                 read_only=bool(item.get("read_only", True)),
                 raw=item,
+                managed_origin=origin,
+                managed_data_dir=managed_data_dir if origin is not None else None,
             )
         )
     return loaded
 
 
-def load_domain_slugs(path: Path = DEFAULT_TAXONOMY_CONFIG) -> set[str]:
+def load_domain_slugs(path: Path | None = None) -> set[str]:
+    path = path or default_taxonomy_config()
     document = load_yaml(path)
     raw_domains = document.get("domains")
     if not isinstance(raw_domains, list):

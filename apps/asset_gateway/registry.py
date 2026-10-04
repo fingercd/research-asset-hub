@@ -9,7 +9,13 @@ from threading import Lock
 import yaml
 
 from packages.domain.path_exclusions import POLICY_FILENAME, OperationalPathExclusions
-from packages.managed_sources.service import data_directory, load_managed_sources
+from packages.managed_sources.service import (
+    data_directory,
+    load_managed_sources,
+    managed_source_origin,
+    relocated_managed_path,
+    source_workspace_root,
+)
 
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
@@ -78,6 +84,7 @@ class SourceRegistry:
         return (
             file_signature(config_path),
             file_signature(config_path.parent / POLICY_FILENAME),
+            file_signature(config_path.parent / "workspace-root.txt"),
             os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip(),
             file_signature(data_dir / "config" / "managed-sources.yaml") if data_dir else None,
         )
@@ -90,24 +97,19 @@ class SourceRegistry:
         registry.refresh_if_changed()
         return registry
 
-    def _read_snapshot(
-        self, config_path: Path, signature: tuple[object, ...]
-    ) -> _RegistrySnapshot:
+    def _read_snapshot(self, config_path: Path, signature: tuple[object, ...]) -> _RegistrySnapshot:
         data_dir = self._data_dir
         raw = config_path.read_bytes()
         document = yaml.load(raw.decode("utf-8"), Loader=_YAML_LOADER)
         if not isinstance(document, dict) or not isinstance(document.get("sources"), list):
             raise ValueError("Source configuration must contain a sources list.")
-        config_dir = config_path.parent
-        host_workspace_root = os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip()
-        if host_workspace_root:
-            workspace_root = Path(host_workspace_root).expanduser().resolve()
-        else:
-            workspace_root = (config_dir / str(document.get("workspace_root", "."))).resolve()
+        workspace_root = source_workspace_root(config_path, document)
         roots: dict[tuple[str, str], Path] = {}
+        managed = load_managed_sources(data_dir) if data_dir else []
+        managed_ids = {source["id"] for source in managed}
         sources = [
             *document.get("sources", []),
-            *(load_managed_sources(data_dir) if data_dir else []),
+            *managed,
         ]
         for raw_source in sources:
             if not isinstance(raw_source, dict):
@@ -120,6 +122,10 @@ class SourceRegistry:
             if not isinstance(raw_source.get("root"), str) or not raw_source["root"]:
                 raise ValueError("Each source must declare a root path.")
             source_base = (workspace_root / str(raw_source.get("root", "."))).resolve()
+            origin = None
+            if source_id in managed_ids and data_dir is not None:
+                origin = managed_source_origin(raw_source)
+                source_base = relocated_managed_path(source_base, origin, data_dir).resolve()
             roots[(source_id, "source")] = source_base
             asset_roots = raw_source.get("asset_roots", {})
             if not isinstance(asset_roots, dict):
@@ -129,7 +135,10 @@ class SourceRegistry:
                     raise ValueError("Asset root keys must be non-empty and cannot replace source.")
                 if not isinstance(relative, str) or not relative or "\0" in relative:
                     raise ValueError("Asset roots must declare valid paths.")
-                roots[(source_id, str(root_key))] = (source_base / str(relative)).resolve()
+                resolved = source_base / relative
+                if origin is not None and data_dir is not None:
+                    resolved = relocated_managed_path(resolved, origin, data_dir)
+                roots[(source_id, str(root_key))] = resolved.resolve()
         exclusions = OperationalPathExclusions.for_sources_config(config_path)
         if exclusions.enabled:
             exclusions.validate_roots(roots)

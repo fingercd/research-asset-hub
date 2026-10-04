@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -82,3 +83,36 @@ def test_managed_subdirectory_redirect_is_rejected_before_writes(tmp_path):
     assert not list(outside.iterdir())
     with pytest.raises(ValueError):
         managed_path(data_dir, "config", "managed-sources.yaml")
+
+
+def test_restored_library_uses_restored_files_and_preserves_frozen_sources(tmp_path):
+    from packages.cli.config import load_sources
+    from packages.managed_sources.service import canonical_bytes
+
+    original = tmp_path / "original 资料"
+    restored = tmp_path / "restored 资料"
+    external = tmp_path / "external code"
+    external.mkdir()
+    pdf_root = original / "library" / "documents" / "relocated-source"
+    pdf_root.mkdir(parents=True)
+    (pdf_root / "paper.pdf").write_bytes(b"restored evidence")
+    declaration = register_managed_source(original, {
+        **source(original, "relocated-source"),
+        "asset_roots": {"pdf": str(pdf_root), "repository": str(external)},
+    }, {"items": []})
+    (original / "config" / "sources.yaml").write_text("sources: []\n", encoding="utf-8")
+    shutil.copytree(original, restored)
+    (pdf_root / "paper.pdf").unlink()
+
+    registry = SourceRegistry.load(restored / "config" / "sources.yaml", data_dir=restored)
+    recovered_pdf = registry.resolve("relocated-source", "pdf", "paper.pdf")
+    assert recovered_pdf.read_bytes() == b"restored evidence"
+    assert recovered_pdf.is_relative_to(restored)
+    assert registry.root_for("relocated-source", "repository") == external
+    loaded = load_sources(restored / "config" / "sources.yaml", data_dir=restored)[0]
+    assert loaded.manifest.is_relative_to(restored)
+    assert loaded.resolve_source_path(loaded.raw["asset_roots"]["pdf"]) == recovered_pdf.parent
+    assert canonical_bytes(loaded.raw) == canonical_bytes(declaration)
+    assert (original / "config" / "managed-sources.yaml").read_bytes() == (
+        restored / "config" / "managed-sources.yaml"
+    ).read_bytes()

@@ -17,11 +17,38 @@ from typing import Any, cast
 import yaml
 
 
+def default_data_directory() -> Path:
+    """Use the desktop's saved library choice for standalone API/CLI calls."""
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        preference = Path(local) / "ResearchAssetHub" / "data-directory.txt"
+        if preference.is_file():
+            selected = Path(preference.read_text(encoding="utf-8-sig").strip())
+            if not selected.is_absolute():
+                raise ValueError("保存的资料库目录必须是绝对路径")
+            return selected
+    return Path.home() / "Documents" / "ResearchAssetHub"
+
+
+def source_workspace_root(config_path: Path, document: dict[str, Any]) -> Path:
+    """Resolve the same registered workspace for desktop, API and CLI copies."""
+    override = os.environ.get("HUB_HOST_WORKSPACE_ROOT", "").strip()
+    hint = config_path.parent / "workspace-root.txt"
+    if override:
+        return Path(override).expanduser().resolve()
+    if hint.is_file():
+        path = Path(hint.read_text(encoding="utf-8-sig").strip()).expanduser()
+        if not path.is_absolute():
+            raise ValueError("资料工作区提示必须是绝对路径")
+        return path.resolve()
+    return (config_path.parent / str(document.get("workspace_root", "."))).resolve()
+
+
 def data_directory(settings: Any = None) -> Path:
     value = getattr(settings, "data_dir", None) if settings is not None else None
     value = value or os.environ.get("HUB_DATA_DIR")
     if not value:
-        value = Path.home() / "Documents" / "ResearchAssetHub"
+        value = default_data_directory()
     return Path(value).expanduser().resolve()
 
 
@@ -118,6 +145,24 @@ def load_managed_sources(data_dir: Path) -> list[dict[str, Any]]:
     if any(not isinstance(row, dict) for row in document["sources"]):
         raise ValueError("托管来源必须为对象")
     return cast(list[dict[str, Any]], document["sources"])
+
+
+def managed_source_origin(source: dict[str, Any]) -> Path:
+    """The immutable registration records its original data directory."""
+    root = Path(source["root"])
+    if root.parts[-3:] != ("config", "managed-sources", source["id"]):
+        raise ValueError("托管来源清单目录与来源 ID 不一致")
+    return root.parents[2]
+
+
+def relocated_managed_path(value: str | Path, origin: Path, data_dir: Path) -> Path:
+    """Relocate managed files when opening a restored library; keep external roots."""
+    path = Path(value)
+    for subtree in ("library", "config/managed-sources"):
+        original = origin / subtree
+        if path.is_relative_to(original):
+            return data_dir / subtree / path.relative_to(original)
+    return path
 
 
 def register_managed_source(
