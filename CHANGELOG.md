@@ -16,5 +16,6 @@
 - 升级保留旧资源、用户配置和来源根；PostgreSQL 发行副本加入每进程 UTF-8 manifest，支持中文/空格路径。
 - PDF 图试点改用 PDFium 与 pdfplumber，移除 PyMuPDF 运行依赖；项目自身代码采用 MIT。
 - 增加 CI、贡献说明、安全报告和问题模板。
+- 补齐源码可编辑安装的开发依赖；移除两个维护脚本残留的 PyMuPDF 调用。CI 明确个人原件检查的输入范围，保留本机核验和冻结路径。
 
 本版本为本机生成的候选包，未发布公开 Release。测试结果、测量范围、安装验收缺项和历史资料库问题见[交付记录](docs/reports/2026-10-05-product-candidate-delivery.md)。
