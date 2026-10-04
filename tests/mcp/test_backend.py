@@ -46,6 +46,19 @@ def test_ready_backend_is_reused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     launch.assert_not_called()
 
 
+def test_ready_backend_rejects_a_different_library(monkeypatch, tmp_path):
+    monkeypatch.setenv("HUB_DATA_DIR", str(tmp_path / "requested"))
+    original = httpx.Client
+    monkeypatch.setattr(backend.httpx, "Client", lambda **kwargs: original(
+        **kwargs, transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "service": "research-asset-hub-knowledge", "status": "ready", "read_only": True,
+            "data_directory_sha256": backend.data_directory_fingerprint(tmp_path / "other"),
+        })),
+    ))
+    with pytest.raises(ToolError, match="different library directory"):
+        SharedBackend()._probe()
+
+
 def test_concurrent_chats_launch_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HUB_DATA_DIR", str(tmp_path))
     ready = threading.Event()
@@ -184,6 +197,7 @@ def test_launcher_has_no_terminal_and_uses_existing_supervisor(
     executable = tmp_path / "desktop.exe"
     executable.write_bytes(b"fake exe, never executed")
     monkeypatch.setenv("HUB_MCP_DESKTOP_EXE", str(executable))
+    monkeypatch.setenv("HUB_DATA_DIR", str(tmp_path / "custom library 资料"))
     import pythoncom
     import win32com.client
 
@@ -197,7 +211,11 @@ def test_launcher_has_no_terminal_and_uses_existing_supervisor(
     dispatch.assert_called_once_with("Shell.Application")
     shell.Windows().FindWindowSW.assert_called_once_with(0, 0, 8, 0, 1)
     shell.Windows().FindWindowSW().Document.Application.ShellExecute.assert_called_once_with(
-        str(executable), "--background", str(executable.parent), "open", 0
+        str(executable),
+        subprocess.list2cmdline(
+            ["--background", "--data-dir", str(tmp_path / "custom library 资料")]
+        ),
+        str(executable.parent), "open", 0
     )
     initialize.assert_called_once()
     uninitialize.assert_called_once()

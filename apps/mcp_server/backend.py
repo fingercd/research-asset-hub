@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -16,6 +17,8 @@ from typing import BinaryIO
 
 import httpx
 from mcp.server.fastmcp.exceptions import ToolError
+
+from packages.managed_sources.service import data_directory, data_directory_fingerprint
 
 DEFAULT_API_URL = "http://127.0.0.1:8767/api/v1"
 STARTUP_TIMEOUT_SECONDS = 90.0
@@ -151,6 +154,14 @@ class SharedBackend:
             raise ToolError(
                 "The local API does not identify itself as the compatible Hub knowledge API."
             )
+        if (
+            result.get("data_directory_sha256") is not None
+            and result["data_directory_sha256"] != data_directory_fingerprint(data_directory())
+        ):
+            raise ToolError(
+                "The shared Hub is using a different library directory; select the same library "
+                "in the desktop app and refresh the MCP configuration."
+            )
         return BackendState.READY
 
     def _launch(self) -> None:
@@ -183,7 +194,9 @@ class SharedBackend:
                 windows = Dispatch("Shell.Application").Windows()
                 desktop = windows.FindWindowSW(0, 0, 8, 0, 1)  # SWC_DESKTOP, NEEDDISPATCH
                 desktop.Document.Application.ShellExecute(
-                    str(executable), "--background", str(executable.parent), "open", 0
+                    str(executable),
+                    subprocess.list2cmdline(["--background", "--data-dir", str(data_directory())]),
+                    str(executable.parent), "open", 0
                 )
             finally:
                 pythoncom.CoUninitialize()
@@ -196,11 +209,7 @@ class SharedBackend:
     def ensure_ready(self) -> None:
         deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
         with self._local_lock:
-            override = os.getenv("HUB_DATA_DIR", "")
-            profile = Path(os.getenv("USERPROFILE", str(Path.home())))
-            data_root = (
-                Path(override) if override.strip() else profile / "Documents/ResearchAssetHub"
-            )
+            data_root = data_directory()
             try:
                 with startup_lock(data_root / "state/mcp-backend.lock", deadline):
                     state = self._probe()

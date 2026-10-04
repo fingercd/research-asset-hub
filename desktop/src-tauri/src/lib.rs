@@ -147,6 +147,26 @@ fn background_requested(args: impl IntoIterator<Item = std::ffi::OsString>) -> b
     args.into_iter().any(|arg| arg == "--background")
 }
 
+fn data_directory_argument(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<std::path::PathBuf>, &'static str> {
+    let mut args = args.into_iter();
+    let mut selected = None;
+    while let Some(argument) = args.next() {
+        if argument == "--data-dir" {
+            if selected.is_some() {
+                return Err("--data-dir can only be specified once");
+            }
+            let path = std::path::PathBuf::from(args.next().ok_or("--data-dir requires a path")?);
+            if !path.is_absolute() {
+                return Err("--data-dir requires an absolute path");
+            }
+            selected = Some(path);
+        }
+    }
+    Ok(selected)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StartupProgress {
     pub step: String,
@@ -342,6 +362,14 @@ fn run_startup(app: tauri::AppHandle, show_ui: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    match data_directory_argument(std::env::args_os().skip(1)) {
+        Ok(Some(path)) => std::env::set_var("HUB_DATA_DIR", path),
+        Ok(None) => {}
+        Err(detail) => {
+            eprintln!("{detail}");
+            std::process::exit(2);
+        }
+    }
     log_startup_milestone("process-entry");
     let background = background_requested(std::env::args_os().skip(1));
     // 单实例保护必须在任何 Builder/setup 之前:第二个实例若进入 setup,
@@ -578,6 +606,17 @@ mod tests {
         assert!(background_requested(args(&["--background"])));
         assert!(!background_requested(args(&[])));
         assert!(!background_requested(args(&["--background=false"])));
+    }
+
+    #[test]
+    fn library_argument_is_absolute_and_preserves_unicode_spaces() {
+        let args = |values: &[&str]| values.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let path = if cfg!(windows) { "D:\\资料 库\\new" } else { "/资料 库/new" };
+        assert_eq!(data_directory_argument(args(&["--background", "--data-dir", path])), Ok(Some(path.into())));
+        assert!(data_directory_argument(args(&["--data-dir"])).is_err());
+        assert!(data_directory_argument(args(&["--data-dir", "relative"])).is_err());
+        assert!(data_directory_argument(args(&["--data-dir", path, "--data-dir", path])).is_err());
+        assert_eq!(data_directory_argument(args(&["--background"])), Ok(None));
     }
 
     #[test]

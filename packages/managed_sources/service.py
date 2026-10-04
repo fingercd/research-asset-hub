@@ -52,6 +52,10 @@ def data_directory(settings: Any = None) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def data_directory_fingerprint(path: Path) -> str:
+    return hashlib.sha256(os.path.normcase(str(path.resolve())).encode("utf-8")).hexdigest()
+
+
 def managed_path(data_dir: Path, *parts: str) -> Path:
     """Reject redirects below a configured data root before writes or deletion."""
     base = Path(data_dir).expanduser().resolve()

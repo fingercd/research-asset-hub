@@ -18,6 +18,7 @@ from packages.domain.serving_scope import RetiredRepresentationError
 from packages.knowledge.domains import normalize_domain
 from packages.knowledge.service import KnowledgeError, KnowledgeService
 from packages.knowledge.status import build_knowledge_status
+from packages.managed_sources.service import data_directory_fingerprint
 
 KeywordTerm = Annotated[str, Field(min_length=1, max_length=80)]
 QueryConstraint = Annotated[str, Field(min_length=1, max_length=160)]
@@ -164,4 +165,5 @@ def knowledge_ready(request: Request) -> dict[str, object]:
             "status": "ready",
             "checks": ["database_query", "source_configuration"],
             "remote_index_verified": False,
+            "data_directory_sha256": data_directory_fingerprint(_v1._settings(request).data_dir),
         }
