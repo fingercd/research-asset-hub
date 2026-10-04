@@ -957,7 +957,14 @@ def _build_research_units(
     has_annotation: bool | None,
     source_registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], list[Asset]]:
-    no_code_titles_by_domain = _load_no_code_titles_by_domain()
+    configured_policy = (
+        source_registry.config_path.parent / "check-unit-actions-allowlist.yaml"
+        if source_registry is not None and source_registry.config_path is not None
+        else None
+    )
+    no_code_titles_by_domain = _load_no_code_titles_by_domain(
+        configured_policy if configured_policy is not None and configured_policy.is_file() else None
+    )
     assets_by_id = {asset.id: asset for asset in catalog_assets}
     source_aliases: dict[UUID, str] = {}
     if source_registry is not None:

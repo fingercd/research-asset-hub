@@ -109,6 +109,7 @@ foreach ($tree in @('apps/api', 'apps/asset_gateway', 'apps/worker', 'apps/mcp_s
 foreach ($entry in @('apps/__init__.py', 'packages/__init__.py', 'packages/version.py')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $entry) -Destination (Join-Path $appDir $entry) -Force
 }
+Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $appDir 'LICENSE')
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir 'apps/web') | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'apps/web/dist') -Destination (Join-Path $appDir 'apps/web/dist') -Recurse -Force
 $configSource = if ($Profile -eq 'public') { Join-Path $projectRoot 'newconfig/release-defaults' } else { Join-Path $projectRoot 'config' }
