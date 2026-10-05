@@ -12,6 +12,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from packages.version import __version__
+
 ROOT = Path(__file__).resolve().parents[2]
 ASSET = "11111111-1111-4111-8111-111111111111"
 REP = "22222222-2222-4222-8222-222222222222"
@@ -74,7 +76,7 @@ async def test_real_stdio_initialize_list_and_call() -> None:
             async with ClientSession(read, write) as session:
                 result = await session.initialize()
                 assert result.serverInfo.name == "Research Asset Hub"
-                assert result.serverInfo.version == "0.2.0-rc.1"
+                assert result.serverInfo.version == __version__
                 tools = await session.list_tools()
                 assert len(tools.tools) == 7
                 assert all(tool.annotations.readOnlyHint for tool in tools.tools)

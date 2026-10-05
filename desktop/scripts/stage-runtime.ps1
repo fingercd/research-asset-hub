@@ -106,7 +106,13 @@ foreach ($tree in @('apps/api', 'apps/asset_gateway', 'apps/worker', 'apps/mcp_s
     'packages/security', 'packages/vln_guides', 'packages/managed_sources',
     'packages/domain_catalog', 'packages/intake', 'packages/repository_snapshots',
     'packages/workflows', 'migrations')) { Copy-CodeTree $tree }
-foreach ($entry in @('apps/__init__.py', 'packages/__init__.py', 'packages/version.py')) {
+# The desktop shell launches top-level apps modules as well as the service
+# packages. Copy that complete module boundary so new launchers cannot be
+# silently omitted from an otherwise valid service package.
+foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'apps') -File -Filter '*.py') {
+    Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path (Join-Path $appDir 'apps') $entry.Name) -Force
+}
+foreach ($entry in @('packages/__init__.py', 'packages/version.py')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $entry) -Destination (Join-Path $appDir $entry) -Force
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $appDir 'LICENSE')
@@ -151,4 +157,6 @@ $manifest = @{
     webview2 = @{ offline = [bool]$WebView2OfflineInstaller; sha256 = $WebView2Sha256 }
 }
 [IO.File]::WriteAllText((Join-Path $runtimeDir 'manifest.json'), ($manifest | ConvertTo-Json -Depth 5), $utf8)
+& (Join-Path $targetPy 'python.exe') -B (Join-Path $PSScriptRoot 'verify-bundled-entrypoints.py') --stage $stage
+if ($LASTEXITCODE -ne 0) { throw 'Bundled desktop entrypoint verification failed' }
 Write-Host "Stage ready: $stage ($Profile). Select tauri.offline.conf.json for offline WebView2 builds."
