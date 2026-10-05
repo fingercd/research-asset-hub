@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "research-asset-hub-desktop"
-version = "0.2.0-rc.3"
+version = "0.2.0-rc.4"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",

@@ -18,7 +18,9 @@ def list_domain_definitions(
     """Legacy taxonomy remains immutable; SQL rows override only presentation."""
     path = Path(settings.taxonomy_config_path)
     document = (
-        yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {"domains": []}
+        yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.CSafeLoader)
+        if path.exists()
+        else {"domains": []}
     )
     definitions = {
         str(item["id"]): {

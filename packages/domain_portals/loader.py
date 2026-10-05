@@ -47,7 +47,7 @@ class DomainPortalLoadError(ValueError):
 
 def _read_yaml(path: Path) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.CSafeLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise DomainPortalLoadError(f"cannot read portal YAML {path}: {error}") from error
 

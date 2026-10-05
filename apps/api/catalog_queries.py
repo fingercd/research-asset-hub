@@ -23,6 +23,7 @@ from sqlalchemy import (
     union,
     union_all,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, aliased, defer
 
 from apps.api.domain_views import annotate_presentation_domains, presentation_domains
@@ -646,18 +647,16 @@ def domain_counts(
         if not domain["hidden_from_catalog"]
     ]
     source_domains = json_values(session, Asset.domain_slugs, "registered_asset_domains")
-    discovered = set(
-        session.scalars(
-            select(source_domains.c.value)
-            .select_from(Asset)
-            .join(source_domains, true())
-            .where(
-                Asset.deleted_at.is_(None),
-                source_domains.c.value.not_in(known),
-            )
-            .distinct()
-        )
+    discovery = (
+        select(source_domains.c.value)
+        .select_from(Asset)
+        .join(source_domains, true())
+        .where(Asset.deleted_at.is_(None), source_domains.c.value.not_in(known))
     )
+    if _postgres(session):
+        # Most rows use only registered slugs; expand arrays only for unknown domains.
+        discovery = discovery.where(~cast(Asset.domain_slugs, JSONB).contained_by(sorted(known)))
+    discovered = set(session.scalars(discovery.distinct()))
     if discovered:
         # Known taxonomy slugs need no attributes read. Inspect visibility only for new slugs.
         discovered = set(

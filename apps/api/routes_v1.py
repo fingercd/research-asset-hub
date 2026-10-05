@@ -578,7 +578,7 @@ def _load_no_code_titles_by_domain(
 
     target = path or _NO_CODE_ALLOWLIST_PATH
     try:
-        document = yaml.safe_load(target.read_text(encoding="utf-8"))
+        document = yaml.load(target.read_text(encoding="utf-8"), Loader=yaml.CSafeLoader)
     except (OSError, UnicodeError, yaml.YAMLError) as error:
         raise _no_code_allowlist_problem(target, type(error).__name__) from error
     if document is None:
