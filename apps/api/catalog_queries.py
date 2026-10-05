@@ -638,10 +638,13 @@ def domain_counts(
     from apps.api.serialization import serialize_domain_overview
     from packages.domain_catalog.service import list_domain_definitions
 
-    catalog = list_domain_definitions(session, settings)
-    known = {
-        domain["slug"] for domain in list_domain_definitions(session, settings, include_hidden=True)
-    }
+    definitions = list_domain_definitions(session, settings, include_hidden=True)
+    known = {domain["slug"] for domain in definitions}
+    catalog = [
+        {key: value for key, value in domain.items() if key != "hidden_from_catalog"}
+        for domain in definitions
+        if not domain["hidden_from_catalog"]
+    ]
     source_domains = json_values(session, Asset.domain_slugs, "registered_asset_domains")
     discovered = set(
         session.scalars(

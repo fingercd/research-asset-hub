@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "research-asset-hub"
-version = "0.2.0rc2"
+version = "0.2.0rc3"
 license = "MIT"
 description = "Local-first research asset management hub"
 readme = "README.md"

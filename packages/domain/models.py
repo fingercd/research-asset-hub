@@ -181,6 +181,15 @@ class Asset(TimestampVersionMixin, Base):
             name="asset_visibility",
         ),
         Index("ix_assets_type_year", "asset_type", "year"),
+        Index(
+            "ix_assets_visible_catalog",
+            "id",
+            postgresql_include=["asset_type", "updated_at"],
+            postgresql_where=text(
+                "deleted_at IS NULL AND NOT coalesce("
+                "lower(attributes->>'system_hidden') = 'true', false)"
+            ),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=new_uuid7)

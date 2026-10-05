@@ -34,7 +34,7 @@ class ApiSettings(BaseSettings):
     )
     # 最低要求的数据库迁移修订（>= 语义：数据库修订是它本身或其后代即可）。
     # tests/domain/test_migrations.py 断言该默认值与最新迁移 head 一致。
-    database_required_revision: str = "0006_research_workflows"
+    database_required_revision: str = "0007_catalog_visibility_index"
     database_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     database_require_migrations: bool = True
     meilisearch_url: str = "http://127.0.0.1:7700"
