@@ -49,6 +49,76 @@ function upload(fileName = "New paper.pdf") {
   });
 }
 describe("manual PDF intake", () => {
+  it("clears optional metadata after a preview instead of restoring the saved values", async () => {
+    const saved: IntakeDraft = { ...draft, authors: ["Alice"], year: 2025,
+      doi: "10.1234/old", arxiv_id: "2501.12345", html_url: "https://example.org/paper",
+      tags: ["robot"], summary: "Saved summary", pdf_uploaded: true };
+    vi.spyOn(api, "createIntakeDraft").mockResolvedValue(saved);
+    vi.spyOn(api, "previewIntakeDraft").mockResolvedValue({ draft: saved, duplicates: [], warnings: [] });
+    const update = vi.spyOn(api, "updateIntakeDraft").mockResolvedValue(saved);
+    renderIntake();
+    upload();
+    const inputs: Array<[string, string]> = [
+      ["作者（逗号分隔）", "Alice"], ["年份", "2025"], ["DOI（单篇）", saved.doi!],
+      ["arXiv ID（单篇）", saved.arxiv_id!], ["HTML URL（单篇，选填）", saved.html_url!],
+      ["标签（逗号分隔）", "robot"], ["简介", "Saved summary"],
+    ];
+    for (const [label, value] of inputs) fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "预览与重复检查" }));
+    await screen.findByText(/未发现重复候选/);
+    for (const [label] of inputs) fireEvent.change(screen.getByLabelText(label), { target: { value: "" } });
+    expect(screen.queryByRole("button", { name: "确认入库" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "预览与重复检查" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(saved.id, {
+      domain: "robotics", title: "New paper", authors: [], year: null, doi: null,
+      arxiv_id: null, html_url: null, tags: [], summary: null,
+    }));
+  });
+  it("restores every optional field from a historical draft and previews it unchanged", async () => {
+    const saved: IntakeDraft = { ...draft, authors: ["Alice", "Bob"], year: 2025,
+      doi: "10.1234/old", arxiv_id: "2501.12345", html_url: "https://example.org/paper",
+      tags: ["robot", "navigation"], summary: "Saved summary", pdf_uploaded: true };
+    vi.mocked(api.intakeDrafts).mockResolvedValue({ items: [saved], next_cursor: null });
+    const update = vi.spyOn(api, "updateIntakeDraft").mockResolvedValue(saved);
+    vi.spyOn(api, "previewIntakeDraft").mockResolvedValue({ draft: saved, duplicates: [], warnings: [] });
+    renderIntake();
+    fireEvent.click(await screen.findByRole("button", { name: /New paper.*继续编辑/ }));
+    expect(screen.getByLabelText("作者（逗号分隔）")).toHaveValue("Alice, Bob");
+    expect(screen.getByLabelText("年份")).toHaveValue(2025);
+    expect(screen.getByLabelText("DOI（单篇）")).toHaveValue(saved.doi);
+    expect(screen.getByLabelText("arXiv ID（单篇）")).toHaveValue(saved.arxiv_id);
+    expect(screen.getByLabelText("HTML URL（单篇，选填）")).toHaveValue(saved.html_url);
+    expect(screen.getByLabelText("标签（逗号分隔）")).toHaveValue("robot, navigation");
+    expect(screen.getByLabelText("简介")).toHaveValue(saved.summary);
+    fireEvent.click(screen.getByRole("button", { name: "预览与重复检查" }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(saved.id, expect.objectContaining({
+      authors: saved.authors, year: saved.year, doi: saved.doi, arxiv_id: saved.arxiv_id,
+      html_url: saved.html_url, tags: saved.tags, summary: saved.summary,
+    })));
+  });
+  it("keeps distinct historical metadata until a shared field is explicitly edited", async () => {
+    const first = { ...draft, authors: ["Alice"], year: 2024, summary: "First summary" };
+    const second = { ...draft, id: "draft-2", title: "Second paper", authors: ["Bob"], year: 2025, summary: "Second summary" };
+    vi.mocked(api.intakeDrafts).mockResolvedValue({ items: [first, second], next_cursor: null });
+    const update = vi.spyOn(api, "updateIntakeDraft").mockImplementation(async (id) => id === first.id ? first : second);
+    vi.spyOn(api, "previewIntakeDraft").mockImplementation(async (id) => ({
+      draft: id === first.id ? first : second, duplicates: [], warnings: [],
+    }));
+    renderIntake();
+    fireEvent.click(await screen.findByRole("button", { name: /New paper.*继续编辑/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Second paper.*继续编辑/ }));
+    fireEvent.click(screen.getByRole("button", { name: "全部预览" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update).toHaveBeenNthCalledWith(1, first.id, expect.objectContaining({ authors: ["Alice"], year: 2024, summary: "First summary" }));
+    expect(update).toHaveBeenNthCalledWith(2, second.id, expect.objectContaining({ authors: ["Bob"], year: 2025, summary: "Second summary" }));
+    await waitFor(() => expect(screen.getAllByText(/未发现重复候选/)).toHaveLength(2));
+    await waitFor(() => expect(screen.getByLabelText("作者（逗号分隔）")).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("作者（逗号分隔）"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "全部预览" }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(4));
+    expect(update).toHaveBeenNthCalledWith(3, first.id, expect.objectContaining({ authors: [], year: 2024, summary: "First summary" }));
+    expect(update).toHaveBeenNthCalledWith(4, second.id, expect.objectContaining({ authors: [], year: 2025, summary: "Second summary" }));
+  });
   it("uploads a PDF, previews identity, commits only on explicit confirmation and keeps the paper if optional code fails", async () => {
     const create = vi.spyOn(api, "createIntakeDraft").mockResolvedValue(draft);
     const pdf = vi.spyOn(api, "uploadIntakePdf").mockResolvedValue(draft);

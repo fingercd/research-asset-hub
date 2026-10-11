@@ -118,8 +118,8 @@ export function AssetCard({
           </details>
         </div>
         {typeof asset.score === "number" && (
-          <span className="score">
-            {Math.round(asset.score * 100)}% 匹配
+          <span className="score" title="用于结果排序，不表示匹配概率。">
+            排序分数 {asset.score.toPrecision(3)}
           </span>
         )}
       </div>

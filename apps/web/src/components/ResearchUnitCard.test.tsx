@@ -34,6 +34,75 @@ afterEach(() => {
 });
 
 describe("ResearchUnitCard", () => {
+  it.each([
+    ["paper", "命中论文"],
+    ["related_repository", "命中关联代码"],
+    ["paper_and_related_repository", "命中论文与关联代码"],
+    ["repository", "命中代码仓库"],
+  ])("explains the %s match without converting rank scores to a percentage", (source, label) => {
+    renderCard({
+      unit_id: "search-unit",
+      unit_kind: "paper",
+      primary_asset: {
+        id: "search-paper",
+        asset_type: "paper",
+        title: "Search result",
+      },
+      related_repositories: [],
+      matched_assets: [],
+      covered_asset_count: 1,
+      quick_actions: [],
+      score: 1 / 61,
+      match_source: source,
+      snippet: "命中标题中的 StreamVLN。",
+    });
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("命中标题中的 StreamVLN。")).toBeInTheDocument();
+    expect(screen.queryByText(/% 匹配/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/排序分数/)).not.toBeInTheDocument();
+  });
+
+  it("labels unexplained scores as ranking scores", () => {
+    renderCard({
+      unit_id: "search-unit",
+      unit_kind: "paper",
+      primary_asset: {
+        id: "search-paper",
+        asset_type: "paper",
+        title: "Search result",
+      },
+      related_repositories: [],
+      matched_assets: [],
+      covered_asset_count: 1,
+      quick_actions: [],
+      score: 1 / 61,
+    });
+    expect(screen.getByText("排序分数 0.0164")).toHaveAttribute(
+      "title",
+      "用于结果排序，不表示匹配概率。",
+    );
+    expect(screen.queryByText(/% 匹配/)).not.toBeInTheDocument();
+  });
+
+  it("does not present browsing as a search match", () => {
+    renderCard({
+      unit_id: "browse-unit",
+      unit_kind: "paper",
+      primary_asset: {
+        id: "browse-paper",
+        asset_type: "paper",
+        title: "Browse result",
+      },
+      related_repositories: [],
+      matched_assets: [],
+      covered_asset_count: 1,
+      quick_actions: [],
+      score: 1,
+      match_source: "browse",
+    });
+    expect(document.querySelector(".score")).toBeNull();
+  });
+
   it("keeps arXiv venue at the original size", () => {
     renderCard({
       unit_id: "paper:arxiv-1",
@@ -114,7 +183,8 @@ describe("ResearchUnitCard", () => {
 
     expect(screen.getByRole("heading", { name: "Primary Paper" })).toBeInTheDocument();
     expect(screen.getByText("ICML 2026")).toHaveClass("research-unit-venue");
-    expect(screen.queryByText("命中关联代码")).not.toBeInTheDocument();
+    expect(screen.getByText("命中关联代码")).toBeInTheDocument();
+    expect(screen.queryByText(/% 匹配/)).not.toBeInTheDocument();
     expect(screen.getByText("主论文批注")).toBeInTheDocument();
     expect(screen.queryByText("仓库批注不应显示")).not.toBeInTheDocument();
     expect(screen.getByLabelText("阅读状态")).toHaveValue("reading");

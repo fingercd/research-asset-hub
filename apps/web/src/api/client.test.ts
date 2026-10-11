@@ -71,6 +71,34 @@ describe("API mutation guards", () => {
   });
 });
 
+describe("list cursors", () => {
+  it("passes cursors and filters without losing paginated response metadata", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ items: [], next_cursor: "next", total: 61 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const cursor = "offset/30+=";
+    expect(await api.jobs(undefined, cursor)).toEqual({ items: [], next_cursor: "next", total: 61 });
+    await api.annotations("asset-1", undefined, cursor);
+    await api.conflicts(undefined, cursor, "pending");
+    const paths = fetchMock.mock.calls.map(([path]) => new URL(path as string, "http://localhost"));
+    expect(paths.map((url) => url.searchParams.get("cursor"))).toEqual([cursor, cursor, cursor]);
+    expect(paths[1]?.searchParams.get("asset_id")).toBe("asset-1");
+    expect(paths[2]?.searchParams.get("status")).toBe("pending");
+  });
+});
+
+describe("conflict resolution", () => {
+  it.each([{ value: "合并题名" }, { value: ["作者一", "作者二"] }, { value: 2025 }, { value: null }])("sends the merge value with the current row version", async ({ value }) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "c1", status: "resolved" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.resolveConflict("c1", "merge", 6, value);
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/sync-conflicts/c1/resolve", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ strategy: "merge", resolved_value: value }),
+      headers: expect.objectContaining({ "If-Match": 'W/"6"' }),
+    }));
+  });
+});
+
 describe("health API", () => {
   it("accepts a slow but successful database health check", async () => {
     vi.useFakeTimers();

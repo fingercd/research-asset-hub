@@ -1,14 +1,18 @@
 """领域路由：论文比较与相似推荐。"""
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import Header, Request
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from apps.api import routes_v1 as _v1
+from apps.api.catalog_queries import confirmed_links
 from apps.api.contracts import ComparisonCreate
+from apps.api.domain_views import annotate_presentation_domains
 from apps.api.events import record_mutation, replay_idempotent
 from apps.api.problem import ApiProblem
 from apps.api.routes_v1 import (
@@ -17,13 +21,78 @@ from apps.api.routes_v1 import (
     _is_system_hidden_asset,
     _live_asset,
     _request_id,
+    _research_unit_quick_actions,
     _serialize_assets,
     _tokens,
     router,
 )
-from apps.api.serialization import serialize_asset, serialize_comparison
+from apps.api.serialization import serialize_asset, serialize_comparison, serialize_representation
 from packages.domain.enums import AuditAction
-from packages.domain.models import Asset, SavedView
+from packages.domain.models import Asset, Representation, SavedView, Source
+from packages.domain.serving_scope import active_representation_clause
+
+
+def _comparison_assets(
+    session: Session, request: Request, assets: list[Asset],
+) -> list[dict[str, Any]]:
+    """Load the same serving code actions as asset details, in one batch."""
+    if not assets:
+        return []
+    links = confirmed_links(session)
+    repository_ids: dict[UUID, set[UUID]] = defaultdict(set)
+    for paper_id, repository_id in session.execute(
+        select(links.c.paper_id, links.c.repository_id)
+        .where(links.c.paper_id.in_([asset.id for asset in assets]))
+    ):
+        repository_ids[paper_id].add(repository_id)
+    all_repository_ids = {item for ids in repository_ids.values() for item in ids}
+    repositories = {
+        item.id: item for item in session.scalars(
+            select(Asset).where(Asset.id.in_(all_repository_ids))
+            .order_by(Asset.title, Asset.id)
+        )
+    }
+    members = {asset.id: asset for asset in [*assets, *repositories.values()]}
+    annotate_presentation_domains(session, list(members.values()))
+    representations: dict[UUID, list[Representation]] = defaultdict(list)
+    for item in session.scalars(
+        select(Representation).where(
+            Representation.asset_id.in_(members),
+            Representation.deleted_at.is_(None),
+            active_representation_clause(),
+        ).order_by(
+            Representation.asset_id, Representation.role,
+            Representation.representation_type, Representation.id,
+        )
+    ):
+        representations[item.asset_id].append(item)
+    aliases: dict[UUID, str] = {
+        source_id: alias for source_id, alias in session.execute(select(Source.id, Source.alias))
+    }
+    registry = _v1._source_registry(request)
+    results = _serialize_assets(session, assets)
+    for asset, result in zip(assets, results, strict=True):
+        related = [
+            repository for repository in repositories.values()
+            if repository.id in repository_ids[asset.id]
+        ]
+        result["representations"] = [
+            serialize_representation(item) for item in representations[asset.id]
+        ]
+        result["related_repositories"] = [
+            {
+                **serialize_asset(repository),
+                "representations": [
+                    serialize_representation(item) for item in representations[repository.id]
+                ],
+            }
+            for repository in related
+        ]
+        result["quick_actions"] = _research_unit_quick_actions(
+            asset, related, representations,
+            source_registry=registry, source_aliases=aliases,
+        )
+    return results
 
 
 @router.get("/comparisons")
@@ -41,18 +110,23 @@ def list_comparisons(request: Request) -> dict[str, Any]:
             ).all()
         )
         items: list[dict[str, Any]] = []
+        all_ids = {
+            UUID(value) for view in views for value in view.definition.get("asset_ids", [])
+        }
+        all_assets = [
+            asset for asset in session.scalars(
+                select(Asset).where(Asset.id.in_(all_ids), Asset.deleted_at.is_(None))
+            ) if not _is_system_hidden_asset(asset)
+        ]
+        projections = {
+            item["id"]: item for item in _comparison_assets(session, request, all_assets)
+        }
         for view in views:
-            ids = [UUID(value) for value in view.definition.get("asset_ids", [])]
             assets = [
-                asset
-                for asset in session.scalars(
-                    select(Asset).where(Asset.id.in_(ids))
-                ).all()
-                if not _is_system_hidden_asset(asset)
+                projections[value] for value in view.definition.get("asset_ids", [])
+                if value in projections
             ]
-            order = {asset_id: index for index, asset_id in enumerate(ids)}
-            assets.sort(key=lambda item: order.get(item.id, len(order)))
-            items.append(serialize_comparison(view, _serialize_assets(session, assets)))
+            items.append(serialize_comparison(view, assets))
         return {"items": items, "next_cursor": None, "total": len(items)}
 
 @router.post("/comparisons", status_code=201)
@@ -92,7 +166,7 @@ def create_comparison(
         if existing_view is not None and existing_view.definition.get("asset_ids") == requested_ids:
             result = serialize_comparison(
                 existing_view,
-                _serialize_assets(session, assets),
+                _comparison_assets(session, request, assets),
             )
             if idempotency_key:
                 record_mutation(
@@ -124,7 +198,7 @@ def create_comparison(
         )
         session.add(view)
         session.flush()
-        result = serialize_comparison(view, _serialize_assets(session, assets))
+        result = serialize_comparison(view, _comparison_assets(session, request, assets))
         record_mutation(
             session,
             entity_type="saved_view",

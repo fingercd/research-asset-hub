@@ -17,7 +17,6 @@ import { Link } from "react-router-dom";
 import { api, getApiErrorMessage } from "../api/client";
 import {
   getAssetDomains,
-  getRepresentationType,
   type Annotation,
   type Asset,
   type Comparison,
@@ -30,6 +29,7 @@ import {
   formatAuthors,
   safeJson,
 } from "../lib/format";
+import { codeSummaryForAsset } from "../lib/releaseStatus";
 import { useCompare } from "../state/CompareContext";
 
 interface ComparisonContext {
@@ -60,27 +60,6 @@ function readable(value: unknown, fallback = "无"): string {
   }
   if (typeof value === "object") return safeJson(value);
   return String(value);
-}
-
-function codeSummary(asset: Asset): string {
-  const code = asset.representations?.filter((item) =>
-    ["repository", "source_code", "notebook"].includes(getRepresentationType(item)),
-  );
-  if (code?.length) {
-    return code
-      .map(
-        (item) =>
-          item.label ??
-          item.external_url ??
-          item.path_ref ??
-          getRepresentationType(item),
-      )
-      .join("；");
-  }
-  const source = asset.source_urls?.find((url) =>
-    /github|gitlab|gitee|codeberg/i.test(url),
-  );
-  return source ?? "无";
 }
 
 function annotationSummary(
@@ -190,7 +169,7 @@ function comparisonRows(
     {
       key: "code",
       label: "代码",
-      values: assets.map(codeSummary),
+      values: assets.map(codeSummaryForAsset),
     },
     {
       key: "annotations",

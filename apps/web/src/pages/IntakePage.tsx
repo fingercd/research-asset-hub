@@ -7,10 +7,31 @@ import type { IntakeDraft, IntakePreview } from "../api/types";
 import { DomainEditor } from "../components/DomainEditor";
 import { PageHeader } from "../components/PageHeader";
 
+type OptionalMetadata = {
+  summary: string;
+  authors: string;
+  year: string;
+  doi: string;
+  arxiv: string;
+  htmlUrl: string;
+  tags: string;
+};
+function draftMetadata(draft: IntakeDraft): OptionalMetadata {
+  return {
+    summary: draft.summary ?? "",
+    authors: (draft.authors ?? []).join(", "),
+    year: draft.year == null ? "" : String(draft.year),
+    doi: draft.doi ?? "",
+    arxiv: draft.arxiv_id ?? "",
+    htmlUrl: draft.html_url ?? "",
+    tags: (draft.tags ?? []).join(", "),
+  };
+}
 type Row = {
   key: string;
   file?: File;
   title: string;
+  metadata: OptionalMetadata;
   draft?: IntakeDraft;
   preview?: IntakePreview;
   action: "create" | "attach";
@@ -27,18 +48,15 @@ export function IntakePage() {
   const [domain, setDomain] = useState(search.get("domain") ?? "");
   const [createDomain, setCreateDomain] = useState(false);
   const [rows, setRows] = useState<Row[]>([]);
-  const [summary, setSummary] = useState("");
-  const [authors, setAuthors] = useState("");
-  const [year, setYear] = useState("");
-  const [doi, setDoi] = useState("");
-  const [arxiv, setArxiv] = useState("");
-  const [htmlUrl, setHtmlUrl] = useState("");
+  const [optionalMetadata, setOptionalMetadata] = useState<OptionalMetadata>({
+    summary: "", authors: "", year: "", doi: "", arxiv: "", htmlUrl: "", tags: "",
+  });
+  const { summary, authors, year, doi, arxiv, htmlUrl, tags } = optionalMetadata;
   const [storageMode, setStorageMode] = useState<"managed" | "reference">(
     "managed",
   );
   const [referencePath, setReferencePath] = useState("");
   const [referenceTitle, setReferenceTitle] = useState("");
-  const [tags, setTags] = useState("");
   const [codeUrl, setCodeUrl] = useState("");
   const [downloadCode, setDownloadCode] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -59,8 +77,23 @@ export function IntakePage() {
             : { ...row, preview: undefined, reviewed: false },
         ),
       ),
-    [domain, summary, authors, year, doi, arxiv, tags, htmlUrl],
+    [domain],
   );
+  const editMetadata = (values: Partial<OptionalMetadata>) => {
+    setOptionalMetadata((current) => ({ ...current, ...values }));
+    setRows((current) =>
+      current.map((row) =>
+        row.result || row.draft?.status === "committing"
+          ? row
+          : {
+              ...row,
+              metadata: { ...row.metadata, ...values },
+              preview: undefined,
+              reviewed: false,
+            },
+      ),
+    );
+  };
   const patch = (key: string, values: Partial<Row>) =>
     setRows((current) =>
       current.map((row) => (row.key === key ? { ...row, ...values } : row)),
@@ -71,6 +104,7 @@ export function IntakePage() {
       key: crypto.randomUUID(),
       file,
       title: file.name.replace(/\.pdf$/i, ""),
+      metadata: optionalMetadata,
       action: "create" as const,
       attachId: "",
       busy: false,
@@ -86,35 +120,32 @@ export function IntakePage() {
         (!row.file && !row.draft && !row.referencePath)
       )
         throw new Error("请选择领域，并为每篇论文提供题名与 PDF。");
+      const input = row.metadata;
       const metadata = {
         domain,
         title: row.title.trim(),
-        summary: summary.trim() || row.draft?.summary || undefined,
-        authors: authors
-          ? authors
-              .split(/[,，;]/)
-              .map((v) => v.trim())
-              .filter(Boolean)
-          : (row.draft?.authors ?? []),
-        year: year ? Number(year) : (row.draft?.year ?? undefined),
+        summary: input.summary.trim() || null,
+        authors: input.authors
+          .split(/[,，;]/)
+          .map((v) => v.trim())
+          .filter(Boolean),
+        year: input.year ? Number(input.year) : null,
         doi:
           rows.length === 1
-            ? doi.trim() || row.draft?.doi || undefined
+            ? input.doi.trim() || null
             : (row.draft?.doi ?? undefined),
         arxiv_id:
           rows.length === 1
-            ? arxiv.trim() || row.draft?.arxiv_id || undefined
+            ? input.arxiv.trim() || null
             : (row.draft?.arxiv_id ?? undefined),
         html_url:
           rows.length === 1
-            ? htmlUrl.trim() || row.draft?.html_url || undefined
+            ? input.htmlUrl.trim() || null
             : (row.draft?.html_url ?? undefined),
-        tags: tags
-          ? tags
-              .split(/[,，]/)
-              .map((v) => v.trim())
-              .filter(Boolean)
-          : (row.draft?.tags ?? []),
+        tags: input.tags
+          .split(/[,，]/)
+          .map((v) => v.trim())
+          .filter(Boolean),
       };
       const locked = row.draft?.status === "committing";
       const draft = row.draft
@@ -319,6 +350,7 @@ export function IntakePage() {
                       key: crypto.randomUUID(),
                       referencePath: referencePath.trim(),
                       title: referenceTitle.trim(),
+                      metadata: optionalMetadata,
                       action: "create",
                       attachId: "",
                       busy: false,
@@ -339,7 +371,7 @@ export function IntakePage() {
                 <span>作者（逗号分隔）</span>
                 <input
                   value={authors}
-                  onChange={(e) => setAuthors(e.target.value)}
+                  onChange={(e) => editMetadata({ authors: e.target.value })}
                 />
               </label>
               <label>
@@ -349,7 +381,7 @@ export function IntakePage() {
                   min="1450"
                   max="2200"
                   value={year}
-                  onChange={(e) => setYear(e.target.value)}
+                  onChange={(e) => editMetadata({ year: e.target.value })}
                 />
               </label>
               <label>
@@ -357,7 +389,7 @@ export function IntakePage() {
                 <input
                   disabled={rows.length > 1}
                   value={doi}
-                  onChange={(e) => setDoi(e.target.value)}
+                  onChange={(e) => editMetadata({ doi: e.target.value })}
                 />
               </label>
               <label>
@@ -365,12 +397,12 @@ export function IntakePage() {
                 <input
                   disabled={rows.length > 1}
                   value={arxiv}
-                  onChange={(e) => setArxiv(e.target.value)}
+                  onChange={(e) => editMetadata({ arxiv: e.target.value })}
                 />
               </label>
               <label>
                 <span>标签（逗号分隔）</span>
-                <input value={tags} onChange={(e) => setTags(e.target.value)} />
+                <input value={tags} onChange={(e) => editMetadata({ tags: e.target.value })} />
               </label>
             </div>
             <label>
@@ -378,7 +410,7 @@ export function IntakePage() {
               <textarea
                 rows={3}
                 value={summary}
-                onChange={(e) => setSummary(e.target.value)}
+                onChange={(e) => editMetadata({ summary: e.target.value })}
               />
             </label>
             <label>
@@ -387,7 +419,7 @@ export function IntakePage() {
                 type="url"
                 disabled={rows.length > 1}
                 value={htmlUrl}
-                onChange={(e) => setHtmlUrl(e.target.value)}
+                onChange={(e) => editMetadata({ htmlUrl: e.target.value })}
                 placeholder="https://…"
               />
             </label>
@@ -601,15 +633,18 @@ export function IntakePage() {
                 <button
                   type="button"
                   key={d.id}
+                  disabled={batchBusy || rows.some((row) => row.busy || row.draft?.id === d.id)}
                   onClick={() => {
                     setDomain(d.domain);
                     setStorageMode(d.storage_mode ?? "managed");
+                    setOptionalMetadata(draftMetadata(d));
                     if (!rows.some((r) => r.draft?.id === d.id))
                       setRows((current) => [
                         ...current,
                         {
                           key: d.id,
                           title: d.title ?? "",
+                          metadata: draftMetadata(d),
                           draft: d,
                           referencePath:
                             typeof d.reference_path === "string"

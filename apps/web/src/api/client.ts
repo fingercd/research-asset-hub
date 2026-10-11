@@ -588,10 +588,10 @@ export const api = {
       { signal },
     ),
 
-  annotations: async (assetId?: string, signal?: AbortSignal) =>
+  annotations: async (assetId?: string, signal?: AbortSignal, cursor?: string) =>
     normalizeList<Annotation>(
       await request<unknown>(
-        `${API_BASE}/annotations${params({ asset_id: assetId })}`,
+        `${API_BASE}/annotations${params({ asset_id: assetId, cursor })}`,
         { signal },
       ),
     ),
@@ -650,8 +650,10 @@ export const api = {
       }),
     ),
 
-  jobs: async (signal?: AbortSignal) =>
-    normalizeList<Job>(await request<unknown>(`${API_BASE}/jobs`, { signal })),
+  jobs: async (signal?: AbortSignal, cursor?: string) =>
+    normalizeList<Job>(
+      await request<unknown>(`${API_BASE}/jobs${params({ cursor })}`, { signal }),
+    ),
 
   retryJob: (id: string, rowVersion?: number) =>
     request<Job>(`${API_BASE}/jobs/${encodeURIComponent(id)}/retry`, {
@@ -665,19 +667,30 @@ export const api = {
       headers: ifMatch(rowVersion),
     }),
 
-  conflicts: async (signal?: AbortSignal) =>
+  conflicts: async (signal?: AbortSignal, cursor?: string, status?: string) =>
     normalizeList<SyncConflict>(
-      await request<unknown>(`${API_BASE}/sync-conflicts`, { signal }),
+      await request<unknown>(
+        `${API_BASE}/sync-conflicts${params({ cursor, status })}`,
+        { signal },
+      ),
     ),
 
   resolveConflict: (
     id: string,
     strategy: "keep_local" | "accept_incoming" | "merge",
     rowVersion?: number,
+    resolvedValue?: unknown,
   ) =>
     request<SyncConflict>(
       `${API_BASE}/sync-conflicts/${encodeURIComponent(id)}/resolve`,
-      { method: "POST", body: { strategy }, headers: ifMatch(rowVersion) },
+      {
+        method: "POST",
+        body:
+          strategy === "merge"
+            ? { strategy, resolved_value: resolvedValue }
+            : { strategy },
+        headers: ifMatch(rowVersion),
+      },
     ),
 
   settings: (signal?: AbortSignal) =>

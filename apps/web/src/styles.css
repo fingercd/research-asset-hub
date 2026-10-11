@@ -4852,6 +4852,39 @@ textarea {
 .product-dialog.wide {
   width: min(800px, calc(100vw - 32px));
 }
+.metadata-backdrop {
+  align-items: center;
+  padding: 24px 16px;
+}
+.metadata-dialog {
+  width: min(820px, 100%);
+  max-height: calc(100dvh - 48px);
+}
+.metadata-dialog .intake-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+.metadata-wide {
+  grid-column: 1 / -1;
+}
+.conflict-merge-form {
+  display: grid;
+  gap: 12px;
+}
+.conflict-merge-form :is(input, textarea, select) {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: inherit;
+}
+@media (max-width: 600px) {
+  .metadata-dialog .intake-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .product-dialog label,
 .intake-form > label,
 .intake-form details > label,

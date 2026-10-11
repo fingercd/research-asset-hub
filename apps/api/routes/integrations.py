@@ -1,4 +1,5 @@
 """领域路由：第三方集成与同步冲突。"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -7,10 +8,11 @@ from uuid import UUID
 
 import httpx
 from fastapi import Header, Request, Response
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from apps.api import routes_v1 as _v1
-from apps.api.contracts import ConflictResolutionRequest, SyncApplyRequest
+from apps.api.contracts import AssetPatch, ConflictResolutionRequest, SyncApplyRequest
 from apps.api.events import record_mutation
 from apps.api.pagination import decode_cursor
 from apps.api.problem import ApiProblem, conflict, not_found
@@ -38,6 +40,8 @@ from packages.integrations import (
     preview_obsidian_assets,
     sync_obsidian_assets,
 )
+from packages.integrations.obsidian import ObsidianContentChanged
+from packages.integrations.obsidian_sync import apply_obsidian_conflict
 
 
 @router.get("/sync-conflicts")
@@ -58,6 +62,7 @@ def list_sync_conflicts(
             offset,
             len(conflicts),
         )
+
 
 @router.post("/integrations/{provider}/sync/preview")
 def preview_integration_sync(
@@ -169,6 +174,7 @@ def preview_integration_sync(
         response.headers["ETag"] = f'"{etag}"'
         return result
 
+
 @router.post("/integrations/{provider}/sync/apply")
 def apply_integration_sync(
     provider: str,
@@ -211,11 +217,20 @@ def apply_integration_sync(
                     problem_type="urn:research-asset-hub:problem:sync-preview-stale",
                     headers={"ETag": f'"{current}"'},
                 )
-            result = sync_obsidian_assets(
-                session,
-                settings.obsidian_vault_path,
-                hub_directory=settings.obsidian_hub_directory,
-            )
+            try:
+                result = sync_obsidian_assets(
+                    session,
+                    settings.obsidian_vault_path,
+                    hub_directory=settings.obsidian_hub_directory,
+                    expected_etag=expected,
+                )
+            except ObsidianContentChanged as exc:
+                raise ApiProblem(
+                    412,
+                    "同步预览已失效",
+                    str(exc),
+                    problem_type="urn:research-asset-hub:problem:sync-preview-stale",
+                ) from exc
             response.headers["ETag"] = f'"{current}"'
             return result
 
@@ -260,6 +275,7 @@ def apply_integration_sync(
 
         raise not_found("Integration", provider)
 
+
 @router.post("/sync-conflicts/{conflict_id}/resolve")
 def resolve_sync_conflict(
     conflict_id: UUID,
@@ -286,7 +302,7 @@ def resolve_sync_conflict(
         elif source == "external_value":
             resolved_value = item.external_value
         else:
-            if payload.resolved_value is None:
+            if "resolved_value" not in payload.model_fields_set:
                 raise ApiProblem(
                     422,
                     "合并值缺失",
@@ -295,6 +311,22 @@ def resolve_sync_conflict(
                 )
             resolved_value = payload.resolved_value
         before = serialize_sync_conflict(item)
+        field = item.field_path.removeprefix("/")
+        model_field = {"domains": "domain_slugs"}.get(field, field)
+        try:
+            if model_field in AssetPatch.model_fields:
+                validated = AssetPatch.model_validate({model_field: resolved_value})
+                resolved_value = getattr(validated, model_field)
+            apply_obsidian_conflict(session, item, resolved_value)
+        except ObsidianContentChanged as exc:
+            raise conflict(str(exc)) from exc
+        except (ValidationError, ValueError) as exc:
+            raise ApiProblem(
+                422,
+                "合并值无效",
+                str(exc),
+                problem_type="urn:research-asset-hub:problem:validation",
+            ) from exc
         item.status = SyncConflictStatus.RESOLVED.value
         item.resolution = resolution
         item.resolved_value = resolved_value

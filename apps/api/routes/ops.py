@@ -294,7 +294,7 @@ def retry_job(
     if_match: str | None = Header(None, alias="If-Match"),
 ) -> dict[str, Any]:
     with _v1._database(request).session() as session:
-        job = session.get(Job, job_id)
+        job = session.get(Job, job_id, with_for_update=True)
         if job is None:
             raise not_found("Job", job_id)
         _check_if_match(if_match, job.row_version)
@@ -333,7 +333,7 @@ def cancel_job(
     if_match: str | None = Header(None, alias="If-Match"),
 ) -> dict[str, Any]:
     with _v1._database(request).session() as session:
-        job = session.get(Job, job_id)
+        job = session.get(Job, job_id, with_for_update=True)
         if job is None:
             raise not_found("Job", job_id)
         _check_if_match(if_match, job.row_version)

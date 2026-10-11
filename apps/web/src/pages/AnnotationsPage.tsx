@@ -1,15 +1,27 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { Check, Pencil, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { api, getApiErrorMessage } from "../api/client";
+import { api, ApiError, getApiErrorMessage } from "../api/client";
 import type { Annotation } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { annotationBody, formatDate } from "../lib/format";
 import { invalidateResearchData } from "../lib/invalidateResearchData";
 
-function EditableAnnotation({ annotation }: { annotation: Annotation }) {
+function EditableAnnotation({
+  annotation,
+  refresh,
+  refreshing,
+}: {
+  annotation: Annotation;
+  refresh: () => Promise<unknown>;
+  refreshing: boolean;
+}) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(annotation.title ?? "");
@@ -41,6 +53,9 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
         assetId: annotation.asset_id,
       }),
   });
+  const removeVersionConflict =
+    remove.error instanceof ApiError &&
+    [412, 428].includes(remove.error.status);
 
   if (editing) {
     return (
@@ -129,6 +144,30 @@ function EditableAnnotation({ annotation }: { annotation: Annotation }) {
           </button>
         </div>
       </footer>
+      {remove.isError && (
+        <div role="alert" className="inline-error">
+          删除失败：{getApiErrorMessage(remove.error)}
+          {removeVersionConflict && (
+            <p>这条批注的版本已变化，请刷新并核对最新内容后再次删除。</p>
+          )}
+          <button
+            className="button secondary compact"
+            type="button"
+            disabled={remove.isPending || refreshing}
+            onClick={() => {
+              if (removeVersionConflict) {
+                void refresh()
+                  .then(() => remove.reset())
+                  .catch(() => undefined);
+              } else {
+                remove.mutate();
+              }
+            }}
+          >
+            {removeVersionConflict ? "刷新最新批注" : "重试删除"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }
@@ -140,9 +179,12 @@ export function AnnotationsPage() {
   const [assetId, setAssetId] = useState("");
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const annotations = useQuery({
-    queryKey: ["annotations"],
-    queryFn: ({ signal }) => api.annotations(undefined, signal),
+  const annotations = useInfiniteQuery({
+    queryKey: ["annotations", "list"],
+    queryFn: ({ signal, pageParam }) =>
+      api.annotations(undefined, signal, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
   const create = useMutation({
     mutationFn: () =>
@@ -165,9 +207,10 @@ export function AnnotationsPage() {
   });
 
   const visible = useMemo(() => {
+    const items = annotations.data?.pages.flatMap((page) => page.items) ?? [];
     const value = filter.trim().toLocaleLowerCase();
-    if (!value) return annotations.data?.items ?? [];
-    return (annotations.data?.items ?? []).filter((annotation) =>
+    if (!value) return items;
+    return items.filter((annotation) =>
       [
         annotation.title,
         annotation.summary,
@@ -178,7 +221,9 @@ export function AnnotationsPage() {
         .filter(Boolean)
         .some((item) => item?.toLocaleLowerCase().includes(value)),
     );
-  }, [annotations.data?.items, filter]);
+  }, [annotations.data?.pages, filter]);
+  const loadedCount =
+    annotations.data?.pages.reduce((count, page) => count + page.items.length, 0) ?? 0;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -190,15 +235,25 @@ export function AnnotationsPage() {
       <PageHeader
         eyebrow="个人知识"
         title="全部批注"
-        description="集中查看、检索和维护论文总结、问题、摘录与评论。"
+        description="集中查看和维护论文总结、问题、摘录与评论；可筛选已加载的批注。"
         actions={
-          <button
-            className="button primary"
-            type="button"
-            onClick={() => setShowCreate(true)}
-          >
-            <Plus size={16} aria-hidden="true" /> 新建批注
-          </button>
+          <>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={annotations.isFetching}
+              onClick={() => void annotations.refetch()}
+            >
+              <RefreshCw size={16} aria-hidden="true" /> 刷新
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              onClick={() => setShowCreate(true)}
+            >
+              <Plus size={16} aria-hidden="true" /> 新建批注
+            </button>
+          </>
         }
       />
 
@@ -260,18 +315,24 @@ export function AnnotationsPage() {
 
       <label className="list-search">
         <Search size={16} aria-hidden="true" />
-        <span className="sr-only">筛选批注</span>
+        <span className="sr-only">筛选已加载批注</span>
         <input
           type="search"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
-          placeholder="筛选批注内容或资产 ID…"
+          placeholder="筛选已加载的批注内容或资产 ID…"
         />
       </label>
+      {annotations.data && (
+        <p className="muted">
+          已加载 {loadedCount} 条批注。筛选仅作用于已加载内容。
+          {annotations.hasNextPage && "加载更多可扩大筛选范围。"}
+        </p>
+      )}
 
       {annotations.isPending ? (
         <LoadingState label="正在加载批注…" />
-      ) : annotations.isError ? (
+      ) : annotations.isError && !annotations.data ? (
         <ErrorState
           error={annotations.error}
           retry={() => void annotations.refetch()}
@@ -279,17 +340,44 @@ export function AnnotationsPage() {
       ) : visible.length ? (
         <section className="annotation-grid" aria-label="批注列表">
           {visible.map((annotation) => (
-            <EditableAnnotation annotation={annotation} key={annotation.id} />
+            <EditableAnnotation
+              annotation={annotation}
+              key={annotation.id}
+              refresh={() => annotations.refetch({ throwOnError: true })}
+              refreshing={annotations.isFetching}
+            />
           ))}
         </section>
       ) : (
         <EmptyState
-          title={filter ? "没有匹配的批注" : "还没有批注"}
+          title={filter ? "已加载批注中没有匹配内容" : "还没有批注"}
           detail={
-            filter ? "尝试其他筛选词。" : "打开任一资产详情即可记录第一条批注。"
+            filter ? "尝试其他筛选词，或加载更多批注。" : "打开任一资产详情即可记录第一条批注。"
           }
           kind={filter ? "search" : "empty"}
         />
+      )}
+      {annotations.isError && annotations.data && (
+        <ErrorState
+          error={annotations.error}
+          retry={() =>
+            void (annotations.isFetchNextPageError
+              ? annotations.fetchNextPage()
+              : annotations.refetch())
+          }
+        />
+      )}
+      {annotations.hasNextPage && (
+        <div className="load-more">
+          <button
+            className="button secondary"
+            type="button"
+            disabled={annotations.isFetching}
+            onClick={() => void annotations.fetchNextPage()}
+          >
+            {annotations.isFetchingNextPage ? "正在加载…" : "加载更多批注"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -1,4 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   AlertCircle,
   Ban,
@@ -159,16 +163,19 @@ function JobRow({ job }: { job: Job }) {
 }
 
 export function JobsPage() {
-  const jobs = useQuery({
+  const jobs = useInfiniteQuery({
     queryKey: ["jobs"],
-    queryFn: ({ signal }) => api.jobs(signal),
+    queryFn: ({ signal, pageParam }) => api.jobs(signal, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     refetchInterval: (query) => {
-      const active = query.state.data?.items.some((job) =>
-        ["pending", "running"].includes(job.status ?? ""),
+      const active = query.state.data?.pages.some((page) =>
+        page.items.some((job) => ["pending", "running"].includes(job.status ?? "")),
       );
       return active ? 5_000 : 20_000;
     },
   });
+  const items = jobs.data?.pages.flatMap((page) => page.items) ?? [];
 
   return (
     <div className="page">
@@ -189,11 +196,11 @@ export function JobsPage() {
       />
       {jobs.isPending ? (
         <LoadingState label="正在加载任务…" />
-      ) : jobs.isError ? (
+      ) : jobs.isError && !jobs.data ? (
         <ErrorState error={jobs.error} retry={() => void jobs.refetch()} />
-      ) : jobs.data.items.length ? (
+      ) : items.length ? (
         <section className="job-list" aria-label="后台任务列表">
-          {jobs.data.items.map((job) => (
+          {items.map((job) => (
             <JobRow job={job} key={job.id} />
           ))}
         </section>
@@ -202,6 +209,26 @@ export function JobsPage() {
           title="没有后台任务"
           detail="导入或重建全文索引时，任务会显示在这里。"
         />
+      )}
+      {jobs.isError && jobs.data && (
+        <ErrorState
+          error={jobs.error}
+          retry={() =>
+            void (jobs.isFetchNextPageError ? jobs.fetchNextPage() : jobs.refetch())
+          }
+        />
+      )}
+      {jobs.hasNextPage && (
+        <div className="load-more">
+          <button
+            className="button secondary"
+            type="button"
+            disabled={jobs.isFetching}
+            onClick={() => void jobs.fetchNextPage()}
+          >
+            {jobs.isFetchingNextPage ? "正在加载…" : "加载更多任务"}
+          </button>
+        </div>
       )}
     </div>
   );

@@ -60,10 +60,31 @@ function MarkdownPanel({ representation }: { representation: Representation }) {
     enabled: Boolean(source.data),
   });
 
-  if (source.isPending || markdown.isPending) {
+  if (source.isPending) {
     return <LoadingState label="正在加载导读…" />;
   }
-  if (source.isError || !source.data || markdown.isError) {
+  if (source.isError) {
+    return (
+      <ErrorState
+        error={source.error}
+        retry={() => void source.refetch()}
+        title="无法创建导读安全会话"
+      />
+    );
+  }
+  if (!source.data) {
+    return (
+      <ErrorState
+        error={new Error("未返回可打开地址。")}
+        retry={() => void source.refetch()}
+        title="无法打开导读"
+      />
+    );
+  }
+  if (markdown.isPending) {
+    return <LoadingState label="正在加载导读…" />;
+  }
+  if (markdown.isError) {
     return (
       <IsolatedFrame
         representation={representation}

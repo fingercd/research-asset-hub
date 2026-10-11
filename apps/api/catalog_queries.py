@@ -395,6 +395,16 @@ def catalog_selection(
             )
             present = case((Asset.asset_type == "paper", related_code), else_=present)
         statement = statement.where(present if requested else ~present)
+    if date_from is not None or date_to is not None:
+        day = publication_day(session)
+        if date_from is not None:
+            statement = statement.where(
+                day >= (date_from if _postgres(session) else date_from.isoformat())
+            )
+        if date_to is not None:
+            statement = statement.where(
+                day <= (date_to if _postgres(session) else date_to.isoformat())
+            )
     if grouped and query.strip() and asset_type != "paper":
         # A matching repository is covered only by paper units that pass the same filters.
         # This also keeps a repository searchable when its paper is filtered out.
@@ -409,16 +419,6 @@ def catalog_selection(
             .exists()
         )
         statement = statement.where(or_(Asset.asset_type != "repository", ~covered))
-    if date_from is not None or date_to is not None:
-        day = publication_day(session)
-        if date_from is not None:
-            statement = statement.where(
-                day >= (date_from if _postgres(session) else date_from.isoformat())
-            )
-        if date_to is not None:
-            statement = statement.where(
-                day <= (date_to if _postgres(session) else date_to.isoformat())
-            )
     return statement
 
 

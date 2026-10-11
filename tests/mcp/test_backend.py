@@ -100,6 +100,9 @@ def launch(self):
     (root / "ready").touch()
 backend.SharedBackend._probe = probe
 backend.SharedBackend._launch = launch
+(root / f"prepared-{os.getpid()}").touch()
+while not (root / "start").exists():
+    time.sleep(0.01)
 backend.SharedBackend().ensure_ready()
 """
     environment = {**os.environ, "HUB_DATA_DIR": str(tmp_path)}
@@ -114,6 +117,22 @@ backend.SharedBackend().ensure_ready()
         for _ in range(3)
     ]
     try:
+        # Measure coordination only after every interpreter has imported the
+        # backend. The release barrier also guarantees genuine contention,
+        # instead of allowing staggered cold imports to serialize the test.
+        prepared_deadline = time.monotonic() + 60
+        while len(list(tmp_path.glob("prepared-*"))) < len(processes):
+            for process in processes:
+                if process.poll() is not None:
+                    _, stderr = process.communicate()
+                    pytest.fail(
+                        "Backend test process exited before preparation: "
+                        + stderr.decode("utf-8", errors="replace")
+                    )
+            if time.monotonic() >= prepared_deadline:
+                pytest.fail("Backend test processes did not finish importing within 60 seconds")
+            time.sleep(0.01)
+        (tmp_path / "start").touch()
         for process in processes:
             _, stderr = process.communicate(timeout=15)
             assert process.returncode == 0, stderr.decode("utf-8", errors="replace")

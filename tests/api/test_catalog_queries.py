@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 
@@ -20,6 +21,7 @@ from packages.domain.models import (
     SourceRecord,
 )
 from packages.domain.platform_models import SourceRecordAsset
+from packages.indexing.models import SearchDocument, SearchHit
 
 
 def runtime(tmp_path: Path):
@@ -316,4 +318,171 @@ def test_linked_repository_remains_searchable_when_paper_fails_unit_filter(tmp_p
         assert filtered.status_code == 200, filtered.text
         assert filtered.json()["total"] == 1
         assert filtered.json()["items"][0]["unit_id"] == repository_id
+    engine.dispose()
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize(
+    ("date_filters", "expected_units"),
+    [
+        ({"date_from": "2025-01-01"}, {"old-repo", "current-paper", "future-paper", "independent"}),
+        ({"date_to": "2025-12-31"}, {"old-paper", "current-paper", "future-repo", "independent"}),
+        (
+            {"date_from": "2025-01-01", "date_to": "2025-12-31"},
+            {"old-repo", "current-paper", "future-repo", "independent"},
+        ),
+    ],
+)
+def test_grouped_date_filters_keep_repository_when_paper_is_outside_range(
+    tmp_path, monkeypatch, indexed, date_filters, expected_units
+):
+    settings, engine, database = runtime(tmp_path)
+
+    class OfflineSearch:
+        def search(self, *_args, **_kwargs):
+            raise RuntimeError("test offline search")
+
+    monkeypatch.setattr(
+        "apps.api.routes_v1._search_runtime",
+        lambda _request: SimpleNamespace(service=OfflineSearch()),
+    )
+    with database.session() as session:
+        units = {}
+        for label, published in [
+            ("old", "2020-06-01"),
+            ("current", "2025-06-01"),
+            ("future", "2026-06-01"),
+        ]:
+            paper = Asset(
+                asset_type="paper",
+                title=f"{label} paper",
+                year=int(published[:4]),
+                authors=["Ada"],
+                domain_slugs=["alpha"],
+                tags=["shared"],
+                attributes={"first_public_date": published},
+            )
+            repository = Asset(
+                asset_type="repository",
+                title=f"Needle {label} repo",
+                year=2025,
+                authors=["Ada"],
+                domain_slugs=["alpha"],
+                tags=["shared"],
+                attributes={"first_public_date": "2025-06-01"},
+            )
+            session.add_all([paper, repository])
+            session.flush()
+            session.add(
+                Relation(
+                    subject_asset_id=paper.id,
+                    object_asset_id=repository.id,
+                    relation_type="implemented_by",
+                    confirmation_status="confirmed",
+                )
+            )
+            units[f"{label}-paper"] = str(paper.id)
+            units[f"{label}-repo"] = str(repository.id)
+        independent = Asset(
+            asset_type="repository",
+            title="Needle independent",
+            year=2025,
+            authors=["Ada"],
+            domain_slugs=["alpha"],
+            tags=["shared"],
+            attributes={"first_public_date": "2025-06-01"},
+        )
+        excluded = Asset(
+            asset_type="repository",
+            title="Needle excluded",
+            year=2025,
+            authors=["Other"],
+            domain_slugs=["image-editing"],
+            tags=["other"],
+            attributes={"first_public_date": "2025-06-01"},
+        )
+        session.add_all([independent, excluded])
+        session.flush()
+        units["independent"] = str(independent.id)
+    if indexed:
+        hits = [
+            SearchHit(
+                document=SearchDocument(
+                    document_id=asset_id,
+                    asset_id=asset_id,
+                    kind="repository",
+                    title=f"Needle {label}",
+                    text="Needle repository README",
+                ),
+                score=1 / (60 + rank),
+                rank=rank,
+                source="keyword",
+            )
+            for rank, (label, asset_id) in enumerate(
+                [
+                    (label, asset_id)
+                    for label, asset_id in units.items()
+                    if label.endswith("repo") or label == "independent"
+                ],
+                start=1,
+            )
+        ]
+        search_result = SimpleNamespace(
+            hits=hits, degraded=False, errors=[], mode=SimpleNamespace(value="keyword")
+        )
+        monkeypatch.setattr(
+            "apps.api.routes_v1._search_runtime",
+            lambda _request: SimpleNamespace(
+                service=SimpleNamespace(search=lambda *_args, **_kwargs: search_result)
+            ),
+        )
+    with TestClient(create_app(settings, database=database)) as client:
+        filters = {"q": "needle", "group_by": "paper", "domain": "alpha", **date_filters}
+        result = client.get("/api/v1/search", params=filters)
+        assert result.status_code == 200, result.text
+        assert result.json()["degraded"] is not indexed
+        assert result.json()["total"] == len(expected_units)
+        assert {item["unit_id"] for item in result.json()["items"]} == {
+            units[label] for label in expected_units
+        }
+        ungrouped = client.get(
+            "/api/v1/search", params={**filters, "group_by": "none", "type": "repository"}
+        )
+        assert ungrouped.status_code == 200, ungrouped.text
+        assert {item["id"] for item in ungrouped.json()["items"]} == {
+            asset_id
+            for label, asset_id in units.items()
+            if label.endswith("repo") or label == "independent"
+        }
+        # Pagination and facets use the same qualified units after all filters.
+        monkeypatch.setattr("apps.api.routes.assets.PAGE_SIZE", 2)
+        paged_filters = {
+            **filters,
+            "author": "Ada",
+            "tag": "shared",
+            "status": "unread",
+            "sort": "date_desc",
+        }
+        first = client.get("/api/v1/search", params=paged_filters)
+        assert first.status_code == 200, first.text
+        first_body = first.json()
+        assert first_body["degraded"] is not indexed
+        assert first_body["total"] == len(expected_units)
+        assert first_body["facets"]["tags"] == {"shared": len(expected_units)}
+        assert first_body["facets"]["reading_status"] == {"unread": len(expected_units)}
+        assert len(first_body["items"]) == 2
+        assert first_body["next_cursor"]
+        second = client.get(
+            "/api/v1/search", params={**paged_filters, "cursor": first_body["next_cursor"]}
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["degraded"] is not indexed
+        assert second.json()["next_cursor"] is None
+        assert {item["unit_id"] for item in first_body["items"] + second.json()["items"]} == {
+            units[label] for label in expected_units
+        }
+        papers = client.get("/api/v1/search", params={**filters, "type": "paper"})
+        assert papers.status_code == 200, papers.text
+        expected_papers = {units[label] for label in expected_units if label.endswith("paper")}
+        assert {item["unit_id"] for item in papers.json()["items"]} == expected_papers
     engine.dispose()

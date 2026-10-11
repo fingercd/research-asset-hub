@@ -549,3 +549,147 @@ test("MCP 设置可复制真实配置，检查结果明确验证范围", async (
   await expect(page.getByText("本机 MCP 服务与资料库检查通过")).toBeVisible();
   await expect(page.getByText("仅验证服务构建与数据库读取。")).toBeVisible();
 });
+
+test("元数据冲突保留输入，核对最新版本后保存并更新详情", async ({ page }) => {
+  let current = { ...asset, title: "Original title", row_version: 1, reading_status: "unread" };
+  const versions: Array<string | undefined> = [];
+  await mockBase(page);
+  await page.route("**/api/v1/assets/paper-1", async (route) => {
+    if (route.request().method() === "PATCH") {
+      versions.push(route.request().headers()["if-match"]);
+      if (versions.length === 1) {
+        current = { ...current, title: "Concurrent title", row_version: 2 };
+        await route.fulfill({ status: 412, json: { detail: "记录已被其他页面更新" } });
+      } else {
+        current = { ...current, ...route.request().postDataJSON(), row_version: 3 };
+        await route.fulfill({ json: current });
+      }
+    } else {
+      await route.fulfill({ json: current });
+    }
+  });
+  await page.goto("/assets/paper-1");
+  await page.getByRole("button", { name: "编辑元数据", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "编辑论文元数据" });
+  await expect(dialog).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("metadata-editor.png") });
+  await dialog.getByLabel("题名 *", { exact: true }).fill("Revised title");
+  await dialog.getByRole("button", { name: "保存元数据", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("记录已被其他页面更新");
+  await expect(dialog.getByLabel("题名 *", { exact: true })).toHaveValue("Revised title");
+  await dialog.getByRole("button", { name: "读取最新版本", exact: true }).click();
+  await expect(dialog.getByText("Concurrent title", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "保存元数据", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("heading", { name: "Revised title", exact: true })).toBeVisible();
+  expect(versions).toEqual(['W/"1"', 'W/"2"']);
+});
+
+test("阅读状态失败回退，重试后显示真正保存的状态", async ({ page }) => {
+  let current = { ...asset, reading_status: "unread", row_version: 1 };
+  let saves = 0;
+  await mockBase(page, (path, method) => {
+    if (path === "/assets/paper-1" && method === "GET") return current;
+    return undefined;
+  });
+  await page.route("**/api/v1/assets/paper-1/reading-state", async (route) => {
+    saves++;
+    if (saves === 1) {
+      await route.fulfill({ status: 503, json: { detail: "临时无法保存" } });
+    } else {
+      current = { ...current, reading_status: "read", row_version: 2 };
+      await route.fulfill({ json: current });
+    }
+  });
+  await page.goto("/assets/paper-1");
+  const status = page.getByRole("combobox", { name: "阅读状态", exact: true });
+  await status.selectOption("read");
+  await expect(page.getByRole("alert")).toContainText("保存失败");
+  await expect(status).toHaveValue("unread");
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(status).toHaveValue("read");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(saves).toBe(2);
+});
+
+test("任务历史加载后续页，刷新仍保留两页记录", async ({ page }) => {
+  const requested: Array<string | null> = [];
+  await mockBase(page);
+  await page.route("**/api/v1/jobs**", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    requested.push(cursor);
+    await route.fulfill({ json: {
+      items: [{ id: cursor ? "old-job" : "new-job", name: cursor ? "历史任务" : "最新任务", status: "succeeded" }],
+      next_cursor: cursor ? null : "page-2", total: 2,
+    } });
+  });
+  await page.goto("/jobs");
+  await expect(page.getByRole("heading", { name: "最新任务", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "加载更多任务", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "历史任务", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect.poll(() => requested).toEqual([null, "page-2", null, "page-2"]);
+  await expect(page.getByRole("heading", { name: "最新任务", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "历史任务", exact: true })).toBeVisible();
+});
+
+for (const width of [360, 1280]) {
+  test(`元数据弹窗在 ${width}px 矮屏内可滚动至保存并用 Escape 退出`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 640 });
+    await mockBase(page, (path) => path === "/assets/paper-1"
+      ? { ...asset, row_version: 1 }
+      : undefined);
+    await page.goto("/assets/paper-1");
+    const trigger = page.getByRole("button", { name: "编辑元数据", exact: true });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", { name: "编辑论文元数据" });
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(640);
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    const save = dialog.getByRole("button", { name: "保存元数据", exact: true });
+    await save.scrollIntoViewIfNeeded();
+    await expect(save).toBeInViewport();
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+  });
+}
+
+test("同步冲突合并提交自定义值及当前版本，失败后输入保留", async ({ page }) => {
+  const conflict = {
+    id: "conflict-1", title: "题名冲突", field: "/title", asset_id: asset.id,
+    local_value: "Hub title", incoming_value: "External title", row_version: 4,
+  };
+  let resolved = false;
+  const writes: Array<{ body: unknown; version: string | undefined }> = [];
+  await mockBase(page);
+  await page.route("**/api/v1/sync-conflicts**", async (route) => {
+    if (route.request().method() === "POST") {
+      writes.push({ body: route.request().postDataJSON(), version: route.request().headers()["if-match"] });
+      if (writes.length === 1) {
+        await route.fulfill({ status: 503, json: { detail: "临时同步失败" } });
+      } else {
+        resolved = true;
+        await route.fulfill({ json: { ...conflict, status: "resolved" } });
+      }
+    } else {
+      await route.fulfill({ json: { items: resolved ? [] : [conflict], next_cursor: null } });
+    }
+  });
+  await page.goto("/conflicts");
+  await page.getByRole("button", { name: "合并", exact: true }).click();
+  await page.getByLabel("合并后的题名", { exact: true }).fill("Reviewed combined title");
+  await page.getByRole("button", { name: "确认合并并同步", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("临时同步失败");
+  await expect(page.getByLabel("合并后的题名", { exact: true })).toHaveValue("Reviewed combined title");
+  await page.getByRole("button", { name: "确认合并并同步", exact: true }).click();
+  await expect(page.getByText("没有待处理冲突", { exact: true })).toBeVisible();
+  expect(writes).toEqual([
+    { body: { strategy: "merge", resolved_value: "Reviewed combined title" }, version: 'W/"4"' },
+    { body: { strategy: "merge", resolved_value: "Reviewed combined title" }, version: 'W/"4"' },
+  ]);
+});

@@ -10,6 +10,31 @@ afterEach(() => {
 });
 
 describe("AssetCard", () => {
+  it("shows an RRF score as a ranking score rather than a match percentage", () => {
+    window.localStorage.clear();
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter>
+          <CompareProvider>
+            <AssetCard
+              asset={{
+                id: "ranked-paper",
+                asset_type: "paper",
+                title: "Ranked Paper",
+                score: 1 / 61,
+              }}
+            />
+          </CompareProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText("排序分数 0.0164")).toHaveAttribute(
+      "title",
+      "用于结果排序，不表示匹配概率。",
+    );
+    expect(screen.queryByText(/% 匹配/)).not.toBeInTheDocument();
+  });
+
   it("shows reading state, annotation, and all four quick actions", () => {
     window.localStorage.clear();
     const client = new QueryClient();

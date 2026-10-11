@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import defaultdict
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from packages.domain.enums import (
@@ -19,7 +21,6 @@ from packages.domain.enums import (
     SyncConflictStatus,
     SyncStatus,
 )
-from packages.domain.exporters.common import atomic_write_text
 from packages.domain.models import (
     Annotation,
     Asset,
@@ -36,7 +37,7 @@ from packages.domain.models import (
 )
 
 from .models import three_way_merge
-from .obsidian import ObsidianAssetDocument, ObsidianVaultAdapter
+from .obsidian import ObsidianAssetDocument, ObsidianContentChanged, ObsidianVaultAdapter
 
 _EDITABLE_FIELDS = {
     "title",
@@ -51,12 +52,51 @@ _EDITABLE_FIELDS = {
     "visibility",
 }
 
+_FILE_WRITES = "obsidian_transaction_writes"
+_LOGGER = logging.getLogger(__name__)
+
+
+def _remember_write(
+    session: Session,
+    adapter: ObsidianVaultAdapter,
+    path: Path,
+    original: str | None,
+    written_digest: str,
+) -> None:
+    """Keep file compensation active until the enclosing DB transaction commits."""
+    if not session.info.get("obsidian_transaction_listeners"):
+        event.listen(session, "after_commit", _commit_writes)
+        event.listen(session, "after_rollback", _rollback_writes)
+        session.info["obsidian_transaction_listeners"] = True
+    session.info.setdefault(_FILE_WRITES, []).append((adapter, path, original, written_digest))
+
+
+def _commit_writes(session: Session) -> None:
+    session.info.pop(_FILE_WRITES, None)
+
+
+def _rollback_writes(session: Session) -> None:
+    for adapter, path, original, written_digest in reversed(session.info.pop(_FILE_WRITES, [])):
+        try:
+            if original is None:
+                current = path.read_text(encoding="utf-8-sig")
+                if hashlib.sha256(current.encode("utf-8")).hexdigest() == written_digest:
+                    path.unlink()
+            else:
+                adapter._write_content(path, original, written_digest)
+        except (ObsidianContentChanged, FileNotFoundError):
+            # A later user edit or deletion takes precedence over compensation.
+            continue
+        except OSError:
+            _LOGGER.exception("Could not restore an Obsidian note after transaction rollback.")
+
 
 def obsidian_sync_etag(
     session: Session,
     vault_path: Path,
     *,
     hub_directory: str = "00_Home/Research Asset Hub",
+    documents: list[ObsidianAssetDocument] | None = None,
 ) -> str:
     """Return a digest covering both Hub row versions and external notes."""
 
@@ -64,19 +104,46 @@ def obsidian_sync_etag(
     hub_versions = [
         (str(asset_id), row_version)
         for asset_id, row_version in session.execute(
-            select(Asset.id, Asset.row_version)
-            .where(Asset.deleted_at.is_(None))
-            .order_by(Asset.id)
+            select(Asset.id, Asset.row_version).where(Asset.deleted_at.is_(None)).order_by(Asset.id)
         )
     ]
     external_versions = sorted(
-        (document.asset_id, document.export_digest)
-        for document in adapter.scan()
+        (document.asset_id, str(document.path), document.content_digest)
+        for document in (adapter.scan() if documents is None else documents)
     )
     return _digest(
         {
             "hub": hub_versions,
             "external": external_versions,
+            "reading_states": [
+                (str(state.asset_id), state.status, state.row_version)
+                for state in session.scalars(
+                    select(ReadingState)
+                    .where(ReadingState.user_id == "local")
+                    .order_by(ReadingState.asset_id)
+                )
+            ],
+            "snapshots": [
+                (str(snapshot.id), snapshot.base_document)
+                for snapshot in session.scalars(select(SyncSnapshot).order_by(SyncSnapshot.id))
+            ],
+            "identifiers": [
+                (str(item.id), str(item.asset_id), item.scheme, item.canonical, item.is_identity)
+                for item in session.scalars(
+                    select(ExternalIdentifierModel).order_by(ExternalIdentifierModel.id)
+                )
+            ],
+            "relations": [
+                (str(item.id), item.row_version)
+                for item in session.scalars(select(Relation).order_by(Relation.id))
+            ],
+            "annotations": [
+                (str(item.id), item.row_version)
+                for item in session.scalars(
+                    select(Annotation).where(Annotation.user_id == "local").order_by(Annotation.id)
+                )
+            ],
+            "vault_path": str(adapter.vault_path),
             "hub_directory": hub_directory,
         }
     )
@@ -103,9 +170,7 @@ def preview_obsidian_assets(
     session.add(run)
     session.flush()
 
-    external_documents = {
-        document.asset_id: document for document in adapter.scan()
-    }
+    external_documents = {document.asset_id: document for document in adapter.scan()}
     assets = list(
         session.scalars(
             select(Asset)
@@ -118,14 +183,10 @@ def preview_obsidian_assets(
         identifiers[identifier.asset_id].append(identifier)
     states = {
         state.asset_id: state
-        for state in session.scalars(
-            select(ReadingState).where(ReadingState.user_id == "local")
-        )
+        for state in session.scalars(select(ReadingState).where(ReadingState.user_id == "local"))
     }
     relation_ids: dict[Any, list[str]] = defaultdict(list)
-    for relation in session.scalars(
-        select(Relation).where(Relation.deleted_at.is_(None))
-    ):
+    for relation in session.scalars(select(Relation).where(Relation.deleted_at.is_(None))):
         relation_ids[relation.subject_asset_id].append(str(relation.object_asset_id))
         relation_ids[relation.object_asset_id].append(str(relation.subject_asset_id))
 
@@ -157,7 +218,7 @@ def preview_obsidian_assets(
             latest_snapshot = session.scalar(
                 select(SyncSnapshot)
                 .where(SyncSnapshot.external_object_id == mapping.id)
-                .order_by(SyncSnapshot.created_at.desc())
+                .order_by(SyncSnapshot.created_at.desc(), SyncSnapshot.id.desc())
                 .limit(1)
             )
         base = latest_snapshot.base_document if latest_snapshot else hub_fields
@@ -178,12 +239,11 @@ def preview_obsidian_assets(
         session,
         vault_path,
         hub_directory=hub_directory,
+        documents=list(external_documents.values()),
     )
     counters["etag"] = etag
     run.status = (
-        SyncStatus.NEEDS_REVIEW.value
-        if counters["conflicts"]
-        else SyncStatus.SUCCEEDED.value
+        SyncStatus.NEEDS_REVIEW.value if counters["conflicts"] else SyncStatus.SUCCEEDED.value
     )
     run.counters = counters
     run.finished_at = datetime.now(UTC)
@@ -355,6 +415,7 @@ def _integration(session: Session, adapter: ObsidianVaultAdapter) -> Integration
 
 
 def _write_indexes(
+    session: Session,
     adapter: ObsidianVaultAdapter,
     written: list[tuple[Asset, Path]],
 ) -> None:
@@ -390,7 +451,13 @@ def _write_indexes(
             "",
         ]
     )
-    atomic_write_text(adapter.root / "README.md", "\n".join(lines))
+    adapter.root.mkdir(parents=True, exist_ok=True)
+    adapter._write_content(
+        adapter.root / "README.md",
+        "\n".join(lines),
+        None,
+        partial(_remember_write, session, adapter),
+    )
 
     for domain, values in sorted(by_domain.items()):
         domain_lines = [
@@ -407,9 +474,13 @@ def _write_indexes(
             relative = path.relative_to(adapter.root).with_suffix("").as_posix()
             domain_lines.append(f"- [[{relative}|{asset.title_zh or asset.title}]]")
         domain_lines.append("")
-        atomic_write_text(
-            adapter.root / "Domains" / f"{domain}.md",
+        domain_path = adapter.root / "Domains" / f"{domain}.md"
+        domain_path.parent.mkdir(parents=True, exist_ok=True)
+        adapter._write_content(
+            domain_path,
             "\n".join(domain_lines),
+            None,
+            partial(_remember_write, session, adapter),
         )
 
 
@@ -418,6 +489,7 @@ def sync_obsidian_assets(
     vault_path: Path,
     *,
     hub_directory: str = "00_Home/Research Asset Hub",
+    expected_etag: str | None = None,
 ) -> dict[str, Any]:
     """Perform a three-way-safe sync and persist snapshots/conflicts."""
 
@@ -437,6 +509,17 @@ def sync_obsidian_assets(
     external_documents: dict[str, ObsidianAssetDocument] = {}
     for document in adapter.scan():
         external_documents[document.asset_id] = document
+    if (
+        expected_etag is not None
+        and obsidian_sync_etag(
+            session,
+            vault_path,
+            hub_directory=hub_directory,
+            documents=list(external_documents.values()),
+        )
+        != expected_etag
+    ):
+        raise ObsidianContentChanged("Hub or Obsidian content changed after preview.")
 
     assets = list(
         session.scalars(
@@ -450,14 +533,10 @@ def sync_obsidian_assets(
         identifiers[identifier.asset_id].append(identifier)
     states = {
         state.asset_id: state
-        for state in session.scalars(
-            select(ReadingState).where(ReadingState.user_id == "local")
-        )
+        for state in session.scalars(select(ReadingState).where(ReadingState.user_id == "local"))
     }
     relation_ids: dict[Any, list[str]] = defaultdict(list)
-    for relation in session.scalars(
-        select(Relation).where(Relation.deleted_at.is_(None))
-    ):
+    for relation in session.scalars(select(Relation).where(Relation.deleted_at.is_(None))):
         relation_ids[relation.subject_asset_id].append(str(relation.object_asset_id))
         relation_ids[relation.object_asset_id].append(str(relation.subject_asset_id))
     annotations: dict[Any, list[Annotation]] = defaultdict(list)
@@ -498,7 +577,7 @@ def sync_obsidian_assets(
             latest_snapshot = session.scalar(
                 select(SyncSnapshot)
                 .where(SyncSnapshot.external_object_id == mapping.id)
-                .order_by(SyncSnapshot.created_at.desc())
+                .order_by(SyncSnapshot.created_at.desc(), SyncSnapshot.id.desc())
                 .limit(1)
             )
 
@@ -534,10 +613,17 @@ def sync_obsidian_assets(
                 counters["conflicts"] += 1
             continue
 
-        if external is not None and _apply_external_fields(
-            session, asset, preview.merged
-        ):
+        if external is not None and _apply_external_fields(session, asset, preview.merged):
             counters["hub_updates"] += 1
+            session.flush()
+            state = session.scalar(
+                select(ReadingState).where(
+                    ReadingState.asset_id == asset.id,
+                    ReadingState.user_id == "local",
+                )
+            )
+            if state is not None:
+                states[asset.id] = state
             hub_fields = _asset_fields(
                 asset,
                 identifiers[asset.id],
@@ -555,6 +641,8 @@ def sync_obsidian_assets(
             fields=hub_fields,
             note_body=note_body,
             existing_path=external.path if external else None,
+            expected_content_digest=external.content_digest if external else None,
+            on_write=partial(_remember_write, session, adapter),
         )
         parsed = adapter.parse(path)
         if mapping is None:
@@ -591,12 +679,10 @@ def sync_obsidian_assets(
         )
         written.append((asset, path))
 
-    _write_indexes(adapter, written)
+    _write_indexes(session, adapter, written)
     finished_at = datetime.now(UTC)
     run.status = (
-        SyncStatus.NEEDS_REVIEW.value
-        if counters["conflicts"]
-        else SyncStatus.SUCCEEDED.value
+        SyncStatus.NEEDS_REVIEW.value if counters["conflicts"] else SyncStatus.SUCCEEDED.value
     )
     run.counters = counters
     run.finished_at = finished_at
@@ -618,3 +704,107 @@ def sync_obsidian_assets(
         "root": str(adapter.root),
         "counters": counters,
     }
+
+
+def apply_obsidian_conflict(session: Session, item: SyncConflict, resolved_value: Any) -> None:
+    """Apply one reviewed field without accepting unrelated external edits."""
+    mapping = session.get(IntegrationObject, item.external_object_id)
+    integration = session.get(Integration, mapping.integration_id) if mapping else None
+    asset = session.get(Asset, item.entity_id)
+    if (
+        mapping is None
+        or integration is None
+        or integration.provider != "obsidian"
+        or asset is None
+        or asset.deleted_at is not None
+    ):
+        raise ObsidianContentChanged("The Obsidian conflict target is no longer available.")
+    adapter = ObsidianVaultAdapter(
+        Path(integration.config["vault_path"]), integration.config["hub_directory"]
+    )
+    documents = [doc for doc in adapter.scan() if doc.asset_id == str(asset.id)]
+    if len(documents) != 1:
+        raise ObsidianContentChanged("The conflicted Obsidian note is missing or ambiguous.")
+    external = documents[0]
+    snapshot = session.scalar(
+        select(SyncSnapshot)
+        .where(SyncSnapshot.external_object_id == mapping.id)
+        .order_by(SyncSnapshot.created_at.desc(), SyncSnapshot.id.desc())
+        .limit(1)
+    )
+    identifiers = list(
+        session.scalars(
+            select(ExternalIdentifierModel).where(ExternalIdentifierModel.asset_id == asset.id)
+        )
+    )
+    state = session.scalar(
+        select(ReadingState).where(
+            ReadingState.asset_id == asset.id, ReadingState.user_id == "local"
+        )
+    )
+    relations = list(
+        session.scalars(
+            select(Relation).where(
+                Relation.deleted_at.is_(None),
+                (Relation.subject_asset_id == asset.id) | (Relation.object_asset_id == asset.id),
+            )
+        )
+    )
+    relation_ids = sorted(
+        {
+            str(rel.object_asset_id if rel.subject_asset_id == asset.id else rel.subject_asset_id)
+            for rel in relations
+        }
+    )
+    hub_fields = _asset_fields(asset, identifiers, state, relation_ids)
+    base = dict(snapshot.base_document if snapshot else hub_fields)
+    field = item.field_path.removeprefix("/")
+    if (
+        base.get(field) != item.base_value
+        or hub_fields.get(field) != item.hub_value
+        or external.fields.get(field) != item.external_value
+    ):
+        raise ObsidianContentChanged(
+            "The conflicted field changed after review; sync again before choosing a value."
+        )
+    if field not in _EDITABLE_FIELDS and resolved_value != hub_fields.get(field):
+        raise ValueError("This system field can only keep its current Hub value.")
+    if field == "reading_status" and resolved_value not in {
+        status.value for status in ReadingStatus
+    }:
+        raise ValueError("Invalid reading status.")
+    if _apply_external_fields(session, asset, {field: resolved_value}):
+        session.add(
+            OutboxEvent(
+                aggregate_type="integration",
+                aggregate_id=integration.id,
+                event_type="integration.obsidian.synced",
+                payload={"asset_id": str(asset.id)},
+                dedupe_key=f"obsidian-conflict:{item.id}",
+            )
+        )
+    session.flush()
+    fields = {**external.fields, field: resolved_value}
+    path = adapter.update_fields(
+        external,
+        fields=fields,
+        hub_revision=asset.row_version,
+        on_write=partial(_remember_write, session, adapter),
+    )
+    parsed = adapter.parse(path)
+    base[field] = resolved_value
+    mapping.external_version = parsed.export_digest
+    mapping.external_hash = parsed.export_digest
+    mapping.hub_version = asset.row_version
+    mapping.external_path = str(path)
+    mapping.last_synced_at = datetime.now(UTC)
+    session.add(
+        SyncSnapshot(
+            external_object_id=mapping.id,
+            base_document=base,
+            hub_revision=asset.row_version,
+            external_revision=parsed.export_digest,
+            hub_hash=_digest(base),
+            external_hash=parsed.export_digest,
+        )
+    )

@@ -1,4 +1,4 @@
-import type { Asset, QuickAction } from "../api/types";
+import { getRepresentationType, type Asset, type QuickAction, type Representation } from "../api/types";
 
 export type CodeOpenStatus =
   | "official_open"
@@ -7,7 +7,7 @@ export type CodeOpenStatus =
   | "unavailable"
   | "third_party_only"
   | "unknown";
-export type CodeLocalStatus = "full" | "partial" | "absent" | "stale" | "unknown";
+export type CodeLocalStatus = "available" | "full" | "partial" | "absent" | "stale" | "unknown";
 export type CheckpointOpenStatus =
   | "open"
   | "announced"
@@ -18,11 +18,64 @@ export type CheckpointOpenStatus =
 export interface ReleaseStatus {
   code_open: CodeOpenStatus;
   code_local: CodeLocalStatus;
+  code_local_at_verification: CodeLocalStatus;
   checkpoint_open: CheckpointOpenStatus;
   repository_url?: string;
   checkpoint_urls: string[];
   code_verified_at?: string;
   checkpoint_verified_at?: string;
+}
+
+function codeRepresentations(asset: Asset) {
+  return [asset, ...(asset.related_repositories ?? [])].flatMap((owner) =>
+    (owner.representations ?? []).filter((item) =>
+      ["repository", "source_code", "notebook"].includes(getRepresentationType(item)),
+    ),
+  );
+}
+
+function localCodeAvailable(item: Representation): boolean {
+  return item.availability === "available" && item.local_available !== false &&
+    (item.local_available === true || Boolean(item.path_ref && item.materialization_kind !== "url"));
+}
+
+function currentLocalStatus(asset: Asset, quickActions: QuickAction[]): CodeLocalStatus {
+  const action = quickActions.find((item) => item.kind === "code");
+  if (action) {
+    return action.status === "available" ? "available" : "absent";
+  }
+  const representations = codeRepresentations(asset);
+  if (representations.some(localCodeAvailable)) return "available";
+  return representations.length ? "absent" : "unknown";
+}
+
+export function codeSummaryForAsset(asset: Asset): string {
+  const action = asset.quick_actions?.find((item) => item.kind === "code");
+  const owner = action?.owner_asset_id === asset.id ? asset :
+    asset.related_repositories?.find((item) => item.id === action?.owner_asset_id);
+  const representation = codeRepresentations(asset).find((item) => item.id === action?.representation_id);
+  const name = representation?.label || representation?.external_url || owner?.title;
+  if (action) {
+    const labels = {
+      available: "本地可读",
+      network_required: "远程代码，需联网",
+      missing: "已登记代码当前不可用",
+      not_provided: "无已确认代码",
+    };
+    return `${labels[action.status]}${name ? `：${name}` : ""}`;
+  }
+  const representations = codeRepresentations(asset);
+  if (representations.length) {
+    return representations.map((item) => {
+      const status = item.availability !== "available" ? "已登记代码当前不可用" :
+        localCodeAvailable(item) ? "本地可读" : "远程代码，需联网";
+      return `${status}：${item.label || item.external_url || getRepresentationType(item)}`;
+    }).join("；");
+  }
+  const source = [asset, ...(asset.related_repositories ?? [])]
+    .flatMap((item) => item.source_urls ?? [])
+    .find((url) => /github|gitlab|gitee|codeberg/i.test(url));
+  return source ? `远程仓库（本地状态待核验）：${source}` : "无";
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -59,16 +112,9 @@ export function releaseStatusForAsset(
   relatedRepositories: Asset[] = asset.related_repositories ?? [],
 ): ReleaseStatus {
   const configured = record(asset.attributes?.release_status);
-  const codeAction = quickActions.find((item) => item.kind === "code");
   const inferredCodeOpen: CodeOpenStatus = relatedRepositories.length
     ? "official_open"
     : "unknown";
-  const inferredCodeLocal: CodeLocalStatus =
-    codeAction?.status === "available"
-      ? "full"
-      : codeAction?.status === "network_required"
-        ? "absent"
-        : "unknown";
   const checkpointValues = Array.isArray(configured?.checkpoint_urls)
     ? configured.checkpoint_urls
     : [];
@@ -87,10 +133,11 @@ export function releaseStatusForAsset(
       ] as const,
       inferredCodeOpen,
     ),
-    code_local: enumValue(
+    code_local: currentLocalStatus({ ...asset, related_repositories: relatedRepositories }, quickActions),
+    code_local_at_verification: enumValue(
       configured?.code_local,
       ["full", "partial", "absent", "stale", "unknown"] as const,
-      inferredCodeLocal,
+      "unknown",
     ),
     checkpoint_open: enumValue(
       configured?.checkpoint_open,

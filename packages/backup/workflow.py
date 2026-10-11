@@ -290,15 +290,18 @@ def create_platform_backup(
         [*existing, manifest_path],
         tags=["research-asset-hub", "platform-v3"],
     )
-    check = manager.check()
+    if not snapshot.snapshot_id:
+        raise RuntimeError("Restic completed without a snapshot ID")
+    verification = manager.verify_snapshot(snapshot.snapshot_id)
     return {
         **manager_status,
         "status": "verified",
-        "snapshot_id": snapshot.snapshot_id,
+        "snapshot_id": verification["snapshot_id"],
         "files_new": snapshot.files_new,
         "bytes_added": snapshot.bytes_added,
         "staging_manifest": str(manifest_path),
-        "repository_check": check["status"],
+        "repository_check": verification["repository_check"],
+        "snapshot_verification": verification,
         "risk": "local-copy-only",
         "data_scope": scope,
         "retirement_history_included": True,

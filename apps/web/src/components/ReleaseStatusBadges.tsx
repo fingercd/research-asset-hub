@@ -17,6 +17,7 @@ const codeLabels: Record<CodeOpenStatus, string> = {
 };
 
 const localLabels: Record<CodeLocalStatus, string> = {
+  available: "本地代码可读",
   full: "本地完整",
   partial: "本地部分",
   absent: "未下载到本地",
@@ -50,7 +51,14 @@ export function ReleaseStatusBadges({
     <>
       <strong>代码</strong>
       <span>{codeLabels[status.code_open]}</span>
-      <small>{localLabels[status.code_local]}</small>
+      <small>
+        {status.code_local === "absent" ? "当前无可用本地代码" : localLabels[status.code_local]}
+      </small>
+      {status.code_local_at_verification !== "unknown" && (
+        <small>
+          核验时（{status.code_verified_at ?? "日期未记录"}）：{localLabels[status.code_local_at_verification]}
+        </small>
+      )}
     </>
   );
   const checkpointContent = (

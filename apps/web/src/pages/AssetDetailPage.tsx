@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
   BotMessageSquare,
@@ -21,6 +21,7 @@ import {
   type Representation,
 } from "../api/types";
 import { AssetCollectionControl } from "../components/AssetCollectionControl";
+import { AssetMetadataEditor } from "../components/AssetMetadataEditor";
 import { CodeLinkControl } from "../components/CodeLinkControl";
 import { AnnotationComposer } from "../components/AnnotationComposer";
 import { AssetCard } from "../components/AssetCard";
@@ -73,6 +74,7 @@ function firstRepresentation(
 export function AssetDetailPage() {
   const { assetId = "" } = useParams();
   const compare = useCompare();
+  const [editingMetadata, setEditingMetadata] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedPage = Number(searchParams.get("page")) || undefined;
   const requestedRepresentation = searchParams.get("representation");
@@ -89,9 +91,11 @@ export function AssetDetailPage() {
     queryFn: ({ signal }) => api.representations(assetId, signal),
     enabled: Boolean(assetId),
   });
-  const annotations = useQuery({
+  const annotations = useInfiniteQuery({
     queryKey: ["annotations", assetId],
-    queryFn: ({ signal }) => api.annotations(assetId, signal),
+    queryFn: ({ signal, pageParam }) => api.annotations(assetId, signal, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: Boolean(assetId),
   });
   const similar = useQuery({
@@ -120,7 +124,7 @@ export function AssetDetailPage() {
 
   const data = asset.data;
   const reps = representations.data ?? data.representations ?? [];
-  const notes = annotations.data?.items ?? data.annotations ?? [];
+  const notes = annotations.data?.pages.flatMap((page) => page.items) ?? data.annotations ?? [];
   const domains = getAssetDomains(data);
   const selected = compare.has(data.id);
   const pdf = firstRepresentation(
@@ -197,6 +201,10 @@ export function AssetDetailPage() {
           )}
         </div>
         <div className="asset-hero-actions">
+          {(data.asset_type ?? data.type) === "paper" && (
+            <button className="button secondary" type="button"
+              onClick={() => setEditingMetadata(true)}>编辑元数据</button>
+          )}
           <ReadingStatusControl
             assetId={data.id}
             value={getReadingStatus(data)}
@@ -223,6 +231,11 @@ export function AssetDetailPage() {
           <RepresentationActions representations={reps} />
         )}
       </header>
+
+      {editingMetadata && (
+        <AssetMetadataEditor key={data.id} asset={data}
+          onClose={() => setEditingMetadata(false)} />
+      )}
 
       <AssetCollectionControl assetId={data.id} />
       <div className="asset-tabs" role="tablist" aria-label="资产阅读视图">
@@ -280,11 +293,11 @@ export function AssetDetailPage() {
                     <p className="eyebrow">个人知识</p>
                     <h2>批注</h2>
                   </div>
-                  <span className="count-badge">{notes.length}</span>
+                  <span className="count-badge">已加载 {notes.length}</span>
                 </div>
                 {annotations.isPending ? (
                   <LoadingState label="正在加载批注…" />
-                ) : annotations.isError ? (
+                ) : annotations.isError && !annotations.data ? (
                   <ErrorState
                     error={annotations.error}
                     retry={() => void annotations.refetch()}
@@ -339,6 +352,16 @@ export function AssetDetailPage() {
                     title="还没有批注"
                     detail="在下方记下要点，搜索结果会显示约 60 个中文字符的批注摘要。"
                   />
+                )}
+                {annotations.isFetchNextPageError && (
+                  <p className="inline-error" role="alert">后续批注加载失败，请重试。</p>
+                )}
+                {annotations.hasNextPage && (
+                  <button className="button secondary compact" type="button"
+                    disabled={annotations.isFetchingNextPage}
+                    onClick={() => void annotations.fetchNextPage()}>
+                    {annotations.isFetchingNextPage ? "加载中…" : annotations.isFetchNextPageError ? "重试加载更多批注" : "加载更多批注"}
+                  </button>
                 )}
                 <AnnotationComposer assetId={data.id} />
               </section>

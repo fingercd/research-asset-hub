@@ -39,10 +39,13 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
     : unit.related_repositories.length;
   const annotation = annotationSnippet(primary);
   const prominentVenue = Boolean(primary.venue && !/arxiv/i.test(primary.venue));
-  const percentage =
-    typeof unit.score === "number"
-      ? Math.round(unit.score <= 1 ? unit.score * 100 : unit.score)
-      : null;
+  const matchLabels: Record<string, string> = {
+    paper: "命中论文",
+    related_repository: "命中关联代码",
+    paper_and_related_repository: "命中论文与关联代码",
+    repository: "命中代码仓库",
+  };
+  const matchLabel = matchLabels[unit.match_source ?? ""];
 
   return (
     <article
@@ -179,11 +182,13 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
             </div>
           </details>
         </div>
-        {percentage !== null && (
-          <span className="score" aria-label={`相关度 ${percentage}%`}>
-            {percentage}% 匹配
+        {matchLabel ? (
+          <span className="score">{matchLabel}</span>
+        ) : typeof unit.score === "number" && unit.match_source !== "browse" ? (
+          <span className="score" title="用于结果排序，不表示匹配概率。">
+            排序分数 {unit.score.toPrecision(3)}
           </span>
-        )}
+        ) : null}
       </div>
     </article>
   );
