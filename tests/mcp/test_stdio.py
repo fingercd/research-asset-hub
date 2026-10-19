@@ -86,6 +86,8 @@ async def test_real_stdio_initialize_list_and_call() -> None:
                 assert response.structuredContent == {"status": "test-fixture", "read_only": True}
                 for tool, args in [
                     ("search_assets", {"query": "fixture", "offset": 20}),
+                    ("search_assets", {"domain": "AI for Math", "asset_type": "paper"}),
+                    ("search_assets", {"query": "", "asset_type": "repository", "offset": 20}),
                     ("get_paper", {"paper_id": ASSET}),
                     ("read_evidence", {"paper_id": ASSET}),
                     ("get_methodology", {"domain": "image-editing", "kind": "figure"}),
@@ -101,9 +103,12 @@ async def test_real_stdio_initialize_list_and_call() -> None:
                 assert figure.content[1].mimeType == "image/png"
                 invalid = await session.call_tool("search_assets", {"query": "x", "limit": 21})
                 assert invalid.isError
-        assert len(requests) == 9
+        assert len(requests) == 11
         assert requests[0] == "/api/v1/knowledge/status"
         assert "offset=20" in requests[1]
+        assert "query=&" in requests[2]
+        assert "asset_type=paper" in requests[2]
+        assert "query=&" in requests[3] and "offset=20" in requests[3]
     finally:
         fixture.shutdown()
         fixture.server_close()

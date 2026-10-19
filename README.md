@@ -50,6 +50,8 @@
 
 “测试连接”检查桥接构造和实际数据库读取；真实协议验收另外使用官方 MCP 客户端执行 `initialize`、`list_tools` 和 `call_tool`。本轮已从打包目录、在源码目录之外完成协议读取，详见[交付记录](docs/reports/2026-10-05-product-candidate-delivery.md)和[MCP 使用指南](docs/MCP_USER_GUIDE.md)。
 
+`search_assets` 省略 query 或传空字符串即可按领域、类型分页列出全部已登记可见资料；关键词非空时才做匹配检索。查“全部”应按 next_offset 翻页到 has_more=false，并核对去重数量与 total，不能用关键词命中数当领域总数。
+
 七个工具均只读：`search_assets`、`get_paper`、`read_evidence`、`read_code`、`get_figure`、`get_methodology`、`library_status`。工具保留原文/analysis 区分、候选状态、页码、行号、来源哈希和缺失错误；不导入资料、写批注或运行源码。
 
 默认连接本机共享后台。`initialize` 和列工具不会启动后台；第一次实际读取才按需唤醒或复用桌面服务。多个聊天使用同一后台，关闭聊天不结束资料库。新候选包的真实冷唤醒与多客户端生命周期仍须在安装验收中补测；已有后台上的协议成功不等于这一项已经完成。

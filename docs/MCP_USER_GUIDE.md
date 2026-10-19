@@ -44,7 +44,7 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它
 
 | 工具 | 参数 | 返回与用途 |
 | --- | --- | --- |
-| `search_assets` | `query` 必填（1–500字符，不能全空白）；可选 `domain`、`asset_type=paper\|repository\|figure\|writing_pattern\|code_pattern`、`source_type=original\|analysis`、`keywords`、`constraints`；`limit=10`，上限20 | 搜索已登记论文、代码、科研图、写作模式和代码模式，取得后续工具使用的真实 ID、来源及审核状态 |
+| `search_assets` | `query` 可省略，默认空字符串（最多500字符）；无 query/keywords 时列目录，非空时关键词搜索；可选 `domain`、`asset_type=paper\|repository\|figure\|writing_pattern\|code_pattern`、`source_type=original\|analysis`、`keywords`、`constraints`；`limit=10`，上限20 | 列举或搜索已登记论文、代码、科研图、写作模式和代码模式；支持 offset 分页，取得真实 ID、来源及审核状态 |
 | `get_paper` | `paper_id` 为 UUID | 论文元数据、可用表示、关系和引用信息 |
 | `read_evidence` | `paper_id`；可选 `representation_id`；`source_type=original`；`page_start=1`、可选 `page_end`；`offset=0`；`max_chars=12000`，上限16000 | 读取已抽取证据，保留页码、引用和抽取局限；页码范围1–10000，字符偏移0–10000000 |
 | `get_figure` | 搜索或证据返回的 `figure_id`（最多128字符，只含字母、数字、`_`、`-`）；`preview=true`，小字图可设为false | JSON 来源信息和 MCP 图片内容块；仅 PNG/JPEG 预览，上限5 MiB |
@@ -59,6 +59,26 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它
 工具 schema 会公开数量和长度界限，参数超界时不会发出 HTTP 请求。`read_code` 的相对路径最多512字符，行号1–100000；多个可用代码表示需要明确选择 `representation_id`，不会任意挑选。
 
 所有 JSON HTTP 响应最多4 MiB；图片最多5 MiB。HTTP 连接超时3秒，读取超时20秒。服务不可达、404、范围冲突、非 JSON、图片类型不符和响应超界都会返回明确工具错误。HTTP 错误正文不复制到诊断消息，以免暴露敏感细节。
+
+## 完整列目录，不猜关键词
+
+用户要求“某领域的全部论文”时，先用 `library_status` 确认领域名称和论文数量，再调用：
+
+```json
+{"domain": "ai-for-math", "asset_type": "paper", "limit": 20}
+```
+
+`query` 可省略或明确传 `""`，空白字符串按空查询处理；没有 `query` 和 `keywords` 时执行目录浏览，不要求标题或摘要含有领域名称。不要用 `math`、`Lean`、`*` 等词代替列目录。只传 `keywords` 时仍是关键词检索。
+
+每页最多20条。若 `has_more=true`，保持相同参数并传入返回的 `next_offset`，直到 `has_more=false`。例如27篇论文应取20+7条；对 `asset_id` 去重后数量应等于 `total`，否则不得称“已列出全部”。非空关键词查询中的 `total` 只是匹配数量，不是领域总数。分页读取的是实时元数据，并非事务快照；翻页期间资料变化导致计数不一致时，应重查而不是拼成完整清单。
+
+省略 `domain` 可浏览全库，省略 `asset_type` 可同时浏览论文和代码资产。`source_type` 会限制具有对应表示的资料；要完整列论文通常不要加此筛选。图与方法卡的原有审核、可用性筛选仍适用，不代表包含未审核或不可用的全部派生文件。
+
+列出的题名、作者、年份、venue 和摘要来自数据库；MCP 不会自动修正过时或错误的会议字段。进一步读取使用 `get_paper` 查看表示与关系、`read_evidence(source_type="original")` 读有页码的论文、`read_evidence(source_type="analysis")` 读导读、`read_code` 读关联代码、`get_figure` 读科研图。不需要为这些正常读取绕过 MCP 去读来源目录。只有工具不能表达或读取失败时才明确说明缺口，不把失败当成无资料。
+
+覆盖范围是已正式登记的可见资料，不是磁盘任意文件，也不是互联网上全部论文；未入库文件、未抽取正文、缺失表示及过时元数据仍须明确报告。
+
+修改源码后，新启动的 MCP 进程会使用新 schema。已经连接的聊天仍可能缓存旧工具列表，需重新连接 MCP 或新建聊天；无需为此重启共享数据库或桌面后台。
 
 ## 来源与可信度
 
@@ -85,7 +105,7 @@ MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它
 - “浏览已登记的代码资产，读取 `src/model.py` 的第30到80行，解释数据流并给出代码引用。”
 - “找图像编辑领域已审查的科研图方法卡，列出证据；没有卡片就说明没有。”
 
-先搜索并使用返回的 ID；需要台账或诊断时调用 `library_status`。搜索结果中的摘要用于发现材料，引用结论前调用 `read_evidence` 核对源文件指纹、页码和上下文。当前为标题摘要关键词检索加小型科研中英术语表，未启用语义向量模型，复杂问题宜拆成短专业关键词。正常缺少后台会按需自动恢复；旧聊天仍缓存旧连接时需新建聊天或重启 Codex，不能把连接故障当作检索无结果。
+先列举或搜索并使用返回的 ID；需要领域名、总数或诊断时调用 `library_status`。搜索结果中的摘要用于发现材料，引用结论前调用 `read_evidence` 核对源文件指纹、页码和上下文。当前为标题摘要关键词检索加小型科研中英术语表，未启用语义向量模型，复杂问题宜拆成短专业关键词。正常缺少后台会按需自动恢复；旧聊天仍缓存旧连接时需新建聊天或重启 Codex，不能把连接故障当作检索无结果。
 
 ## 已正式导入批次的维护
 

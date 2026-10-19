@@ -130,3 +130,49 @@ def test_source_type_filter_preserves_available_metadata(library):
     service.session.commit()
     assert service.search_assets("Evidence", source_type="original")["total"] == 0
     assert service.search_assets("Evidence")["total"] == 1
+
+
+@pytest.mark.parametrize("query", ["", "  "])
+def test_domain_catalog_lists_all_27_papers_without_title_keyword(library, query):
+    service, *_ = library
+    expected = [str(UUID(int=index)) for index in range(1, 28)]
+    service.session.add_all(
+        [
+            Asset(
+                id=UUID(value),
+                asset_type="paper",
+                title=f"Unrelated title {index}",
+                domain_slugs=["ai-for-math"],
+            )
+            for index, value in enumerate(expected)
+        ]
+    )
+    service.session.add_all(
+        [
+            Asset(asset_type="repository", title="Code", domain_slugs=["ai-for-math"]),
+            Asset(asset_type="paper", title="Other domain", domain_slugs=["agent"]),
+            Asset(
+                asset_type="paper",
+                title="Hidden",
+                domain_slugs=["ai-for-math"],
+                attributes={"system_hidden": True},
+            ),
+        ]
+    )
+    service.session.commit()
+    seen = []
+    offset = 0
+    while True:
+        page = service.search_assets(
+            query, domain="ai-for-math", asset_type="paper", limit=20, offset=offset
+        )
+        assert page["mode"] == "metadata" and page["total"] == 27
+        assert page["total_is_lower_bound"] is False
+        seen.extend(item["asset_id"] for item in page["items"])
+        if not page["has_more"]:
+            assert page["next_offset"] is None
+            break
+        offset = page["next_offset"]
+    assert seen == expected
+    assert len(set(seen)) == 27
+    assert not service.session.dirty and not service.session.new
