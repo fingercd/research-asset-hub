@@ -26,7 +26,7 @@ from apps.api.routes_v1 import (
     _serialize_backup_run,
     router,
 )
-from packages.backup import BackupManager, create_platform_backup
+from packages.backup import BackupManager, create_platform_backup, default_backup_repository
 from packages.domain.enums import AuditAction, BackupStatus
 from packages.domain.models import BackupRun, Representation, Source
 from packages.domain.serving_scope import active_representation_clause
@@ -77,7 +77,7 @@ def create_backup(
         run = BackupRun(
             status=BackupStatus.RUNNING.value,
             backup_kind="full",
-            destination_label=str(Path.home() / "Documents" / "ResearchAssetHubBackups"),
+            destination_label=str(default_backup_repository()),
             local_copy_only=True,
             counters={"idempotency_key": idempotency_key},
             started_at=datetime.now(UTC),

@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from packages.integrations.credentials import CredentialStore
+from packages.managed_sources.service import data_directory
 
 RESTIC_ACCOUNT = "restic-repository-password"
 
 
 def default_backup_repository() -> Path:
-    return Path.home() / "Documents" / "ResearchAssetHubBackups"
+    return data_directory().parent / "ResearchAssetHubBackups"
 
 
 def _find_restic() -> Path:
@@ -93,6 +94,7 @@ class BackupManager:
         environment = os.environ.copy()
         environment["RESTIC_REPOSITORY"] = str(self.repository)
         environment["RESTIC_PASSWORD"] = password
+        environment["RESTIC_CACHE_DIR"] = str(data_directory() / "cache" / "restic")
         result = subprocess.run(
             [str(self.executable), *arguments],
             check=False,

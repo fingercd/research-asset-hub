@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from packages.backup.manager import BackupManager
+from packages.backup.manager import BackupManager, default_backup_repository
 from packages.backup.workflow import wsl_path
 
 
@@ -19,6 +19,33 @@ class _Credentials:
 
     def set(self, account: str, secret: str) -> None:
         self.value = secret
+
+
+def test_default_backup_repository_follows_selected_data_directory(tmp_path, monkeypatch):
+    data = tmp_path / "workspace" / "ResearchAssetHubData"
+    monkeypatch.setenv("HUB_DATA_DIR", str(data))
+    assert default_backup_repository() == data.parent / "ResearchAssetHubBackups"
+
+
+def test_restic_cache_follows_selected_data_directory(tmp_path, monkeypatch):
+    data = tmp_path / "ResearchAssetHubData"
+    monkeypatch.setenv("HUB_DATA_DIR", str(data))
+    credentials = _Credentials()
+    credentials.value = "test-only-password"
+    manager = BackupManager(
+        repository=tmp_path / "backups",
+        credential_store=credentials,
+        executable=tmp_path / "restic.exe",
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    manager._run(["snapshots", "--json"])
+    assert calls[0]["RESTIC_CACHE_DIR"] == str(data / "cache" / "restic")
 
 
 def test_wsl_path_handles_windows_drive() -> None:
