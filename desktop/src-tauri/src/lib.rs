@@ -221,6 +221,23 @@ fn shutdown_orchestrator(state: &AppState) {
     }
 }
 
+/// 叉号与托盘共用同一条退出路径。先隐藏窗口，再在后台清理服务；
+/// 不在窗口事件线程等待数据库停止，也不让重复关闭启动多次清理。
+fn request_exit(app: tauri::AppHandle) {
+    if app.state::<AppState>().force_exit.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    log_startup_milestone("exit-requested");
+    std::thread::spawn(move || {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+        shutdown_orchestrator(&app.state::<AppState>());
+        log_startup_milestone("exit-services-stopped");
+        app.exit(0);
+    });
+}
+
 /// 在编排线程执行一次完整启动;成功则导航到主界面,失败则弹窗。
 /// 重试路径:开头取走上一个实例——先经令牌无锁置位取消(打断进行中的 start),
 /// 再取锁 shutdown 收尾(已结束的实例立即清理残留,进行中的 ≤~1s 自行返回后清理),
@@ -550,15 +567,7 @@ pub fn run() {
                         }
                         tray::TraySignal::Retry => run_startup(handle.clone(), true),
                         tray::TraySignal::Quit => {
-                            let state = handle.state::<AppState>();
-                            state.force_exit.store(true, Ordering::SeqCst);
-                            // 显式清理:先无锁取消(打断进行中的 start,≤~1s 自行返回),
-                            // 再 shutdown 停全部后台;RunEvent::Exit 兜底再幂等执行一次。
-                            shutdown_orchestrator(&state);
-                            if let Some(w) = handle.get_webview_window("main") {
-                                let _ = w.destroy();
-                            }
-                            handle.exit(0);
+                            request_exit(handle.clone());
                         }
                     }
                 }
@@ -568,16 +577,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let state = window.state::<AppState>();
-                if state.force_exit.load(Ordering::SeqCst) {
-                    // 先无锁取消再 shutdown,不阻塞 UI 线程等待进行中的 start
-                    shutdown_orchestrator(&state);
-                    // 允许窗口真正关闭,进程随之退出
-                    return;
-                }
-                // 点 X = 隐藏到托盘
+                // 保持事件循环可用，清理结束后统一退出，不再只隐藏到托盘。
                 api.prevent_close();
-                let _ = window.hide();
+                request_exit(window.app_handle().clone());
             }
         })
         .build(tauri::generate_context!())
