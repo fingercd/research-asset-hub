@@ -292,6 +292,8 @@ def test_extraction_activity_detects_stale_text_without_registered_hash(library)
 
 def test_http_routes_validate_limits_and_return_json(library):
     service, asset, rep, *_ = library
+    asset.venue = "CVPR"
+    service.session.commit()
     settings = ApiSettings(
         database_url="sqlite+pysqlite:///:memory:", database_require_migrations=False
     )
@@ -303,6 +305,18 @@ def test_http_routes_validate_limits_and_return_json(library):
     app.include_router(knowledge._v1.router)
     install_problem_handlers(app)
     with TestClient(app) as client:
+        filtered = client.get("/api/v1/knowledge/search", params={"venue": "cvpr", "year": 2026})
+        assert filtered.status_code == 200
+        assert filtered.json()["metadata_filters"] == {"venue": "cvpr", "year": 2026}
+        assert filtered.json()["total"] == 1
+        assert client.get("/api/v1/knowledge/search", params={"year": 2025}).json()["total"] == 0
+        for filters in (
+            {"year": 2201},
+            {"venue": " "},
+            {"venue": "x" * 201},
+            {"asset_type": "figure", "venue": "CVPR"},
+        ):
+            assert client.get("/api/v1/knowledge/search", params=filters).status_code == 422
         assert client.get("/api/v1/knowledge/search", params={"limit": 21}).status_code == 422
         assert (
             client.get(

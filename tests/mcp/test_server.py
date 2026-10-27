@@ -160,6 +160,32 @@ async def test_keyword_only_search_is_supported() -> None:
     ] == "keyword"
 
 
+async def test_exact_metadata_filters_are_exposed_and_sent() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.params["query"] == ""
+        assert request.url.params["venue"] == "CVPR"
+        assert request.url.params["year"] == "2026"
+        return httpx.Response(
+            200, json={"items": [], "total": 0, "metadata_filters": {"venue": "CVPR", "year": 2026}}
+        )
+
+    server = server_for(handler)
+    search = next(tool for tool in await server.list_tools() if tool.name == "search_assets")
+    assert search.inputSchema["properties"]["year"]["anyOf"][0]["minimum"] == 1450
+    result = await invoke(server, "search_assets", {"venue": "CVPR", "year": 2026})
+    assert result["metadata_filters"] == {"venue": "CVPR", "year": 2026}
+
+
+async def test_old_api_cannot_silently_ignore_metadata_filters() -> None:
+    with pytest.raises(ToolError, match="did not confirm"):
+        await invoke(
+            server_for(lambda request: httpx.Response(200, json={"items": []})),
+            "search_assets",
+            {"venue": "CVPR", "year": 2026},
+        )
+
+
 async def test_search_serializes_keywords_constraints_and_domain_alias() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -232,6 +258,9 @@ async def test_search_derived_assets_uses_the_same_knowledge_route(asset_type: s
     "tool, arguments",
     [
         ("search_assets", {"query": "x", "limit": 21}),
+        ("search_assets", {"venue": "x" * 201}),
+        ("search_assets", {"year": 1449}),
+        ("search_assets", {"year": 2201}),
         ("search_assets", {"query": "x" * 501}),
         ("get_paper", {"paper_id": "../arbitrary"}),
         ("get_figure", {"figure_id": "../figure"}),

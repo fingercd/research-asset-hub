@@ -68,8 +68,17 @@ def search_assets(
     keywords: Annotated[list[KeywordTerm] | None, Query(max_length=8)] = None,
     constraints: Annotated[list[QueryConstraint] | None, Query(max_length=6)] = None,
     offset: int = Query(default=0, ge=0),
+    venue: str | None = Query(default=None, min_length=1, max_length=200),
+    year: int | None = Query(default=None, ge=1450, le=2200),
 ) -> dict[str, object]:
     if asset_type in {"figure", "writing_pattern", "code_pattern"}:
+        if venue is not None or year is not None:
+            raise ApiProblem(
+                422,
+                "不支持的元数据筛选",
+                "venue/year filters are supported for papers and repositories only.",
+                code="unsupported_metadata_filter",
+            )
         from .knowledge_derivatives import search_derivatives
 
         return search_derivatives(
@@ -93,6 +102,8 @@ def search_assets(
             keywords=keywords or (),
             constraints=constraints or (),
             offset=offset,
+            venue=venue,
+            year=year,
         )
 
 

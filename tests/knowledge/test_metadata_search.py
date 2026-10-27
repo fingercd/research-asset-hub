@@ -176,3 +176,59 @@ def test_domain_catalog_lists_all_27_papers_without_title_keyword(library, query
     assert seen == expected
     assert len(set(seen)) == 27
     assert not service.session.dirty and not service.session.new
+
+
+def test_venue_year_filters_before_pagination_and_keyword_matching(library):
+    service, *_ = library
+    expected = [str(UUID(int=index)) for index in range(1, 28)]
+    service.session.add_all(
+        Asset(
+            id=UUID(value),
+            asset_type="paper",
+            title=f"Unrelated title {index}",
+            venue=" cvpr " if index % 2 else "CVPR",
+            year=2026,
+            domain_slugs=["agent"],
+        )
+        for index, value in enumerate(expected)
+    )
+    service.session.add_all(
+        [
+            Asset(asset_type="paper", title="CVPR 2026", venue="ICCV", year=2026),
+            Asset(asset_type="paper", title="CVPR 2026", venue="CVPR", year=2025),
+            Asset(asset_type="paper", title="CVPR 2026", venue="CVPR Workshop", year=2026),
+            Asset(asset_type="paper", title="CVPR 2026", venue=None, year=2026),
+            Asset(asset_type="paper", title="CVPR 2026", venue="CVPR", year=None),
+            Asset(asset_type="repository", title="Code", venue="CVPR", year=2026),
+            Asset(
+                asset_type="paper",
+                title="Hidden",
+                venue="CVPR",
+                year=2026,
+                attributes={"system_hidden": True},
+            ),
+        ]
+    )
+    service.session.commit()
+    first = service.search_assets("", asset_type="paper", venue="CVPR", year=2026)
+    last = service.search_assets(
+        "", asset_type="paper", venue="CVPR", year=2026, offset=first["next_offset"]
+    )
+    assert first["total"] == last["total"] == 27
+    assert first["metadata_filters"] == {"venue": "CVPR", "year": 2026}
+    assert [x["asset_id"] for x in first["items"] + last["items"]] == expected
+    assert last["has_more"] is False and last["next_offset"] is None
+    assert service.search_assets("ICCV", venue="CVPR", year=2026)["total"] == 0
+    assert (
+        service.search_assets("Unrelated", venue=" cvpr ", year=2026, domain="agent")["total"] == 27
+    )
+    assert service.search_assets("", venue="CV%", year=2026)["total"] == 0
+    assert service.search_assets("", venue="CVPR", year=2025)["total"] == 1
+    assert not service.session.dirty and not service.session.new
+
+
+@pytest.mark.parametrize("filters", [{"venue": " "}, {"venue": "x" * 201}, {"year": 2201}])
+def test_invalid_metadata_filters(library, filters):
+    service, *_ = library
+    with pytest.raises(KnowledgeError):
+        service.search_assets("", **filters)

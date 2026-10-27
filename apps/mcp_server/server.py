@@ -17,6 +17,8 @@ from packages.version import __version__
 
 Query = Annotated[str, Field(max_length=500)]
 Domain = Annotated[str, Field(min_length=1, max_length=64)]
+Venue = Annotated[str, Field(min_length=1, max_length=200)]
+Year = Annotated[int, Field(ge=1450, le=2200)]
 KeywordTerm = Annotated[str, Field(min_length=1, max_length=80)]
 Keywords = Annotated[list[KeywordTerm], Field(max_length=8)]
 QueryConstraint = Annotated[str, Field(min_length=1, max_length=160)]
@@ -151,11 +153,16 @@ def create_server(client: HubClient | None = None) -> FastMCP:
         keywords: Keywords | None = None,
         constraints: Constraints | None = None,
         offset: SearchOffset = 0,
+        venue: Venue | None = None,
+        year: Year | None = None,
     ) -> dict[str, Any]:
         """列举或搜索论文、代码、科研图和模式卡 / Browse or search research assets.
         query可省略或传空字符串；未提供query和keywords时按领域/类型列出全部已登记可见资料。
         查“全部论文”用query="", domain=领域, asset_type="paper"；不猜关键词，不用通配符。
         不指定domain则浏览全库；关键词非空时仅返回命中项，其total不是领域论文总数。
+        venue和year按库内会议/期刊字段及年份严格筛选，与关键词/领域取交集；venue忽略大小写和首尾空格。
+        查会议全部论文用query="", asset_type="paper", venue="CVPR", year=2026；不猜关键词。
+        会议筛选不自动扩展简称/全称或Workshop；元数据登记不等于正式录用核验。图/模式卡不支持这两个筛选。
         figure=科研图，writing_pattern=写作模式，code_pattern=代码模式。
         original=原始证据，analysis=派生分析；保留来源、引用与 pending_review 状态。最多20条。
         复杂问题可把主题放入keywords(最多8个)，必须条件或排除条件放入constraints(最多6个)。
@@ -175,11 +182,20 @@ def create_server(client: HubClient | None = None) -> FastMCP:
                     "source_type": source_type,
                     "keywords": keywords,
                     "constraints": constraints,
+                    "venue": venue,
+                    "year": year,
                 }.items()
                 if v is not None
             }
         )
-        return await hub.get_json("knowledge/search", params)
+        result = await hub.get_json("knowledge/search", params)
+        if venue is not None or year is not None:
+            applied = result.get("metadata_filters", {})
+            if applied != {"venue": venue.strip() if venue is not None else None, "year": year}:
+                raise ToolError(
+                    "Hub API did not confirm venue/year filters; update and restart the shared API."
+                )
+        return result
 
     @server.tool(annotations=READ_ONLY)
     async def get_paper(paper_id: UUID) -> dict[str, Any]:
