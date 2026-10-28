@@ -166,22 +166,41 @@ mod tests {
         dir
     }
 
+    // Runtime executables use the real directory (junctions, short paths and
+    // lexical aliases may differ); app sources retain the supplied root.
+    fn canonical_runtime(root: &Path) -> PathBuf {
+        plain(&std::fs::canonicalize(root.join("runtime")).unwrap())
+    }
+
     #[test]
     fn resolve_points_at_installed_runtime() {
         let root = tmp_root();
         let paths = resolve(&root);
-        assert_eq!(
-            paths.postgres_bin,
-            root.join("runtime").join("postgres").join("bin")
+        let runtime = canonical_runtime(&root);
+        assert_eq!(paths.postgres_bin, runtime.join("postgres/bin"));
+        assert_eq!(paths.python, runtime.join("python/python.exe"));
+        assert_eq!(paths.meilisearch, runtime.join("meilisearch.exe"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_canonicalizes_runtime_alias_but_preserves_app_source_root() {
+        let root = tmp_root();
+        let entry = root.join("path-alias");
+        std::fs::create_dir_all(&entry).unwrap();
+        let alias = entry.join("..");
+        let runtime = canonical_runtime(&root);
+        assert_ne!(
+            alias.join("runtime"),
+            runtime,
+            "fixture must exercise a lexical alias"
         );
-        assert_eq!(
-            paths.python,
-            root.join("runtime").join("python").join("python.exe")
-        );
-        assert_eq!(
-            paths.meilisearch,
-            root.join("runtime").join("meilisearch.exe")
-        );
+
+        let paths = resolve(&alias);
+        assert_eq!(paths.postgres_bin, runtime.join("postgres/bin"));
+        assert_eq!(paths.python, runtime.join("python/python.exe"));
+        assert_eq!(paths.meilisearch, runtime.join("meilisearch.exe"));
+        assert_eq!(paths.python_workdir, plain(&alias).join("app"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -203,7 +222,10 @@ mod tests {
         )
         .unwrap();
         let paths = resolve(&root);
-        assert_eq!(paths.python, root.join("runtime/python/python.exe"));
+        assert_eq!(
+            paths.python,
+            canonical_runtime(&root).join("python/python.exe")
+        );
         assert!(paths.validate().is_err());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -307,7 +329,7 @@ mod tests {
         let paths = resolve(&root);
         assert_eq!(
             paths.postgres_bin,
-            plain(&root).join("runtime").join("postgres").join("bin")
+            canonical_runtime(&root).join("postgres/bin")
         );
         assert!(!paths.postgres_bin.to_string_lossy().contains(r"\\?\"));
         assert!(!paths.postgres_bin.to_string_lossy().contains("//?/"));
