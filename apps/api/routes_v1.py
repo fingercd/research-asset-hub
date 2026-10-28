@@ -865,98 +865,22 @@ def _serialize_matched_asset(
     return item
 
 
-def _asset_matches_unit_filters(
-    asset: Asset,
-    *,
-    related_repositories: list[Asset],
-    representations: dict[UUID, list[Representation]],
-    states: dict[UUID, ReadingState],
-    annotation_assets: set[UUID],
-    domain: str | None,
-    status: str | None,
-    author: str | None,
-    year_from: int | None,
-    year_to: int | None,
-    tags: list[str] | None,
-    has_pdf: bool | None,
-    has_html: bool | None,
-    has_code: bool | None,
-    has_guide: bool | None,
-    has_annotation: bool | None,
-) -> bool:
-    if domain and not any(
-        domain in presentation_domains(member) for member in (asset, *related_repositories)
-    ):
-        return False
-    if author and not any(author.casefold() in item.casefold() for item in asset.authors or []):
-        return False
-    if year_from is not None and (asset.year is None or asset.year < year_from):
-        return False
-    if year_to is not None and (asset.year is None or asset.year > year_to):
-        return False
-    if tags and not set(tags).intersection(asset.tags or []):
-        return False
-    reading_state = states.get(asset.id)
-    reading_status = reading_state.status if reading_state is not None else "unread"
-    if status and reading_status != status:
-        return False
-    if has_annotation is not None and ((asset.id in annotation_assets) != has_annotation):
-        return False
-
-    asset_representations = representations.get(asset.id, [])
-    availability_flags = {
-        "pdf": _has_available_action(asset_representations, "pdf"),
-        "html": _has_available_action(asset_representations, "html"),
-        "guide": _has_available_action(asset_representations, "guide"),
-        "code": (
-            any(
-                _has_available_action(
-                    representations.get(repository.id, []),
-                    "code",
-                )
-                for repository in related_repositories
-            )
-            if asset.asset_type == "paper"
-            else _has_available_action(asset_representations, "code")
-        ),
-    }
-    requested_flags = {
-        "pdf": has_pdf,
-        "html": has_html,
-        "code": has_code,
-        "guide": has_guide,
-    }
-    return all(
-        requested is None or availability_flags[kind] == requested
-        for kind, requested in requested_flags.items()
-    )
-
-
 def _build_research_units(
     session: Session,
     *,
     catalog_assets: list[Asset],
+    primary_ids: set[UUID],
     matched_assets: list[Asset],
     search_hits: dict[UUID, Any],
     query: str,
     states: dict[UUID, ReadingState],
     summaries: dict[UUID, str],
-    annotation_assets: set[UUID],
     representations: dict[UUID, list[Representation]],
     include_independent_repositories: bool,
-    domain: str | None,
-    status: str | None,
-    author: str | None,
-    year_from: int | None,
-    year_to: int | None,
-    tags: list[str] | None,
-    has_pdf: bool | None,
-    has_html: bool | None,
-    has_code: bool | None,
-    has_guide: bool | None,
-    has_annotation: bool | None,
     source_registry: SourceRegistry | None = None,
 ) -> tuple[list[dict[str, Any]], list[Asset]]:
+    # Catalog SQL has already filtered, grouped and paged primary_ids. Related
+    # assets are context only: never re-filter the page or promote that context.
     configured_policy = (
         source_registry.config_path.parent / "check-unit-actions-allowlist.yaml"
         if source_registry is not None and source_registry.config_path is not None
@@ -1002,7 +926,7 @@ def _build_research_units(
     represented_repository_ids: set[UUID] = set()
 
     for paper in catalog_assets:
-        if paper.asset_type != "paper":
+        if paper.asset_type != "paper" or paper.id not in primary_ids:
             continue
         related_repositories = sorted(
             (
@@ -1011,31 +935,8 @@ def _build_research_units(
             ),
             key=lambda item: (item.title.casefold(), str(item.id)),
         )
-        if browse and domain and domain not in presentation_domains(paper):
-            # Domain catalogs are paper censuses.  A shared repository tagged for
-            # another domain must not pull its paper into a no-query browse total.
-            continue
         member_ids = {paper.id, *(repository.id for repository in related_repositories)}
         if not browse and not member_ids.intersection(matched_ids):
-            continue
-        if not _asset_matches_unit_filters(
-            paper,
-            related_repositories=related_repositories,
-            representations=representations,
-            states=states,
-            annotation_assets=annotation_assets,
-            domain=domain,
-            status=status,
-            author=author,
-            year_from=year_from,
-            year_to=year_to,
-            tags=tags,
-            has_pdf=has_pdf,
-            has_html=has_html,
-            has_code=has_code,
-            has_guide=has_guide,
-            has_annotation=has_annotation,
-        ):
             continue
         if browse:
             unit_matches = [paper]
@@ -1121,27 +1022,9 @@ def _build_research_units(
         for repository in catalog_assets:
             if (
                 repository.asset_type != "repository"
+                or repository.id not in primary_ids
                 or repository.id in represented_repository_ids
                 or (not browse and repository.id not in matched_ids)
-            ):
-                continue
-            if not _asset_matches_unit_filters(
-                repository,
-                related_repositories=[],
-                representations=representations,
-                states=states,
-                annotation_assets=annotation_assets,
-                domain=domain,
-                status=status,
-                author=author,
-                year_from=year_from,
-                year_to=year_to,
-                tags=tags,
-                has_pdf=has_pdf,
-                has_html=has_html,
-                has_code=has_code,
-                has_guide=has_guide,
-                has_annotation=has_annotation,
             ):
                 continue
             score = _asset_search_score(repository.id, search_hits)

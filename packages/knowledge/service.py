@@ -137,6 +137,8 @@ class KnowledgeService:
         offset: int = 0,
         keywords: Sequence[str] = (),
         constraints: Sequence[str] = (),
+        venue: str | None = None,
+        year: int | None = None,
     ) -> dict[str, Any]:
         """Recall literal title/abstract aliases over the complete live metadata.
 
@@ -149,6 +151,14 @@ class KnowledgeService:
             raise KnowledgeError("invalid_offset", "offset must be nonnegative.", 422)
         if source_type not in {None, "original", "analysis"}:
             raise KnowledgeError("invalid_source_type", "Unknown evidence source type.", 422)
+        if venue is not None:
+            venue = venue.strip()
+            if not venue or len(venue) > 200:
+                raise KnowledgeError(
+                    "invalid_venue", "venue must contain 1 to 200 characters.", 422
+                )
+        if year is not None and not 1450 <= year <= 2200:
+            raise KnowledgeError("invalid_year", "year must be between 1450 and 2200.", 422)
         query = query.strip()
         try:
             domain = normalize_domain(domain, self.taxonomy_path, session=self.session)
@@ -204,6 +214,10 @@ class KnowledgeService:
         )
         if asset_type:
             statement = statement.where(Asset.asset_type == asset_type)
+        if venue is not None:
+            statement = statement.where(func.lower(func.trim(Asset.venue)) == venue.lower())
+        if year is not None:
+            statement = statement.where(Asset.year == year)
         domain_candidates = source_domain_candidates(domain)
         if domain_candidates:
             patterns = [
@@ -317,6 +331,7 @@ class KnowledgeService:
             "recall_terms": list(recall_terms),
             "pagination_consistency": "live_metadata",
             "semantic_search": False,
+            "metadata_filters": {"venue": venue, "year": year},
         }
         if plan is not None:
             result.update(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -12,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from packages.integrations.credentials import CredentialStore
+from packages.managed_sources.service import data_directory
 
 RESTIC_ACCOUNT = "restic-repository-password"
 
 
 def default_backup_repository() -> Path:
-    return Path.home() / "Documents" / "ResearchAssetHubBackups"
+    return data_directory().parent / "ResearchAssetHubBackups"
 
 
 def _find_restic() -> Path:
@@ -92,6 +94,7 @@ class BackupManager:
         environment = os.environ.copy()
         environment["RESTIC_REPOSITORY"] = str(self.repository)
         environment["RESTIC_PASSWORD"] = password
+        environment["RESTIC_CACHE_DIR"] = str(data_directory() / "cache" / "restic")
         result = subprocess.run(
             [str(self.executable), *arguments],
             check=False,
@@ -151,10 +154,53 @@ class BackupManager:
         )
 
     def check(self) -> dict[str, Any]:
+        """Sample repository data; this does not verify an individual backup."""
         result = self._run(["check", "--read-data-subset=5%"])
         return {
             "status": "verified",
             "repository": str(self.repository),
+            "output": result.stdout.strip(),
+            "risk": "local-copy-only",
+            "verification_scope": "repository-integrity",
+            "data_read": "5%",
+            "restore_rehearsal": "not_run",
+        }
+
+    def _resolve_snapshot(self, snapshot_id: str) -> str:
+        result = self._run(["snapshots", "--json", snapshot_id])
+        snapshots = json.loads(result.stdout)
+        matches = [
+            snapshot["id"]
+            for snapshot in snapshots
+            if snapshot["id"].casefold().startswith(snapshot_id.casefold())
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("the recorded Restic snapshot is missing or ambiguous")
+        return str(matches[0])
+
+    def verify_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        """Verify snapshot presence and all repository data, without restoring.
+
+        Restic check validates the repository's snapshot trees and data packs.
+        Reading all packs also covers this snapshot's data, but costs a full
+        repository scan and does not prove that PostgreSQL can be restored.
+        """
+        if not re.fullmatch(r"[0-9a-fA-F]{8,64}", snapshot_id):
+            raise ValueError("a recorded Restic snapshot ID is required")
+        resolved_snapshot_id = self._resolve_snapshot(snapshot_id)
+        result = self._run(["check", "--read-data"])
+        # The snapshot may have been removed between the initial lookup and
+        # check acquiring its repository lock. Observe its presence again when
+        # verification finishes, using the full ID rather than a short prefix.
+        self._resolve_snapshot(resolved_snapshot_id)
+        return {
+            "status": "verified",
+            "snapshot_id": resolved_snapshot_id,
+            "repository": str(self.repository),
+            "repository_check": "verified",
+            "verification_scope": "snapshot-storage-integrity",
+            "data_read": "all-repository-data",
+            "restore_rehearsal": "not_run",
             "output": result.stdout.strip(),
             "risk": "local-copy-only",
         }

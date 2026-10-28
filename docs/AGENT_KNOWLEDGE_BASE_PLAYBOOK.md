@@ -15,13 +15,15 @@
 - 新出现的题名+年份弱合并全部经过显式审批，没有自动误合并；
 - 正式导入可重复执行，第二次不产生重复资产、表示、关系或证据；
 - 新内容已完成抽取和正式索引，失败项显式可见；
-- 可以从网站搜索到，并能安全打开登记的表示；
+- 可以从桌面界面搜索到，并能安全打开登记的表示；
 - 涉及领域时，默认详情为原生全页 v2 门户，固定九章节齐全、无 iframe/双滚动；原始 HTML 只作为可用性受控的次级核对入口；
 - 来源完整性检查通过；
 - 有导入前恢复点，并留下本次验证报告；
 - 最终说明仍需用户手工完成的步骤，例如 Zotero 导入确认。
 
 ## 2. 先判断是哪种任务
+
+本手册的 CLI 流程面向外部旁车来源维护，不替代日常界面托管上传。界面仅标题/PDF 必填，新领域仅名称必填；已有原位来源与冻结清单始终只读。精选九章节门户是单独的内容维护任务，不是建立空领域的前提。
 
 | 情况 | 处理方式 |
 | --- | --- |
@@ -49,9 +51,9 @@ git status --short
 
 所有已登记来源都保持只读，包括 manifest。用户明确要求 Agent 新增资料时，默认创建新的旁车 intake source；不得向任何现有来源 manifest 追加记录。若用户另行运行某个来源自己的采集/生成工程，那是独立任务，必须由该工程负责来源备份和版本化，再把冻结结果交给 Hub。
 
-### 当前批量规范快照
+### 历史批量规范快照（2026-07 登记基线）
 
-当前登记基线包含 10 个领域、11 个只读 source 和 717 条规范化来源记录。以下四个 `canonical_snapshot` 旁车已完成正式导入并冻结：
+以下是当时 10 个领域、11 个只读 source 和 717 条规范化来源记录的历史基线，不代表当前全库数量。以下四个 `canonical_snapshot` 旁车已完成正式导入并冻结：
 
 | Source | Domain / 用途 | 记录数 | 旁车 |
 | --- | --- | ---: | --- |
@@ -83,7 +85,7 @@ git status --short
 <用户永久资料目录>/
 ├─ paper.pdf
 ├─ code/
-├─ guide.html
+├─ analysis.html
 ├─ original.html
 └─ note.md
 
@@ -128,7 +130,7 @@ research-asset-hub/
 
 - `pdf`：主论文 PDF，角色通常为 `original`。
 - `repository`：代码目录或正式仓库 URL。正式 importer 会物化独立 repository 资产，并建立论文到仓库的 `implemented_by` 关系。
-- `html` + `guide`：生成导读使用 `role: guide`；历史原始页面使用 `role: original`，不要混为一个文件。
+- `html`：新生成导读使用 `role: analysis`，历史原始页面使用 `role: original`；新入库不再创建 `guide` 表示，已有 guide 仅保留只读。原始网页与派生解读不可混为一个文件或一种证据。
 - `markdown`：个人导读或结构化笔记，不替代原始论文。
 - `notebook`：按 Notebook 表示登记，不要转成无法追踪单元格的纯文本。
 - 缺失文件应登记为 `missing` 或不填写该可选表示；绝不能伪造一个存在路径。
@@ -287,7 +289,7 @@ API 会按 asset UUID 校验两个端点并记录审计事件；关系详情和 
   --report work/validation/backup-before-ingest.json
 ```
 
-平台 Restic 快照保护 PostgreSQL、项目配置和开放目录，不包含项目外的来源 PDF、代码或 HTML。来源目录必须由用户另行使用外置盘、NAS、版本库或其他文件级备份保护；不得把平台快照描述成来源文件副本。
+平台 Restic 快照保护数据库、用户配置与托管资料；外部只读引用原件默认不包含，显式纳入时也须核对报告实际范围。外部来源仍需另行文件级备份；不得把快照存在、存储校验通过和数据库恢复演练通过混为一谈。
 
 正式导入只允许使用全部来源，保证跨来源身份视图完整：
 
@@ -320,13 +322,13 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 ## 8. 抽取、HTML 与索引
 
-`hub start` 已包含 worker。登记变化后排队：
+原生桌面监督器统一管理 worker，不再有 `hub start`。登记变化后排队：
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/seed_jobs.py
 ```
 
-在网站“后台任务”页等待 `pending/running` 清零。失败任务必须查看错误和表示状态；缺失源文件可以是明确 warning，但不能消失。
+在桌面界面“后台任务”页等待 `pending/running` 清零。失败任务必须查看错误和表示状态；缺失源文件可以是明确 warning，但不能消失。
 
 新增 HTML 时：
 
@@ -366,9 +368,9 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 ./.venv/Scripts/python.exe scripts/verify_source_integrity.py
 ```
 
-网站检查：
+桌面界面检查：
 
-1. 在 <http://127.0.0.1:8765/search> 用题名、DOI/arXiv 和作者搜索；只有明确启用代码索引时才测试代码符号搜索。
+1. 在桌面“全部资料/搜索”用题名、DOI/arXiv 和作者搜索；只有明确启用代码索引时才测试代码符号搜索。
 2. 打开资产详情，核对题名、作者、年份、领域、标签和表示。
 3. 分别测试 PDF、代码、导读和原始 HTML；缺失按钮必须明确禁用。
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。
@@ -408,13 +410,13 @@ Obsidian 冲突必须进入冲突队列。Zotero 只生成审查式 CSL JSON/Bib
 ./.venv/Scripts/mypy.exe --strict apps packages scripts
 ./.venv/Scripts/python.exe -m pytest -q
 ./.venv/Scripts/python.exe scripts/verify_source_integrity.py
-pnpm --filter @research-asset-hub/web lint
-pnpm --filter @research-asset-hub/web typecheck
-pnpm --filter @research-asset-hub/web test -- --run
-pnpm --filter @research-asset-hub/web build
+pnpm --filter @research-asset-hub/desktop-ui lint
+pnpm --filter @research-asset-hub/desktop-ui typecheck
+pnpm --filter @research-asset-hub/desktop-ui test -- --run
+pnpm --filter @research-asset-hub/desktop-ui build
 ```
 
-涉及前端、打开链路或 HTML 时还要运行 Playwright E2E。涉及索引时重跑相应固定评测。
+涉及桌面界面或打开链路时，在隔离资料库的原生窗口验收；论文 HTML 的只读浏览器审计继续使用 Playwright/axe，不再运行已退役的产品网站 E2E。涉及索引时重跑相应固定评测。
 
 批量导入、新来源、新领域或准备发布时，创建最终快照并做隔离恢复演练：
 
@@ -440,7 +442,7 @@ pnpm --filter @research-asset-hub/web build
 - dry-run 和第二次导入的幂等结论；
 - 抽取任务与索引状态；
 - 来源完整性结果；
-- 网站中已验证的搜索与打开方式；
+- 桌面界面中已验证的搜索与打开方式；
 - 涉及领域门户时，10/10 或目标领域的九章节、stale、响应式、无 iframe、原始 HTML 门禁和研究单元结果；
 - 备份 snapshot ID 和恢复演练状态；
 - 用户仍需手工执行的 Zotero、密钥轮换或外部备份步骤；

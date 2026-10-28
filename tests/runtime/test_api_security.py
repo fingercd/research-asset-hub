@@ -44,7 +44,7 @@ def test_browser_write_requires_allowed_origin_and_csrf_header(
 
     missing_token = secured_api.post(
         "/api/v1/assets",
-        headers={"Origin": "http://127.0.0.1:8765"},
+        headers={"Origin": "http://tauri.localhost"},
         json={},
     )
     assert missing_token.status_code == 403
@@ -52,7 +52,7 @@ def test_browser_write_requires_allowed_origin_and_csrf_header(
     allowed = secured_api.post(
         "/api/v1/assets",
         headers={
-            "Origin": "http://127.0.0.1:8765",
+            "Origin": "http://tauri.localhost",
             "X-Research-Hub-CSRF": "1",
         },
         json={},

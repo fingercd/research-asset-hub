@@ -1141,11 +1141,11 @@ class NodePlaywrightGatewayProbe:
     def __init__(
         self,
         *,
-        web_project: Path | None = None,
+        node_project: Path | None = None,
         node_executable: str | None = None,
         settle_milliseconds: int = 750,
     ) -> None:
-        self.web_project = web_project or PROJECT_ROOT / "apps" / "web"
+        self.node_project = node_project or PROJECT_ROOT / "desktop" / "ui"
         self.node_executable = node_executable or shutil.which("node")
         self.settle_milliseconds = settle_milliseconds
 
@@ -1166,12 +1166,12 @@ class NodePlaywrightGatewayProbe:
                 {},
             )
         package_path = (
-            self.web_project / "node_modules" / "@playwright" / "test"
+            self.node_project / "node_modules" / "@playwright" / "test"
         )
         if not package_path.exists():
             return DynamicProbeBatch(
                 "unavailable",
-                "The web project's Playwright package is not installed.",
+                "The desktop UI package's Playwright runtime is not installed.",
                 {},
             )
 
@@ -1241,7 +1241,7 @@ class NodePlaywrightGatewayProbe:
         try:
             completed = subprocess.run(
                 [self.node_executable, "-e", _NODE_AUDIT_SOURCE],
-                cwd=self.web_project,
+                cwd=self.node_project,
                 env=environment,
                 capture_output=True,
                 text=True,

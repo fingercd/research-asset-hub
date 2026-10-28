@@ -245,7 +245,6 @@ def build_preflight_report(sources: list[LoadedSource]) -> dict[str, Any]:
             "docker": docker,
         },
         "ports": {
-            "web_8765_available": port_available("127.0.0.1", 8765),
             "asset_gateway_8766_available": port_available("127.0.0.1", 8766),
             "api_8767_available": port_available("127.0.0.1", 8767),
             "postgres_5432_available": port_available("127.0.0.1", 5432),

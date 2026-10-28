@@ -15,8 +15,30 @@ from packages.domain.models import Asset, Base, Representation, RepresentationMo
 from packages.integrations.html_audit import (
     DynamicPageCheck,
     DynamicProbeBatch,
+    NodePlaywrightGatewayProbe,
     audit_registered_html,
 )
+
+
+def test_gateway_probe_defaults_to_the_desktop_ui_node_project() -> None:
+    probe = NodePlaywrightGatewayProbe(node_executable="node")
+
+    assert probe.node_project == Path(__file__).resolve().parents[2] / "desktop" / "ui"
+
+
+def test_gateway_probe_uses_an_explicit_node_project_without_a_website_fallback(
+    tmp_path: Path,
+) -> None:
+    probe = NodePlaywrightGatewayProbe(node_project=tmp_path, node_executable="node")
+
+    assert probe.node_project == tmp_path
+    result = probe.probe(
+        [UUID("00000000-0000-0000-0000-000000000001")],
+        api_origin="http://127.0.0.1:8767",
+        timeout_seconds=1,
+    )
+    assert result.status == "unavailable"
+    assert result.reason == "The desktop UI package's Playwright runtime is not installed."
 
 
 @pytest.fixture

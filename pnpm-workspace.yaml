@@ -1,5 +1,5 @@
 packages:
-  - "apps/web"
+  - "desktop/ui"
 
 allowBuilds:
   esbuild: true

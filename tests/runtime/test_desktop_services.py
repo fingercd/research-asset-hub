@@ -10,6 +10,45 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
+
+def _listening_ports(ports: tuple[int, ...]) -> list[int]:
+    listening = []
+    for port in ports:
+        with socket.socket() as probe:
+            probe.settimeout(0.1)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                listening.append(port)
+    return listening
+
+
+def _assert_ports_closed(ports: tuple[int, ...], *, timeout: float = 5) -> None:
+    # taskkill /T returning and the venv launcher exiting do not imply every
+    # descendant's Winsock listener has finished closing on Windows. Observe
+    # the actual contract with a bounded deadline, not an arbitrary sleep.
+    deadline = time.monotonic() + timeout
+    while listening := _listening_ports(ports):
+        assert time.monotonic() < deadline, f"HTTP listeners still active after exit: {listening}"
+        time.sleep(0.05)
+
+
+def test_port_shutdown_waits_for_actual_socket_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        monkeypatch.setattr(time, "sleep", lambda _seconds: listener.close())
+        _assert_ports_closed((port,))
+
+
+def test_port_shutdown_still_rejects_a_persistent_listener() -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        with pytest.raises(AssertionError, match="HTTP listeners still active"):
+            _assert_ports_closed((listener.getsockname()[1],), timeout=0)
+
 
 def test_desktop_process_serves_both_origins_and_stops_together(tmp_path: Path) -> None:
     with socket.socket() as first, socket.socket() as second:
@@ -68,6 +107,4 @@ def test_desktop_process_serves_both_origins_and_stops_together(tmp_path: Path) 
             else:
                 process.terminate()
             process.wait(timeout=10)
-    for port in ports:
-        with socket.socket() as probe:
-            assert probe.connect_ex(("127.0.0.1", port)) != 0
+    _assert_ports_closed(ports)

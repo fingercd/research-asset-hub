@@ -75,6 +75,8 @@ from packages.domain.serving_scope import (
     representation_serving_status,
     retired_source_ids,
 )
+from packages.domain.workflow_models import ReadingPosition
+from packages.workflows.service import live_collection
 
 
 def _uuid_metadata(value: Any) -> UUID | None:
@@ -190,7 +192,7 @@ def dashboard(request: Request) -> dict[str, Any]:
             .select_from(Asset)
             .where(visible)
         ).one()
-        domains = domain_counts(session, _v1._settings(request))
+        domains = domain_counts(session, _v1._settings(request), include_recent=False)
         recent_ids = list(
             session.scalars(
                 select(Asset.id).where(visible).order_by(Asset.updated_at.desc(), Asset.id).limit(8)
@@ -199,22 +201,50 @@ def dashboard(request: Request) -> dict[str, Any]:
         reading_ids = list(
             session.scalars(
                 select(Asset.id)
-                .where(visible, reading_status() == "reading")
-                .order_by(Asset.updated_at.desc(), Asset.id)
+                .join(
+                    ReadingState,
+                    (ReadingState.asset_id == Asset.id) & (ReadingState.user_id == "local"),
+                )
+                .outerjoin(
+                    ReadingPosition,
+                    (ReadingPosition.asset_id == Asset.id) & (ReadingPosition.user_id == "local"),
+                )
+                .where(visible, ReadingState.status == "reading")
+                .order_by(
+                    func.coalesce(ReadingPosition.updated_at, ReadingState.updated_at).desc(),
+                    Asset.id,
+                )
                 .limit(8)
             )
         )
+        positions = {
+            position.asset_id: position
+            for position in session.scalars(
+                select(ReadingPosition).where(
+                    ReadingPosition.user_id == "local", ReadingPosition.asset_id.in_(reading_ids)
+                )
+            )
+        }
         assets = load_catalog_assets(session, list(dict.fromkeys([*recent_ids, *reading_ids])))
         by_id = {asset.id: asset for asset in assets}
         states, summaries = _asset_context(session, assets)
 
-        def cards(ids: list[UUID]) -> list[dict[str, Any]]:
+        def cards(ids: list[UUID], *, resume: bool = False) -> list[dict[str, Any]]:
+            from apps.api.routes.workflows import _position_payload
+
             return [
-                serialize_catalog_asset(
-                    by_id[asset_id],
-                    reading_state=states.get(asset_id),
-                    annotation_summary=summaries.get(asset_id),
-                )
+                {
+                    **serialize_catalog_asset(
+                        by_id[asset_id],
+                        reading_state=states.get(asset_id),
+                        annotation_summary=summaries.get(asset_id),
+                    ),
+                    **(
+                        {"reading_position": _position_payload(session, positions.get(asset_id))}
+                        if resume
+                        else {}
+                    ),
+                }
                 for asset_id in ids
             ]
 
@@ -247,7 +277,7 @@ def dashboard(request: Request) -> dict[str, Any]:
             "relation_count": stats["relations"],
             "annotation_count": stats["annotations"],
             "recent_assets": cards(recent_ids),
-            "continue_reading": cards(reading_ids),
+            "continue_reading": cards(reading_ids, resume=True),
             "domains": domains,
             "index_state": {
                 "status": "ready" if indexed_assets else "building",
@@ -267,6 +297,9 @@ def search_assets(
     domain: str | None = None,
     status: str | None = Query(None, pattern="^(unread|reading|read)$"),
     author: str | None = None,
+    venue: str | None = Query(None, min_length=1, max_length=200),
+    year: int | None = Query(None, ge=1450, le=2200),
+    collection_id: UUID | None = None,
     asset_type: str | None = Query(None, alias="type"),
     year_from: int | None = Query(None, ge=1450, le=2200),
     year_to: int | None = Query(None, ge=1450, le=2200),
@@ -281,6 +314,12 @@ def search_assets(
     include_facets: bool = True,
     cursor: str | None = None,
 ) -> dict[str, Any]:
+    if venue is not None:
+        venue = venue.strip()
+        if not venue:
+            raise ApiProblem(422, "会议字段无效", "venue must not be blank.")
+    if year_from is not None and year_to is not None and year_from > year_to:
+        raise ApiProblem(422, "年份范围无效", "year_from must not exceed year_to.")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise ApiProblem(
             422,
@@ -289,6 +328,9 @@ def search_assets(
             problem_type="urn:research-asset-hub:problem:invalid-date-range",
         )
     offset = decode_cursor(cursor)
+    if collection_id is not None:
+        with _v1._database(request).session() as session:
+            live_collection(session, collection_id)
     paper_grouping = group_by == "paper" and asset_type in {None, "all", "paper"}
     filters: dict[str, Any] = {
         "domain": domain,
@@ -386,6 +428,9 @@ def search_assets(
             asset_type=asset_type,
             status=status,
             author=author,
+            venue=venue,
+            year=year,
+            collection_id=collection_id,
             year_from=year_from,
             year_to=year_to,
             date_from=date_from,
@@ -451,18 +496,6 @@ def search_assets(
         by_id = {asset.id: asset for asset in context_assets}
         page = [by_id[asset_id] for asset_id in page_ids]
         if paper_grouping:
-            annotation_assets = (
-                set(
-                    session.scalars(
-                        select(Annotation.asset_id).where(
-                            Annotation.deleted_at.is_(None),
-                            Annotation.asset_id.in_(context_ids),
-                        )
-                    )
-                )
-                if context_ids
-                else set()
-            )
             if q.strip():
                 matched_ids = (
                     set(search_hits)
@@ -485,25 +518,14 @@ def search_assets(
             units, _ = _build_research_units(
                 session,
                 catalog_assets=context_assets,
+                primary_ids=set(page_ids),
                 matched_assets=matched_assets,
                 search_hits=search_hits,
                 query=q,
                 states=states,
                 summaries=summaries,
-                annotation_assets=annotation_assets,
                 representations=representations,
                 include_independent_repositories=bool(q.strip()) and asset_type != "paper",
-                domain=domain,
-                status=status,
-                author=author,
-                year_from=year_from,
-                year_to=year_to,
-                tags=tag,
-                has_pdf=has_pdf,
-                has_html=has_html,
-                has_code=has_code,
-                has_guide=has_guide,
-                has_annotation=has_annotation,
                 source_registry=_v1._source_registry(request),
             )
             units_by_id = {unit["unit_id"]: unit for unit in units}

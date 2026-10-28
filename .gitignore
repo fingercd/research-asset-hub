@@ -11,8 +11,8 @@ htmlcov/
 
 # JavaScript
 node_modules/
-apps/web/dist/
-apps/web/.vite/
+desktop/ui/dist/
+desktop/ui/.vite/
 
 # Local configuration and credentials
 .env
@@ -21,6 +21,22 @@ apps/web/.vite/
 
 # Runtime and generated data
 work/
+dumps/
+.claude/
+.superpowers/
+# Local databases and model artifacts are not repository deliverables.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.dump
+*.ckpt
+*.safetensors
+# Tiny, reviewed test fixtures may be versioned explicitly.
+!tests/fixtures/**/*.db
+!tests/fixtures/**/*.sqlite
+!tests/fixtures/**/*.sqlite3
 state/backups/
 state/catalog-export/
 outputs/reports/

@@ -2,11 +2,13 @@
 
 这份指南说明如何把一篇论文及其 PDF、代码、HTML 导读、Notebook 或 Markdown 笔记作为一个完整知识单元加入 Research Asset Hub。
 
-最重要的原则：平台引用原文件所在位置，不会替你搬运或复制大文件。因此，正式加入前要先把资料放在一个长期稳定、不会自动清理的位置。
+**日常单篇优先使用桌面“添加资料”**：标题和 PDF 必填，HTML、代码及简介选填；界面确认后可将新材料托管复制到用户数据目录。新领域也只需名称，精选门户内容可后补。
+
+本文后续命令主要说明 **Agent 为已有永久资料创建外部旁车来源** 的方式：引用原文件位置，不搬运或覆盖原件。因此，执行这一路径前要先把资料放在长期稳定、不会自动清理的位置。它不是普通用户上传一篇 PDF 必须执行的命令清单。
 
 当前 PDF 与代码的永久资料根是 `D:/ResearchLibrary`，各领域资料放在其子目录中；`research-asset-hub` 子目录保存应用。以后新增资料继续使用这个资料根，并为新资料建立独立旁车来源。
 
-平台的 Restic 备份只保护 PostgreSQL、项目配置和开放目录，不包含放在项目外的原始 PDF、代码和 HTML；这些来源文件仍需要你使用外置硬盘、NAS、Git 或其他方式单独备份。
+平台 Restic 备份包含数据库、用户配置和托管资料；**外部只读引用原件默认不包含**，需核对实际备份范围并单独保护。快照存储校验通过不等于数据库恢复演练通过；Git 不能备份个人数据库、未跟踪 PDF 或密钥。
 
 普通的一篇论文使用 `generic_manifest` 旁车，不需要运行 VLN、游戏强化学习、WSVAD 或领域门户的批量快照构建器。完整写库顺序固定为：全量 dry-run 通过、创建备份、第一次全量正式导入、在输入不变时第二次全量正式导入并确认新增计数为 0。
 
@@ -28,7 +30,7 @@ Markdown/Notebook：<路径，没有则写无>
 DOI/arXiv：<知道就填，不知道可让 Agent 提取>
 与已有资料的关系：<知道就填，不知道可留空>
 
-完成 dry-run、备份、正式导入、幂等复跑、抽取、索引、来源完整性和网站打开验证；
+完成 dry-run、备份、正式导入、幂等复跑、抽取、索引、来源完整性和桌面界面打开验证；
 不要移动、重命名、覆盖或删除我的原文件。
 ```
 
@@ -47,14 +49,14 @@ DOI/arXiv：<知道就填，不知道可让 Agent 提取>
 example-paper-2026/
 ├─ paper.pdf
 ├─ code/
-├─ guide.html
+├─ analysis.html
 ├─ original.html
 └─ note.md
 ```
 
 - `paper.pdf`：原始论文。
 - `code/`：本地代码快照；也可以只提供 GitHub URL。
-- `guide.html`：你或 Agent 生成的导读页面。
+- `analysis.html`：你或 Agent 生成的导读页面，新资料按 HTML / analysis 登记，不新建已废除的 guide 表示；旧 guide 保留只读。
 - `original.html`：需要保留原交互的历史网页。
 - `note.md`：可搜索的 Markdown 导读或笔记。
 
@@ -62,12 +64,12 @@ example-paper-2026/
 
 一篇论文 + PDF + HTML + 代码的最短闭环是：
 
-1. 把 `paper.pdf`、`code/`、`guide.html` 或 `original.html` 放进同一个永久资料目录。
+1. 将已有 `paper.pdf`、`code/`、`analysis.html` 或 `original.html` 的永久路径登记清楚；不要为匹配示例而移动已登记文件。
 2. 新建 `config/intake/<new-source-id>/manifest.json`，其中只放这一条稳定 `items[].id` 记录。
 3. 在 `config/sources.yaml` 新增 `read_only: true`、`adapter: generic_manifest` 的 source，并让 `asset_roots` 指向永久资料目录。
 4. 运行全来源检查和 dry-run，核对 PDF、HTML、代码路径及身份合并候选。
 5. 备份后执行两次 `ingest -All`；第二次不得新增任何记录、资产、表示、关系或字段声明。
-6. 完成抽取、HTML 审计、索引和网站打开验证。
+6. 完成抽取、HTML 审计、索引和桌面界面打开验证。
 
 ## 3. 先决定加入哪里
 
@@ -146,8 +148,8 @@ research-asset-hub\config\intake\intake-example-paper-2026\manifest.json
       "path": "code",
       "url": "https://github.com/example/example-repository"
     },
-    "guide": {"path": "guide.html"},
-    "html": {"path": "original.html"},
+    "html": {"path": "analysis.html"},
+    "original_html": {"path": "original.html"},
     "note": {"path": "note.md"}
   }
 }
@@ -213,7 +215,7 @@ Invoke-RestMethod `
 然后把 `docs/templates/knowledge-source.example.yaml` 中 `sources` 下的单个条目复制到 `config/sources.yaml` 的 `sources` 列表，修改：
 
 - `id`：唯一来源名；
-- `label`：网站显示名；
+- `label`：桌面界面显示名；
 - `domain`：taxonomy 中的领域 ID；
 - `root`：`config/intake/<source-id>` 旁车目录；
 - `asset_roots`：原始资料所在的稳定绝对目录；
@@ -223,7 +225,7 @@ Invoke-RestMethod `
 
 ### 如果增加的是一个全新领域
 
-除 taxonomy 和 source 外，还要建立 `config/domain-portals/v2/<slug>/`。统一门户不是让你手写另一个巨型 HTML，而是把领域内容拆成以下八个可审查文件：
+新领域不必先具备精选门户即可使用。需要补齐**精选九章节门户**时，再建立 `config/domain-portals/v2/<slug>/`，把内容拆成以下八个可审查文件：
 
 - `portal.yaml`：领域说明、内容版本、原始 HTML 选择器、来源 hash/mtime 和章节证据；
 - `overview.md`：领域定位与边界；
@@ -240,11 +242,11 @@ Invoke-RestMethod `
 
 ```powershell
 ./.venv/Scripts/python.exe -m pytest tests/contract/test_domain_portal_v2.py -q
-npm --prefix apps/web run typecheck
-npm --prefix apps/web run test
+pnpm --filter @research-asset-hub/desktop-ui typecheck
+pnpm --filter @research-asset-hub/desktop-ui test
 ```
 
-浏览器验收时确认默认页面没有 iframe；“原始 HTML”只是只读次级入口。
+在原生窗口验收时确认默认页面没有 iframe；“原始 HTML”只是只读次级入口。
 
 ## 6. 检查后再正式导入
 
@@ -252,16 +254,15 @@ npm --prefix apps/web run test
 
 ```powershell
 cd "D:\ResearchLibrary\research-asset-hub"
-./scripts/hub.ps1 start
 ./scripts/hub.ps1 preflight
 ./scripts/hub.ps1 validate -All -Json
 ./scripts/hub.ps1 inventory -All
 ./scripts/hub.ps1 ingest -All -DryRun
 ```
 
-`DryRun` 本身只需要 Python、配置和可读来源。这里先运行 `start` 是为了继续完成正式数据库导入、抽取、索引和网站验证；如果你只想检查 manifest，可以暂时不启动完整服务。
+`DryRun` 本身只需要 Python、配置和可读来源。需要正式导入时先正常打开桌面程序，让唯一监督器提供数据库与后台任务；只检查 manifest 时不必启动桌面。
 
-本机入口分别是：网站 <http://127.0.0.1:8765>、API 文档 <http://127.0.0.1:8767/docs>、隔离资产网关健康检查 <http://127.0.0.1:8766/health>。
+日常入口是原生桌面。API 文档与资产网关是维护用的本机服务，不再提供独立网站入口。
 
 网关健康表示数据库与签名配置就绪；知识库状态只汇总表示台账和来源根注册情况，不扫描全部 PDF 或代码。判断某份资料能否阅读，要看其表示状态和实际打开结果；缺失文件仍会返回明确错误。
 
@@ -305,13 +306,13 @@ cd "D:\ResearchLibrary\research-asset-hub"
 
 ## 8. 按需读正文并维护标题摘要搜索
 
-网站启动时 worker 会在后台运行。创建增量任务：
+原生桌面启动后，监督器会在后台运行 worker。创建增量任务：
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/seed_jobs.py
 ```
 
-打开 <http://127.0.0.1:8765/jobs>，等“等待中”和“运行中”任务归零。失败任务会明确显示；不要因为其他资产成功就忽略失败项。
+在桌面系统状态中打开“后台任务”，等“等待中”和“运行中”任务归零。失败任务会明确显示；不要因为其他资产成功就忽略失败项。
 
 构建正式索引：
 
@@ -346,14 +347,14 @@ HTML 会按静态、可信本地交互或需要联网三种策略隔离打开。
 ./.venv/Scripts/python.exe scripts/verify_source_integrity.py
 ```
 
-然后在网站执行：
+然后在桌面界面执行：
 
 1. 用完整题名或 DOI/arXiv 搜索。
 2. 打开资产详情。
 3. 测试 PDF、代码、导读和原始 HTML。
 4. 检查领域、作者、年份和标签。
 5. 确认代码仓库关系正确。
-6. 切换阅读状态并添加一条真实批注。
+6. 只读核对阅读状态与批注；仅当用户本来要求写入时才验证写入，不能为了 smoke test 污染用户状态。
 
 如果本次新增或调整了领域，还要进入对应领域详情，确认原生 v2 总览九章节齐全、无 iframe、桌面和窄屏无横向溢出；再测试“原始 HTML”是否只在来源表示可用时启用并在新窗口打开。任何门户更新都不应造成来源文件 hash 或 mtime 变化。
 
@@ -391,4 +392,4 @@ Zotero 包仍需你在 Zotero/Better BibTeX 界面中确认导入。
 | PDF/HTML 无法打开 | 检查表示 availability、网关健康和 HTML 审计报告 |
 | Zotero 没有新条目 | CLI 只生成导入包，还需要在 Zotero 界面确认 |
 
-如果你只想日常阅读、搜索和批注，不需要执行这些命令；直接使用网站即可。网站操作详见 [完整使用手册](USER_MANUAL.md)。
+如果你只想日常阅读、搜索和批注，不需要执行这些命令；直接使用桌面界面即可。桌面界面操作详见 [完整使用手册](USER_MANUAL.md)。

@@ -54,11 +54,7 @@ def create_app(
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://127.0.0.1:8765",
-            "http://localhost:8765",
-            *app_settings.desktop_origins,
-        ],
+        allow_origins=app_settings.desktop_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
@@ -81,12 +77,7 @@ def create_app(
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
             if origin is not None:
-                allowed_origins = {
-                    app_settings.web_origin,
-                    app_settings.web_origin.replace("127.0.0.1", "localhost"),
-                    "http://testserver",
-                    *app_settings.desktop_origins,
-                }
+                allowed_origins = set(app_settings.desktop_origins)
                 csrf_token = request.headers.get("x-research-hub-csrf")
                 if origin not in allowed_origins or csrf_token != "1":
                     return JSONResponse(
@@ -138,7 +129,7 @@ def create_app(
         return result
 
     # 桌面壳前端按 API_BASE(/api/v1)拼接 health 路径,与裸 /api/health 并存,
-    # 消除桌面模式健康检查 404(浏览器托管模式下 web_host 代理 /api/health)。
+    # 监督器和诊断继续使用 /api/health；桌面 UI 使用版本化路由。
     application.add_api_route(
         "/api/v1/health",
         health,

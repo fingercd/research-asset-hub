@@ -1,13 +1,18 @@
 name: checks
 on:
   push:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   pull_request:
 permissions:
   contents: read
 jobs:
+  repository:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python scripts/check_repository.py
   python:
     runs-on: windows-latest
     steps:
@@ -19,7 +24,7 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv run --frozen ruff check apps packages scripts tests
       - run: uv run --frozen python -m pytest -q -rs
-  web:
+  desktop_ui:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +34,29 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @research-asset-hub/web typecheck
-      - run: pnpm --filter @research-asset-hub/web test
-      - run: pnpm --filter @research-asset-hub/web build
+      - run: pnpm --filter @research-asset-hub/desktop-ui typecheck
+      - run: pnpm --filter @research-asset-hub/desktop-ui test
+      - run: pnpm --filter @research-asset-hub/desktop-ui build
+  desktop:
+    runs-on: windows-latest
+    env:
+      TAURI_CONFIG: '{"bundle":{"resources":null}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target
+          key: ${{ runner.os }}-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-desktop-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @research-asset-hub/desktop-ui build
+      - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
+      - run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib

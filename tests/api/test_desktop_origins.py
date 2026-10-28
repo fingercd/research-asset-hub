@@ -44,10 +44,7 @@ def test_cors_preflight_allows_csrf_header_for_desktop_origin() -> None:
     )
     assert response.status_code == 200
     assert "http://tauri.localhost" in response.headers["access-control-allow-origin"]
-    assert (
-        "x-research-hub-csrf"
-        in response.headers["access-control-allow-headers"].lower()
-    )
+    assert "x-research-hub-csrf" in response.headers["access-control-allow-headers"].lower()
 
 
 def test_write_guard_accepts_desktop_origin_with_csrf() -> None:
@@ -82,3 +79,31 @@ def test_desktop_origins_env_override() -> None:
         desktop_origins=["http://custom.localhost"],
     )
     assert settings.desktop_origins == ["http://custom.localhost"]
+
+
+def test_retired_web_origin_is_rejected_even_with_csrf() -> None:
+    client = _client()
+    response = client.post(
+        "/api/v1/annotations",
+        json={},
+        headers={"Origin": "http://127.0.0.1:8765", "X-Research-Hub-CSRF": "1"},
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_rejected"
+    preflight = client.options(
+        "/api/v1/annotations",
+        headers={"Origin": "http://127.0.0.1:8765", "Access-Control-Request-Method": "GET"},
+    )
+    assert preflight.status_code == 400
+    assert "access-control-allow-origin" not in preflight.headers
+
+
+def test_web_host_configuration_has_been_removed() -> None:
+    for name in (
+        "web_host",
+        "web_port",
+        "web_origin",
+        "web_dist_path",
+        "web_api_proxy_timeout_seconds",
+    ):
+        assert name not in ApiSettings.model_fields

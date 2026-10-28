@@ -65,6 +65,25 @@ def test_preflight_accounts_for_all_source_records(local_research_assets: None) 
     assert sum(item["record_count"] or 0 for item in observed.values()) >= BASELINE_MIN_RECORDS
 
 
+def test_preflight_does_not_probe_a_retired_website_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ports: list[int] = []
+    monkeypatch.setattr(inspection, "command_status", lambda name: {"available": True})
+    monkeypatch.setattr(inspection, "docker_status", lambda: {"available": True})
+    monkeypatch.setattr(inspection, "port_available", lambda host, port: ports.append(port) or True)
+
+    report = build_preflight_report([])
+
+    assert 8765 not in ports
+    assert set(report["ports"]) == {
+        "asset_gateway_8766_available",
+        "api_8767_available",
+        "postgres_5432_available",
+        "meilisearch_7700_available",
+    }
+
+
 def test_preflight_detects_the_supported_wsl_docker_backend() -> None:
     status = docker_status()
 

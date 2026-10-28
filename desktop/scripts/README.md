@@ -32,7 +32,7 @@ $resticExe = 'D:\downloads\restic_0.19.1_windows_amd64.exe'
 这里 `Get-FileHash` 计算输入文件的实际哈希；正式构建前还需与供应商发布的校验值比对。
 增加 `-ValidateOnly` 可只检查输入；省略该开关才会创建干净、锁定依赖的 Python 环境并构建 Web。
 Node.js 仅用于开发机上的前端构建。安装包包含 Python、PostgreSQL、Meilisearch、Restic、
-运行必需源码、迁移和构建后的 Web dist，包含 `python -m apps.mcp_server` 所需模块。
+运行必需源码与迁移；构建后的 React dist 由 Tauri 嵌入可执行文件，不再复制独立网站目录。包含 `python -m apps.mcp_server` 所需模块。
 
 复用已有 PostgreSQL 目录时，使用目录树哈希并将 `-PostgresZip` 换成 `-VerifiedPostgresDirectory`：
 
@@ -56,3 +56,11 @@ $postgresTreeHash = & .\.venv\Scripts\python.exe `
 离线安装可增加 `-WebView2OfflineInstaller <微软离线exe>` 和 `-WebView2Sha256 <已核验sha>`，
 并在 Tauri 构建时传入 `--config tauri.offline.conf.json`。该配置跳过联网 bootstrap；
 没有 WebView2 的机器需要先运行随包提供的微软离线 installer，再安装应用。
+
+## 源码开发与打包边界
+
+日常源码构建/运行只用根 `scripts/desktop.ps1`，详见 [开发指南](../../docs/DEVELOPMENT.md)。
+这里的组装脚本只生成静态页面和便携运行时，不启动独立网站、Compose、WSL 或开发服务器。
+应用源码使用显式 native entrypoint/包白名单；退役 Web host 与无调用 graph 包不进入发行副本。
+更新原生入口时必须同步白名单与 `verify-bundled-entrypoints.py` 的导入验证，不能靠宽泛复制
+所有 `apps/*.py` 隐藏缺漏。组装或 import 检查不等于真实原生 UI 或干净机安装验收。

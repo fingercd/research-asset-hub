@@ -21,8 +21,16 @@ class FixtureManager:
         self.paths = paths
         return SimpleNamespace(snapshot_id="fixture", files_new=3, bytes_added=20)
 
-    def check(self) -> dict[str, str]:
-        return {"status": "verified"}
+    def verify_snapshot(self, snapshot_id: str) -> dict[str, str]:
+        assert snapshot_id == "fixture"
+        return {
+            "status": "verified",
+            "snapshot_id": snapshot_id,
+            "repository_check": "verified",
+            "verification_scope": "snapshot-storage-integrity",
+            "data_read": "all-repository-data",
+            "restore_rehearsal": "not_run",
+        }
 
     def apply_retention(self) -> None:
         pytest.fail("Backups must not delete historical snapshots")
@@ -57,6 +65,8 @@ def test_managed_backup_is_self_contained_writable_and_preserves_history(tmp_pat
     assert not (project / "work").exists()
     assert result["retention_applied"] is False
     assert result["excluded_external_originals"] is True
+    assert result["snapshot_verification"]["snapshot_id"] == result["snapshot_id"]
+    assert result["snapshot_verification"]["restore_rehearsal"] == "not_run"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert payload["schema"] == "research-asset-hub.backup/v3"
     assert "library/paper.pdf" in payload["files"]
@@ -83,6 +93,29 @@ def test_explicit_registered_external_inputs_are_copied_with_nested_roots_dedupl
     assert payload["excluded_external_originals"] is False
     assert (manifest.parent / "external/source_root/original.pdf").read_bytes() == b"original"
     assert paper.read_bytes() == b"original"
+
+
+def test_creation_requires_a_real_snapshot_before_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        FixtureManager,
+        "backup",
+        lambda *args, **kwargs: SimpleNamespace(snapshot_id=None, files_new=0, bytes_added=0),
+    )
+    monkeypatch.setattr(
+        FixtureManager, "verify_snapshot", lambda *_: pytest.fail("snapshot was absent")
+    )
+    with pytest.raises(RuntimeError, match="without a snapshot ID"):
+        fixture_backup(tmp_path, monkeypatch)
+
+
+def test_creation_does_not_report_verified_when_snapshot_verification_fails(tmp_path, monkeypatch):
+    def fail_verification(self, snapshot_id):
+        assert snapshot_id == "fixture"
+        raise RuntimeError("snapshot data is corrupt")
+
+    monkeypatch.setattr(FixtureManager, "verify_snapshot", fail_verification)
+    with pytest.raises(RuntimeError, match="snapshot data is corrupt"):
+        fixture_backup(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("unsafe", ["../outside", "/outside", "C:/outside", "config/../../outside"])

@@ -168,7 +168,9 @@ mod tests {
 
     #[test]
     fn data_paths_nest_under_root() {
-        let root = data_root();
+        let _guard = crate::test_env::EnvironmentGuard::isolated();
+        let root = std::env::temp_dir().join("hub-data-paths-test");
+        std::env::set_var("HUB_DATA_DIR", &root);
         let paths = data_paths();
         assert!(paths.postgres.starts_with(&root));
         assert!(paths.updates.starts_with(&root));

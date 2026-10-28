@@ -1,4 +1,4 @@
-//! 便携运行时路径解析:生产从安装目录 runtime/ 取可执行文件,开发回退到项目 .venv。
+//! 显式运行时选择：生产仅随包运行时，开发必须指定源码、运行时及隔离数据目录。
 
 use std::path::{Path, PathBuf};
 
@@ -48,35 +48,102 @@ pub fn resolve(root: &Path) -> RuntimePaths {
     // Launch the real path so Windows and Python reuse the same executable and
     // module cache paths instead of treating each update as another runtime.
     let runtime = plain(&std::fs::canonicalize(&runtime).unwrap_or(runtime));
-    // A local installation can explicitly reuse an already prepared interpreter.
-    // Without a valid hint, the distributable still uses its bundled runtime.
-    let bundled_python = runtime.join("python").join("python.exe");
-    let python = std::fs::read_to_string(root.join("app/config/python-executable.txt"))
-        .ok()
-        .map(|value| plain(Path::new(value.trim().trim_start_matches('\u{feff}'))))
-        .filter(|path| path.is_file())
-        .unwrap_or(bundled_python);
     RuntimePaths {
-        python,
+        python: runtime.join("python/python.exe"),
         python_workdir: root.join("app"),
         postgres_bin: runtime.join("postgres").join("bin"),
         meilisearch: runtime.join("meilisearch.exe"),
     }
 }
 
-/// 开发回退:便携 runtime 尚未组装(root/runtime 不存在)时使用。
-/// python 用项目根 .venv;postgres/meili 由 docker compose 容器提供(见 orchestrator 的
-/// uses_containers 分支),此处指向不存在的假路径防止误用。
-pub fn resolve_dev(root: &Path) -> RuntimePaths {
-    let root = plain(root);
+#[derive(Debug, PartialEq, Eq)]
+pub struct DevelopmentProfile {
+    pub source_root: PathBuf,
+    pub runtime_root: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+/// No environment guessing: development is an explicit launch mode.
+pub fn development_profile(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Option<DevelopmentProfile>, String> {
+    let mut args = args.into_iter();
+    let mut source = None;
+    let mut runtime = None;
+    let mut data = None;
+    while let Some(arg) = args.next() {
+        let selected = if arg == "--dev-source-root" {
+            &mut source
+        } else if arg == "--dev-runtime-root" {
+            &mut runtime
+        } else if arg == "--data-dir" {
+            &mut data
+        } else {
+            continue;
+        };
+        if selected.is_some() {
+            return Err(format!(
+                "{} can only be specified once",
+                arg.to_string_lossy()
+            ));
+        }
+        let path = PathBuf::from(
+            args.next()
+                .ok_or_else(|| format!("{} requires a path", arg.to_string_lossy()))?,
+        );
+        if !path.is_absolute() {
+            return Err(format!(
+                "{} requires an absolute path",
+                arg.to_string_lossy()
+            ));
+        }
+        *selected = Some(plain(&path));
+    }
+    match (source, runtime, data) {
+        (None, None, _) => Ok(None),
+        (Some(source_root), Some(runtime_root), Some(data_dir)) => Ok(Some(DevelopmentProfile {
+            source_root,
+            runtime_root,
+            data_dir,
+        })),
+        _ => Err(
+            "Development requires --dev-source-root, --dev-runtime-root and --data-dir together"
+                .into(),
+        ),
+    }
+}
+
+pub fn resolve_dev(profile: &DevelopmentProfile) -> RuntimePaths {
     RuntimePaths {
-        python: root.join(".venv").join("Scripts").join("python.exe"),
-        python_workdir: root.to_path_buf(),
-        postgres_bin: root
-            .join("runtime-unavailable")
-            .join("postgres")
-            .join("bin"),
-        meilisearch: root.join("runtime-unavailable").join("meilisearch.exe"),
+        python: profile.source_root.join(".venv/Scripts/python.exe"),
+        python_workdir: profile.source_root.clone(),
+        postgres_bin: profile.runtime_root.join("postgres/bin"),
+        meilisearch: profile.runtime_root.join("meilisearch.exe"),
+    }
+}
+
+impl RuntimePaths {
+    /// Validate before any child process or database directory is created.
+    pub fn validate(&self) -> Result<(), String> {
+        for path in [
+            self.python.clone(),
+            self.meilisearch.clone(),
+            self.postgres_bin.join("initdb.exe"),
+            self.postgres_bin.join("pg_ctl.exe"),
+            self.postgres_bin.join("pg_isready.exe"),
+            self.postgres_bin.join("psql.exe"),
+            self.python_workdir.join("apps/desktop_services.py"),
+            self.python_workdir.join("apps/worker_start.py"),
+            self.python_workdir.join("migrations/alembic.ini"),
+        ] {
+            if !path.is_file() {
+                return Err(format!(
+                    "运行时文件缺失：{}。请修复安装或明确指定开发 profile；不会启动备用后端。",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -99,22 +166,41 @@ mod tests {
         dir
     }
 
+    // Runtime executables use the real directory (junctions, short paths and
+    // lexical aliases may differ); app sources retain the supplied root.
+    fn canonical_runtime(root: &Path) -> PathBuf {
+        plain(&std::fs::canonicalize(root.join("runtime")).unwrap())
+    }
+
     #[test]
     fn resolve_points_at_installed_runtime() {
         let root = tmp_root();
         let paths = resolve(&root);
-        assert_eq!(
-            paths.postgres_bin,
-            root.join("runtime").join("postgres").join("bin")
+        let runtime = canonical_runtime(&root);
+        assert_eq!(paths.postgres_bin, runtime.join("postgres/bin"));
+        assert_eq!(paths.python, runtime.join("python/python.exe"));
+        assert_eq!(paths.meilisearch, runtime.join("meilisearch.exe"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_canonicalizes_runtime_alias_but_preserves_app_source_root() {
+        let root = tmp_root();
+        let entry = root.join("path-alias");
+        std::fs::create_dir_all(&entry).unwrap();
+        let alias = entry.join("..");
+        let runtime = canonical_runtime(&root);
+        assert_ne!(
+            alias.join("runtime"),
+            runtime,
+            "fixture must exercise a lexical alias"
         );
-        assert_eq!(
-            paths.python,
-            root.join("runtime").join("python").join("python.exe")
-        );
-        assert_eq!(
-            paths.meilisearch,
-            root.join("runtime").join("meilisearch.exe")
-        );
+
+        let paths = resolve(&alias);
+        assert_eq!(paths.postgres_bin, runtime.join("postgres/bin"));
+        assert_eq!(paths.python, runtime.join("python/python.exe"));
+        assert_eq!(paths.meilisearch, runtime.join("meilisearch.exe"));
+        assert_eq!(paths.python_workdir, plain(&alias).join("app"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -127,37 +213,82 @@ mod tests {
     }
 
     #[test]
-    fn python_hint_selects_prepared_environment_and_missing_path_uses_bundle() {
+    fn installed_runtime_ignores_legacy_python_hint_and_fails_when_incomplete() {
         let root = tmp_root();
-        let config = root.join("app/config");
-        let prepared = root.join("prepared/python.exe");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::create_dir_all(prepared.parent().unwrap()).unwrap();
-        std::fs::write(&prepared, "").unwrap();
-        let hint = config.join("python-executable.txt");
-        std::fs::write(&hint, format!("\u{feff}{}\n", prepared.display())).unwrap();
-        assert_eq!(resolve(&root).python, prepared);
-        std::fs::write(&hint, root.join("missing.exe").to_string_lossy().as_bytes()).unwrap();
+        std::fs::create_dir_all(root.join("app/config")).unwrap();
+        std::fs::write(
+            root.join("app/config/python-executable.txt"),
+            "C:/other/python.exe",
+        )
+        .unwrap();
+        let paths = resolve(&root);
         assert_eq!(
-            resolve(&root).python,
-            root.join("runtime/python/python.exe")
+            paths.python,
+            canonical_runtime(&root).join("python/python.exe")
         );
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(paths.validate().is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn resolve_dev_uses_project_venv_and_unavailable_binaries() {
+    fn complete_installed_runtime_validates_without_source_fallback() {
         let root = tmp_root();
-        let paths = resolve_dev(&root);
-        assert_eq!(
-            paths.python,
-            root.join(".venv").join("Scripts").join("python.exe")
-        );
-        assert_eq!(paths.python_workdir, root);
-        // 便携二进制指向不存在的假路径,容器模式不会使用
-        assert!(!paths.postgres_bin.exists());
-        assert!(!paths.meilisearch.exists());
-        let _ = std::fs::remove_dir_all(&root);
+        for name in ["pg_ctl.exe", "pg_isready.exe", "psql.exe"] {
+            std::fs::write(root.join("runtime/postgres/bin").join(name), "").unwrap();
+        }
+        for name in [
+            "apps/desktop_services.py",
+            "apps/worker_start.py",
+            "migrations/alembic.ini",
+        ] {
+            let file = root.join("app").join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        assert!(resolve(&root).validate().is_ok());
+        std::fs::remove_file(root.join("runtime/python/python.exe")).unwrap();
+        assert!(resolve(&root)
+            .validate()
+            .unwrap_err()
+            .contains("python.exe"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn development_requires_explicit_absolute_roots_and_data_directory() {
+        let root = tmp_root();
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(development_profile(args(&["--background"])), Ok(None));
+        assert!(development_profile(args(&["--dev-source-root", "relative"])).is_err());
+        let source = root.to_str().unwrap();
+        assert!(development_profile(args(&["--dev-source-root", source])).is_err());
+        assert!(development_profile(args(&[
+            "--dev-source-root",
+            source,
+            "--dev-runtime-root",
+            source
+        ]))
+        .is_err());
+        let profile = development_profile(args(&[
+            "--dev-source-root",
+            source,
+            "--dev-runtime-root",
+            source,
+            "--data-dir",
+            source,
+        ]))
+        .unwrap()
+        .unwrap();
+        let paths = resolve_dev(&profile);
+        assert_eq!(paths.python, root.join(".venv/Scripts/python.exe"));
+        assert_eq!(paths.postgres_bin, root.join("postgres/bin"));
+        assert_eq!(paths.meilisearch, root.join("meilisearch.exe"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]
@@ -198,7 +329,7 @@ mod tests {
         let paths = resolve(&root);
         assert_eq!(
             paths.postgres_bin,
-            plain(&root).join("runtime").join("postgres").join("bin")
+            canonical_runtime(&root).join("postgres/bin")
         );
         assert!(!paths.postgres_bin.to_string_lossy().contains(r"\\?\"));
         assert!(!paths.postgres_bin.to_string_lossy().contains("//?/"));

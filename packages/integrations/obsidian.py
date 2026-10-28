@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ class ObsidianAssetDocument:
     fields: dict[str, Any]
     note_body: str
     path: Path | None = None
+    content_digest: str = ""
 
 
 class ObsidianVaultAdapter:
@@ -147,18 +149,43 @@ class ObsidianVaultAdapter:
         if not asset_id:
             raise ValueError(f"Missing rah_asset_id: {resolved}")
         revision = int(properties.pop("rah_revision", 0))
-        export_digest = str(properties.pop("rah_export_digest", ""))
+        properties.pop("rah_export_digest", None)
         properties.pop("cssclasses", None)
         user_match = _USER_BLOCK.search(text)
         note_body = user_match.group("body").rstrip() if user_match else ""
         return ObsidianAssetDocument(
             asset_id=asset_id,
             hub_revision=revision,
-            export_digest=export_digest,
+            export_digest=_digest(_jsonable(properties), note_body),
             fields=_jsonable(properties),
             note_body=note_body,
             path=resolved,
+            content_digest=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
+
+    def update_fields(
+        self,
+        document: ObsidianAssetDocument,
+        *,
+        fields: dict[str, Any],
+        hub_revision: int,
+        on_write: Callable[[Path, str | None, str], None] | None = None,
+    ) -> Path:
+        """Update frontmatter while retaining the current Markdown body verbatim."""
+        assert document.path is not None
+        text = document.path.read_text(encoding="utf-8-sig")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != document.content_digest:
+            raise ObsidianContentChanged("Obsidian note changed during sync.")
+        match = _FRONTMATTER.match(text)
+        assert match is not None
+        properties = yaml.safe_load(match.group("yaml"))
+        properties.update(fields)
+        properties["rah_revision"] = hub_revision
+        properties["rah_export_digest"] = _digest(fields, document.note_body)
+        frontmatter = yaml.safe_dump(properties, allow_unicode=True, sort_keys=False).strip()
+        content = f"---\n{frontmatter}\n---\n" + text[match.end() :]
+        self._write_content(document.path, content, document.content_digest, on_write)
+        return document.path
 
     def write(
         self,
@@ -168,6 +195,8 @@ class ObsidianVaultAdapter:
         fields: dict[str, Any],
         note_body: str = "",
         existing_path: Path | None = None,
+        expected_content_digest: str | None = None,
+        on_write: Callable[[Path, str | None, str], None] | None = None,
     ) -> Path:
         self.assets_directory.mkdir(parents=True, exist_ok=True)
         target = existing_path or self.assets_directory / _safe_filename(
@@ -183,6 +212,16 @@ class ObsidianVaultAdapter:
             fields=fields,
             note_body=note_body,
         )
+        self._write_content(resolved, content, expected_content_digest, on_write)
+        return resolved
+
+    def _write_content(
+        self,
+        resolved: Path,
+        content: str,
+        expected_content_digest: str | None,
+        on_write: Callable[[Path, str | None, str], None] | None = None,
+    ) -> None:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{resolved.stem}-",
             suffix=".tmp",
@@ -192,10 +231,17 @@ class ObsidianVaultAdapter:
         temporary = Path(temporary_name)
         try:
             temporary.write_text(content, encoding="utf-8", newline="\n")
+            original = resolved.read_text(encoding="utf-8-sig") if resolved.exists() else None
+            if expected_content_digest is not None:
+                if original is None:
+                    raise ObsidianContentChanged("Obsidian note was removed during sync.")
+                if hashlib.sha256(original.encode("utf-8")).hexdigest() != expected_content_digest:
+                    raise ObsidianContentChanged("Obsidian note changed during sync.")
             temporary.replace(resolved)
+            if on_write is not None:
+                on_write(resolved, original, hashlib.sha256(content.encode("utf-8")).hexdigest())
         finally:
             temporary.unlink(missing_ok=True)
-        return resolved
 
     def scan(self) -> list[ObsidianAssetDocument]:
         if not self.assets_directory.exists():
@@ -204,3 +250,7 @@ class ObsidianVaultAdapter:
         for path in sorted(self.assets_directory.glob("*.md")):
             documents.append(self.parse(path))
         return documents
+
+
+class ObsidianContentChanged(ValueError):
+    """The external document no longer matches the content being applied."""

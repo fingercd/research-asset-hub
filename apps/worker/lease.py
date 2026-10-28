@@ -20,6 +20,66 @@ class ClaimedJob:
     attempt_number: int
 
 
+def _finish_expired_work(
+    session: Session,
+    job: Job,
+    *,
+    current: datetime,
+    cancelled: bool,
+) -> None:
+    error = {
+        "type": "WorkerLeaseExpired",
+        "detail": (
+            "Cancellation completed after the owning worker lease expired."
+            if cancelled
+            else "The owning worker stopped before extraction completed."
+        ),
+    }
+    attempts = session.scalars(
+        select(JobAttempt)
+        .where(
+            JobAttempt.job_id == job.id,
+            JobAttempt.status == AttemptStatus.RUNNING.value,
+        )
+        .with_for_update()
+    ).all()
+    for attempt in attempts:
+        attempt.status = (
+            AttemptStatus.CANCELLED.value if cancelled else AttemptStatus.ABANDONED.value
+        )
+        attempt.finished_at = current
+        attempt.error = error
+    activities = session.scalars(
+        select(Activity)
+        .where(Activity.job_id == job.id, Activity.status == ActivityStatus.RUNNING.value)
+        .with_for_update()
+    ).all()
+    for activity in activities:
+        activity.status = ActivityStatus.FAILED.value
+        activity.finished_at = current
+        activity.result = {**dict(activity.result or {}), "error": error}
+
+
+def _recover_expired_cancellations(session: Session, *, current: datetime) -> None:
+    jobs = session.scalars(
+        select(Job)
+        .where(
+            Job.status == JobStatus.RUNNING.value,
+            Job.cancel_requested.is_(True),
+            Job.lease_until.is_not(None),
+            Job.lease_until < current,
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    for job in jobs:
+        _finish_expired_work(session, job, current=current, cancelled=True)
+        job.status = JobStatus.CANCELLED.value
+        job.finished_at = current
+        job.heartbeat_at = current
+        job.lease_owner = None
+        job.lease_until = None
+
+
 def claim_next_job(
     session: Session,
     *,
@@ -28,6 +88,7 @@ def claim_next_job(
     now: datetime | None = None,
 ) -> ClaimedJob | None:
     current = now or datetime.now(UTC)
+    _recover_expired_cancellations(session, current=current)
     eligible = or_(
         and_(
             Job.status == JobStatus.PENDING.value,
@@ -50,37 +111,7 @@ def claim_next_job(
     if job is None:
         return None
     if job.status == JobStatus.RUNNING.value:
-        stale_attempt = session.scalar(
-            select(JobAttempt)
-            .where(
-                JobAttempt.job_id == job.id,
-                JobAttempt.status == AttemptStatus.RUNNING.value,
-            )
-            .order_by(JobAttempt.attempt_number.desc())
-            .with_for_update()
-        )
-        if stale_attempt is not None:
-            stale_attempt.status = AttemptStatus.ABANDONED.value
-            stale_attempt.finished_at = current
-            stale_attempt.error = {"detail": "Worker lease expired before completion."}
-        stale_activities = session.scalars(
-            select(Activity)
-            .where(
-                Activity.job_id == job.id,
-                Activity.status == ActivityStatus.RUNNING.value,
-            )
-            .with_for_update()
-        ).all()
-        for activity in stale_activities:
-            activity.status = ActivityStatus.FAILED.value
-            activity.finished_at = current
-            activity.result = {
-                **dict(activity.result or {}),
-                "error": {
-                    "type": "WorkerLeaseExpired",
-                    "detail": "The owning worker stopped before extraction completed.",
-                },
-            }
+        _finish_expired_work(session, job, current=current, cancelled=False)
     job.attempts += 1
     job.status = JobStatus.RUNNING.value
     job.started_at = job.started_at or current
@@ -122,9 +153,10 @@ def renew_lease(
         or attempt is None
         or job.status != JobStatus.RUNNING.value
         or job.lease_owner != worker_id
-        or job.cancel_requested
     ):
         return False
+    # Cancellation is finalized by finish/fail. Keep the running handler's lease
+    # valid until it returns so recovery cannot cancel work still owned by it.
     job.heartbeat_at = current
     job.lease_until = current + timedelta(seconds=lease_seconds)
     attempt.heartbeat_at = current

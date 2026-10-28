@@ -98,26 +98,33 @@ def test_signed_gateway_session_range_head_and_host_security(
     assert "default-src" in served.headers["content-security-policy"]
     assert "script-src 'none'" in served.headers["content-security-policy"]
     assert served.headers["x-research-hub-html-policy"] == "static"
-    for origin in [settings.web_origin, *settings.desktop_origins]:
+    assert "8765" not in served.headers["content-security-policy"]
+    retired = client.options(
+        session_response.headers["location"],
+        headers={"Origin": "http://127.0.0.1:8765", "Access-Control-Request-Method": "GET"},
+    )
+    assert retired.status_code == 400
+    assert "access-control-allow-origin" not in retired.headers
+    for origin in settings.desktop_origins:
         assert origin in served.headers["content-security-policy"]
 
     cors = client.get(
         session_response.headers["location"],
-        headers={"Origin": settings.web_origin},
+        headers={"Origin": settings.desktop_origins[0]},
     )
-    assert cors.headers["access-control-allow-origin"] == settings.web_origin
+    assert cors.headers["access-control-allow-origin"] == settings.desktop_origins[0]
     assert cors.headers["access-control-allow-credentials"] == "true"
 
     preflight = client.options(
         session_response.headers["location"],
         headers={
-            "Origin": settings.web_origin,
+            "Origin": settings.desktop_origins[0],
             "Access-Control-Request-Method": "GET",
             "Access-Control-Request-Headers": "Range",
         },
     )
     assert preflight.status_code == 200
-    assert preflight.headers["access-control-allow-origin"] == settings.web_origin
+    assert preflight.headers["access-control-allow-origin"] == settings.desktop_origins[0]
 
     desktop_origin = settings.desktop_origins[0]
     desktop_preflight = client.options(

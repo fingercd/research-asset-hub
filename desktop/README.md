@@ -1,20 +1,26 @@
 # 研究资产库·桌面版
 
-Tauri 2 桌面版使用内置页面和随包运行时，生产环境不依赖 8765 本地网站。默认数据目录为 `Documents\ResearchAssetHub\`，可在设置中选择空目录或已有兼容库；切换后原库保留。显式 `HUB_DATA_DIR` 或 `--data-dir <绝对路径>` 固定目录时，界面显示该限制。
+Tauri 2 桌面版在原生窗口中使用内嵌界面和随包运行时。默认数据目录为 `Documents\ResearchAssetHub\`，可在设置中选择空目录或已有兼容库；切换后原库保留。显式 `HUB_DATA_DIR` 或 `--data-dir <绝对路径>` 固定目录时，界面显示该限制。
 
-当前为 0.2.0-rc.1 本机候选包。实现、测试、性能和安装验收范围见[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)，公开 Release 尚未发布。独立干净 Windows 安装、升级与卸载验收不能用本机原生运行测试替代。
+当前源码版本为 **0.3.0-rc.1**，本机更新与原生实测见[桌面改革报告](../docs/reports/2026-10-28-desktop-product-reform.md)。此前[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)记录的是 0.2.0-rc.1 候选包范围，不是后续版本安装通过的证明。公开 Release 尚未发布，独立干净 Windows 安装、升级与卸载验收不能用本机运行替代。
 
 ## 开发
 
 前置：Node.js 24、根目录 `package.json` 固定的 pnpm、Rust 工具链和 Tauri 2 CLI。构建器使用的 CLI 版本需要与固定的 NSIS 模板匹配，当前模板来自 2.11.4。
 
 ```powershell
-corepack enable                                  # 一次性:启用 pnpm(或直接 npm i -g pnpm)
-pnpm --filter @research-asset-hub/web dev        # 终端 A:Vite 8765
-cd desktop/src-tauri && cargo tauri dev          # 终端 B:壳(连 Vite)
+.\scripts\bootstrap.ps1
+.\scripts\desktop.ps1 build
+.\scripts\desktop.ps1 plan -RuntimeRoot <便携runtime绝对目录> -DataDir <隔离资料绝对目录>
+# 检查 plan 后，才使用相同参数运行；run 会先构建并启动原生桌面。
+.\scripts\desktop.ps1 run -RuntimeRoot <便携runtime绝对目录> -DataDir <隔离资料绝对目录>
 ```
 
-开发模式壳使用容器基础设施(docker compose)与项目 .venv;生产模式使用便携运行时。
+唯一开发路径是静态 React 构建与启用 `custom-protocol` 的 debug 壳，不运行 Vite
+网站、Tauri dev server、Compose 或 WSL。脚本显式传入源码根、便携运行时根和资料根；
+开发 Python 固定取源码 `.venv/Scripts/python.exe`，数据库/搜索取指定 runtime。
+不猜已安装目录，也不在启动时强杀端口占用者。单实例存在时正常关闭原生程序再测试。
+详情及测试边界见 [隔离开发指南](../docs/DEVELOPMENT.md)。
 
 ## 日常启动
 
@@ -32,9 +38,9 @@ Python 入口直接通过 Windows 原生 API 预填系统版本缓存，省去 C
 间接执行 `cmd /c ver` 时触发本机 CMD AutoRun/Conda 的额外工作。
 本机快速版放在可写目录，Python 可以生成并复用与源码时间戳一致的字节码缓存；
 源文件改变后仍会自动失效重建。不要直接复用安装包中时间戳不匹配的缓存来评估性能。
-`app/config/python-executable.txt` 可显式指定本机已有的 Python 解释器；本机快速版
-复用项目 `.venv/Scripts/pythonw.exe`，与打包依赖版本一致，并避免控制台窗口。未配置或路径已失效时使用
-自带解释器；这个提示文件只写在本机安装目录，不写入来源配置或可分发安装包。
+生产模式仅使用随包 `runtime/python/python.exe`，不再读取本机解释器提示文件。
+源码开发模式由显式开发参数选择 checkout 的 `.venv/Scripts/python.exe`；这个选择不
+进入可分发安装包，也不改变用户资料配置。
 各阶段耗时记录在数据目录的 `logs/startup-timing.log`，HTTP 服务共用 `logs/api.log`。
 `logs/desktop-timing.log` 从进程入口记录窗口创建、服务就绪和前端页面加载，避免漏算
 桌面壳初始化时间。
@@ -65,9 +71,8 @@ cargo tauri build --bundles nsis
 # 产物: target/release/bundle/nsis/ResearchAssetHub_<version>_x64-setup.exe
 ```
 
-仅更新本机可执行文件时使用 `cargo build --release --features custom-protocol`。
-直接 `cargo build --release` 不会启用 Tauri 的生产资源协议，会仍然访问开发服务器，
-不能把这种构建用于桌面交付或启动性能验收。
+仅构建原生可执行文件时也必须启用 `--features custom-protocol`，并先构建静态资源。
+不带该 feature 的直接 Cargo 构建不属于支持的开发或交付路径。
 
 发行使用新的暂存目录，不直接打包实际验收运行过的目录。Python 执行会留下字节码缓存，增量复制前端也可能留下旧资源；应从当前白名单源码和完整 `dist` 重新组装。保全旧暂存和构建资源后，打包前核对源码哈希，打包后核对生成的 NSIS 文件清单。Tauri 的配置覆盖会合并资源映射，替换暂存路径时也须确认旧映射已移除。
 
@@ -79,8 +84,8 @@ PostgreSQL 发行副本加入每进程 UTF-8 manifest，输入二进制保持不
 
 - [ ] 干净机(无 Docker/Python/Node)安装成功,桌面/开始菜单有图标
 - [ ] 双击 → 加载页显示「预检环境→启动数据库→启动搜索引擎→数据迁移→启动应用服务」→ 自动进入主界面
-- [ ] 全程无浏览器窗口;`http://127.0.0.1:8765` 访问失败
-- [ ] 点 X → 窗口消失;托盘单击/「打开主界面」秒开(后台保持)
+- [ ] 全程无浏览器窗口、Vite dev/preview 或独立网站监听；原生页面来自静态自定义协议
+- [ ] 点 X → 窗口立即消失，后台服务完成清理后退出；再次双击可正常启动
 - [ ] 加载页进行中(启动未完成)点托盘「退出」→ 进程数秒内退出、无残留
 - [ ] 托盘「退出」→ `tasklist` 无 python/meilisearch/postgres 残留
 - [ ] 断网可用;搜索/论文/代码/图谱/备份全功能冒烟

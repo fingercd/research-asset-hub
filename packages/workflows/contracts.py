@@ -89,6 +89,8 @@ class SearchDefinition(WorkflowContract):
     domain: str | None = None
     status: Literal["unread", "reading", "read", ""] | None = None
     author: str | None = None
+    venue: str | None = Field(default=None, min_length=1, max_length=200)
+    year: int | None = Field(default=None, ge=1450, le=2200)
     type: str | None = None
     year_from: int | None = Field(default=None, ge=1450, le=2200)
     year_to: int | None = Field(default=None, ge=1450, le=2200)
@@ -101,6 +103,15 @@ class SearchDefinition(WorkflowContract):
     has_guide: bool | None = None
     has_annotation: bool | None = None
     collection_id: UUID | None = None
+
+    @field_validator("venue")
+    @classmethod
+    def clean_venue(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip()
+            if not value:
+                raise ValueError("venue must not be blank")
+        return value
 
     @model_validator(mode="after")
     def ordered_ranges(self) -> Self:

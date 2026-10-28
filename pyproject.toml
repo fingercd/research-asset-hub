@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "research-asset-hub"
-version = "0.2.0rc4"
+version = "0.3.0rc1"
 license = "MIT"
 description = "Local-first research asset management hub"
 readme = "README.md"
@@ -65,7 +65,6 @@ quote-style = "double"
 python_version = "3.11"
 strict = true
 warn_unused_configs = true
-exclude = ["apps/web"]
 cache_dir = "work/cache/mypy"
 
 [tool.pytest.ini_options]

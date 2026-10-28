@@ -16,7 +16,7 @@ from apps.api import routes_v1 as _v1
 from apps.api.config import PROJECT_ROOT
 from apps.api.events import record_mutation
 from apps.api.pagination import decode_cursor
-from apps.api.problem import ApiProblem, not_found
+from apps.api.problem import ApiProblem, conflict, not_found
 from apps.api.routes_v1 import (
     PAGE_SIZE,
     _check_if_match,
@@ -26,7 +26,7 @@ from apps.api.routes_v1 import (
     _serialize_backup_run,
     router,
 )
-from packages.backup import BackupManager, create_platform_backup
+from packages.backup import BackupManager, create_platform_backup, default_backup_repository
 from packages.domain.enums import AuditAction, BackupStatus
 from packages.domain.models import BackupRun, Representation, Source
 from packages.domain.serving_scope import active_representation_clause
@@ -77,7 +77,7 @@ def create_backup(
         run = BackupRun(
             status=BackupStatus.RUNNING.value,
             backup_kind="full",
-            destination_label=str(Path.home() / "Documents" / "ResearchAssetHubBackups"),
+            destination_label=str(default_backup_repository()),
             local_copy_only=True,
             counters={"idempotency_key": idempotency_key},
             started_at=datetime.now(UTC),
@@ -217,16 +217,47 @@ def verify_backup(
     response: Response,
     if_match: str | None = Header(None, alias="If-Match"),
 ) -> dict[str, Any]:
-    check = BackupManager().check()
-    with _v1._database(request).session() as session:
-        run = session.get(BackupRun, backup_id, with_for_update=True)
+    database = _v1._database(request)
+    with database.session() as session:
+        run = session.get(BackupRun, backup_id)
         if run is None:
             raise not_found("Backup run", backup_id)
         _check_if_match(if_match, run.row_version)
+        counters = dict(run.counters or {})
+        snapshot_id = counters.get("snapshot_id")
+        if (
+            run.status not in {BackupStatus.SUCCEEDED.value, BackupStatus.VERIFIED.value}
+            or run.error
+            or not snapshot_id
+        ):
+            raise conflict("Only a successful backup with a recorded snapshot can be verified.")
+        repository = counters.get("repository") or run.destination_label
+        version = run.row_version
+
+    try:
+        verification = BackupManager(repository=Path(repository)).verify_snapshot(snapshot_id)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ApiProblem(
+            503,
+            "备份验证失败",
+            "The recorded snapshot could not be verified; the backup status is unchanged.",
+            problem_type="urn:research-asset-hub:problem:backup-verification-failed",
+        ) from error
+
+    with database.session() as session:
+        run = session.get(BackupRun, backup_id, with_for_update=True)
+        if run is None:
+            raise not_found("Backup run", backup_id)
+        _check_if_match(_etag(version), run.row_version)
         before = _serialize_backup_run(run)
         run.status = BackupStatus.VERIFIED.value
         run.verified_at = datetime.now(UTC)
-        run.counters = {**dict(run.counters or {}), "repository_check": check["status"]}
+        run.counters = {
+            **dict(run.counters or {}),
+            "snapshot_id": verification["snapshot_id"],
+            "repository_check": verification["repository_check"],
+            "snapshot_verification": verification,
+        }
         session.flush()
         result = _serialize_backup_run(run)
         record_mutation(
@@ -237,7 +268,7 @@ def verify_backup(
             before=before,
             after=result,
             request_id=_request_id(request),
-            event_type="backup.repository-verified",
+            event_type="backup.snapshot-verified",
         )
         response.headers["ETag"] = _etag(run.row_version)
         return result
