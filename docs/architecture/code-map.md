@@ -34,7 +34,7 @@
 ```text
 外部只读来源 + 新旁车 manifest ─→ adapters ─→ dry-run / formal import ─┐
                                                                   ├─→ PostgreSQL
-网页上传 PDF ─→ intake 草稿 / 预览 ─→ 托管文件 + 不可变来源清单 ───────┘
+界面上传 PDF ─→ intake 草稿 / 预览 ─→ 托管文件 + 不可变来源清单 ───────┘
                                                                       │
                                                        outbox / jobs  ↓
                                                 worker → 抽取与索引任务
@@ -48,23 +48,23 @@
 - **PostgreSQL 是操作主库**：资产、表示、来源证据、关系、个人状态、任务和审计均以它为准。
 - **Meilisearch 是可重建投影**：不替代原始证据与数据库。当前不生成 embedding、不启动 Qdrant；代码全文索引默认不参与查询。
 - **来源原件保持只读**：用户上传的新托管资料与原位引用是两条受控路径，不能据前者推断允许覆盖旧来源。
-- **元数据搜索不等于原文结论**：MCP 论文检索匹配标题、中文题名、摘要和必要标识；具体科研判断要读原文页码。网站搜索及其其他资产分组有自己的服务入口，不要假定所有搜索都走同一实现。
+- **元数据搜索不等于原文结论**：MCP 论文检索匹配标题、中文题名、摘要和必要标识；具体科研判断要读原文页码。桌面搜索及其其他资产分组有自己的服务入口，不要假定所有搜索都走同一实现。
 - **台账不等于覆盖率**：状态计数、抽取成功、索引 READY、文件真实存在和科学内容正确分别验证；健康接口不扫描全库来源文件。
 
 ## 3. 按任务找代码
 
 | 要做什么 | 首先阅读 | 职责与边界 |
 | --- | --- | --- |
-| 调整前端请求 | [桌面 API client](../../apps/web/src/api/client.ts) | 唯一桌面注入 API base，未初始化时明确报错；请求/超时/错误转换 |
+| 调整前端请求 | [桌面 API client](../../desktop/ui/src/api/client.ts) | 唯一桌面注入 API base，未初始化时明确报错；请求/超时/错误转换 |
 | 调整 API 组装或浏览器写保护 | [API main](../../apps/api/main.py) | 数据库管理器、CORS、Origin/CSRF、健康检查；不是公网多用户认证系统 |
 | 找业务端点 | [routes_v1](../../apps/api/routes_v1.py)、[routes 目录](../../apps/api/routes/) | 共享查询/序列化辅助与拆分路由并存，不能假定已经完全分层 |
 | 查配置优先级 | [ApiSettings](../../apps/api/config.py)、[CLI config](../../packages/cli/config.py)、[managed sources](../../packages/managed_sources/service.py) | 进程环境、保存的资料目录、用户配置与源码配置；维护脚本可能有独立默认值 |
 | 新增来源解析 | [adapters](../../packages/adapters/)、[CLI](../../packages/cli/main.py) | 产生标准化记录；不要按领域名在核心导入中散布特殊分支 |
 | 查正式导入/身份/冻结 | [formal.py](../../packages/ingestion/formal.py)、[dry_run.py](../../packages/ingestion/dry_run.py) | 冻结摘要、强/弱身份候选、幂等资产/表示/关系、outbox |
-| 查网页托管上传 | [intake routes](../../apps/api/routes/intake.py)、[intake service](../../packages/intake/service.py) | 草稿、预览、PDF 校验、托管副本和正式提交 |
+| 查界面托管上传 | [intake routes](../../apps/api/routes/intake.py)、[intake service](../../packages/intake/service.py) | 草稿、预览、PDF 校验、托管副本和正式提交 |
 | 查任务执行 | [worker main](../../apps/worker/main.py)、[handlers](../../apps/worker/handlers.py) | outbox、任务租约与心跳、抽取/索引/快照/导出分派；抽取器延迟初始化 |
 | 查正文抽取 | [extraction](../../packages/extraction/) | PDF/HTML/代码等内容抽取；OCR 与文件可用性仍需单独核实 |
-| 查索引投影 | [index builder](../../packages/indexing/builder.py)、[search runtime](../../apps/api/search_runtime.py) | 默认 assets/annotations 维护、精确范围刷新和网站检索运行时 |
+| 查索引投影 | [index builder](../../packages/indexing/builder.py)、[search runtime](../../apps/api/search_runtime.py) | 默认 assets/annotations 维护、精确范围刷新和桌面检索运行时 |
 | 查 Agent 证据查询 | [knowledge routes](../../apps/api/routes/knowledge.py)、[KnowledgeService](../../packages/knowledge/service.py)、[status](../../packages/knowledge/status.py) | 原文/analysis 区分、分页、领域/会议/年份筛选、页码及来源状态 |
 | 查安全打开/代码浏览 | [gateway](../../apps/asset_gateway/main.py)、[registry](../../apps/asset_gateway/registry.py)、[code browser](../../apps/api/code_browser.py) | 来源归属、路径限制、签名会话、CSP 和只读文件内容 |
 | 查领域总览 | [domain routes](../../apps/api/routes/domains.py)、[portal loader](../../packages/domain_portals/loader.py)、[portal schemas](../../packages/domain_portals/schemas.py) | 配置内容与动态数据库目录合成；无精选门户与坏配置分别处理 |
@@ -77,7 +77,7 @@
 ## 4. 验证入口
 
 - Python：[`tests/`](../../tests/)，MCP 窄范围：[`tests/mcp/`](../../tests/mcp/)。
-- 前端：[`apps/web/package.json`](../../apps/web/package.json) 的 typecheck/test/build；加载页与组件用 JSDOM；交付交互在真实原生窗口验证。
+- 前端：[`desktop/ui/package.json`](../../desktop/ui/package.json) 的 typecheck/test/build；加载页与组件用 JSDOM；交付交互在真实原生窗口验证。
 - 桌面：[`desktop/src-tauri`](../../desktop/src-tauri/) 的 Rust 测试，以及独立的原生安装/生命周期验收。
 - CI：[`checks.yml`](../../.github/workflows/checks.yml) 运行离线仓库检查、Python Ruff/pytest 与前端 typecheck/test/build；Markdown/docs 的 push 也会触发检查。它不替代原生安装、真实冷唤醒或恢复演练；仍应核实目标提交对应的实际运行结果。
 

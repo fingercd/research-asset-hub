@@ -48,7 +48,7 @@ DataDir 必须显式给绝对路径；目录可以不存在，由原生程序按
 如需空库配置，先在这个新目录的 `config/` 放入 `newconfig/release-defaults/` 的内容，
 否则源码模式按源码配置回退，可能读取现有来源；注册来源始终只读。
 
-等价构建核心是 `pnpm --filter @research-asset-hub/web build` 后
+等价构建核心是 `pnpm --filter @research-asset-hub/desktop-ui build` 后
 `cargo build --manifest-path desktop/src-tauri/Cargo.toml --features custom-protocol`。
 开发构建临时合并 `TAURI_CONFIG` 的 `bundle.resources=null`，不要求不存在的安装包
 stage/runtime；结束后恢复调用者的配置，生产组装配置不变。run 使用独立默认端口
@@ -89,13 +89,13 @@ Python 设置读取进程环境的 `HUB_*`，不会自动加载根 `.env`。源�
 ```powershell
 uv sync --frozen --extra dev
 pnpm install --frozen-lockfile
-.\.venv\Scripts\python.exe -m pytest tests/runtime/test_hub_script.py tests/runtime/test_cloud_template.py -q
+.\.venv\Scripts\python.exe -m pytest tests/runtime/test_hub_script.py tests/runtime/test_desktop_ui.py -q
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check apps packages tests scripts
 .\.venv\Scripts\python.exe -m mypy apps packages
-pnpm --filter @research-asset-hub/web typecheck
-pnpm --filter @research-asset-hub/web test
-pnpm --filter @research-asset-hub/web build
+pnpm --filter @research-asset-hub/desktop-ui typecheck
+pnpm --filter @research-asset-hub/desktop-ui test
+pnpm --filter @research-asset-hub/desktop-ui build
 cargo test --manifest-path desktop/src-tauri/Cargo.toml
 ```
 

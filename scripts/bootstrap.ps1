@@ -76,7 +76,7 @@ try {
         else {
             $corepackCommand = Get-Command corepack -ErrorAction SilentlyContinue
             if (-not $corepackCommand) {
-                throw "pnpm 11 or Corepack is required to install the web application."
+                throw "pnpm 11 or Corepack is required to install desktop UI dependencies."
             }
             Invoke-CheckedCommand -Command $corepackCommand.Source -Arguments @(
                 "pnpm",

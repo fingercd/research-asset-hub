@@ -110,7 +110,7 @@ def main() -> None:
     for directory in ("apps", "packages", "migrations"):
         for source in sorted((root / directory).rglob("*")):
             relative = source.relative_to(root)
-            if "__pycache__" in relative.parts or relative.parts[:2] == ("apps", "web"):
+            if "__pycache__" in relative.parts:
                 continue
             if relative.parts[:2] == ("apps", "mcp_server"):
                 continue
@@ -181,7 +181,7 @@ def main() -> None:
             "pywin32 (workspace-only MCP launcher)",
         ],
         "excluded_application_trees": [
-            "apps/web (embedded release frontend)",
+            "desktop/ui (embedded release frontend)",
             "apps/mcp_server (workspace-only bridge)",
         ],
         "excluded_dependency_record_paths": skipped_record_paths,

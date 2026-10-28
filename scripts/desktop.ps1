@@ -40,7 +40,7 @@ $isolatedEnvironment = @(
     'HUB_GATEWAY_SECRET', 'HUB_POSTGRES_PASSWORD', 'HUB_SOURCES_CONFIG_PATH',
     'HUB_TAXONOMY_CONFIG_PATH', 'HUB_DOMAIN_PORTAL_CONFIG_PATH',
     'HUB_WORKER_HEARTBEAT_PATH', 'HUB_HOST_WORKSPACE_ROOT', 'HUB_DATA_DIR',
-    'HUB_API_ORIGIN', 'HUB_GATEWAY_ORIGIN', 'HUB_WEB_ORIGIN', 'HUB_MCP_API_URL'
+    'HUB_API_ORIGIN', 'HUB_GATEWAY_ORIGIN', 'HUB_MCP_API_URL'
 )
 if ($Command -in @('run', 'plan')) {
     if (-not $RuntimeRoot -or -not $DataDir) { throw 'run/plan require explicit RuntimeRoot and DataDir.' }
@@ -61,7 +61,7 @@ if ($Command -in @('run', 'plan')) {
 $buildArguments = @('build', '--manifest-path', $manifest, '--features', 'custom-protocol')
 if ($Command -eq 'plan') {
     [ordered]@{
-        frontend = @('pnpm', '--filter', '@research-asset-hub/web', 'build')
+        frontend = @('pnpm', '--filter', '@research-asset-hub/desktop-ui', 'build')
         native = @('cargo') + $buildArguments
         executable = 'research-asset-hub-desktop.exe'
         arguments = $launchArguments
@@ -83,7 +83,7 @@ try {
     if (-not $tauriConfig.ContainsKey('bundle')) { $tauriConfig['bundle'] = @{} }
     $tauriConfig['bundle']['resources'] = $null
     $env:TAURI_CONFIG = ConvertTo-Json -InputObject $tauriConfig -Depth 20 -Compress
-    & pnpm --filter @research-asset-hub/web build
+    & pnpm --filter @research-asset-hub/desktop-ui build
     if ($LASTEXITCODE -ne 0) { throw 'Static frontend build failed.' }
     & cargo @buildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Native debug build failed.' }

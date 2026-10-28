@@ -1,5 +1,5 @@
 {
-  "name": "@research-asset-hub/web",
+  "name": "@research-asset-hub/desktop-ui",
   "private": true,
   "version": "0.3.0-rc.1",
   "type": "module",

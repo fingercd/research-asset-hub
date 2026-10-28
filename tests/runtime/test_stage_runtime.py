@@ -13,11 +13,11 @@ MAPPING_SCRIPT = PROJECT_ROOT / "desktop" / "scripts" / "validate-source-mapping
 
 def test_stage_runtime_builds_static_frontend_without_bundling_duplicate_website() -> None:
     script = STAGE_SCRIPT.read_text(encoding="utf-8")
-    assert "& pnpm --filter @research-asset-hub/web build" in script
-    assert "if ($LASTEXITCODE -ne 0) { throw 'Web build failed' }" in script
-    assert "Copy-Item -LiteralPath (Join-Path $projectRoot 'apps/web/dist')" not in script
+    assert "& pnpm --filter @research-asset-hub/desktop-ui build" in script
+    assert "if ($LASTEXITCODE -ne 0) { throw 'Desktop UI build failed' }" in script
+    assert "Copy-Item -LiteralPath (Join-Path $projectRoot 'desktop/ui/dist')" not in script
     config = (PROJECT_ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
-    assert '"frontendDist": "../../apps/web/dist"' in config
+    assert '"frontendDist": "../ui/dist"' in config
 
 
 def _write_sources(project_root: Path) -> None:

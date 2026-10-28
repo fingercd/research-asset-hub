@@ -72,8 +72,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'clean runtime venv creation failed' }
     & uv pip sync --require-hashes --python (Join-Path $runtimeVenv 'Scripts/python.exe') $requirements
     if ($LASTEXITCODE -ne 0) { throw 'locked runtime dependency sync failed' }
-    & pnpm --filter @research-asset-hub/web build
-    if ($LASTEXITCODE -ne 0) { throw 'Web build failed' }
+    & pnpm --filter @research-asset-hub/desktop-ui build
+    if ($LASTEXITCODE -ne 0) { throw 'Desktop UI build failed' }
 } finally { Pop-Location }
 $pythonHome = (Get-Content -LiteralPath (Join-Path $runtimeVenv 'pyvenv.cfg') -Encoding UTF8 |
     Where-Object { $_ -like 'home = *' } | Select-Object -First 1) -replace '^home = ', ''
@@ -87,7 +87,7 @@ $targetSite = Join-Path $targetPy 'Lib/site-packages'
 if (Test-Path -LiteralPath $targetSite) { Remove-Item -LiteralPath $targetSite -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $targetSite | Out-Null
 Copy-Item -Path (Join-Path $runtimeVenv 'Lib/site-packages/*') -Destination $targetSite -Recurse -Force
-# Code allowlist: Web sources/node_modules and user config/intake cannot enter public builds.
+# Code allowlist: UI sources/node_modules and user config/intake cannot enter public builds.
 function Copy-CodeTree([string]$Relative) {
     $source = [IO.Path]::GetFullPath((Join-Path $projectRoot $Relative))
     foreach ($file in Get-ChildItem -LiteralPath $source -Recurse -File) {

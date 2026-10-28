@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const require = createRequire(join(projectRoot, "apps", "web", "package.json"));
+const require = createRequire(join(projectRoot, "desktop", "ui", "package.json"));
 const { chromium } = require("@playwright/test");
 const axeModule = require("@axe-core/playwright");
 const AxeBuilder = axeModule.default ?? axeModule;

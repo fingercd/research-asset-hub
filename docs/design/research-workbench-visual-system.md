@@ -1,6 +1,6 @@
 # Research Asset Hub · 清晰桌面工作台视觉规范
 
-更新：2026-10-28，0.3.0-rc.1。以实际 [styles.css](../../apps/web/src/styles.css)、[目录样式](../../apps/web/src/styles/catalog-workspace.css)及[阅读样式](../../apps/web/src/styles/reading-workspace.css)为实现依据，不再沿用暖色展示页的大标题与装饰性渐变。
+更新：2026-10-28，0.3.0-rc.1。以实际 [styles.css](../../desktop/ui/src/styles.css)、[目录样式](../../desktop/ui/src/styles/catalog-workspace.css)及[阅读样式](../../desktop/ui/src/styles/reading-workspace.css)为实现依据，不再沿用暖色展示页的大标题与装饰性渐变。
 
 ## 方向
 

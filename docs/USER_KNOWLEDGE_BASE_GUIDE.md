@@ -30,7 +30,7 @@ Markdown/Notebook：<路径，没有则写无>
 DOI/arXiv：<知道就填，不知道可让 Agent 提取>
 与已有资料的关系：<知道就填，不知道可留空>
 
-完成 dry-run、备份、正式导入、幂等复跑、抽取、索引、来源完整性和网站打开验证；
+完成 dry-run、备份、正式导入、幂等复跑、抽取、索引、来源完整性和桌面界面打开验证；
 不要移动、重命名、覆盖或删除我的原文件。
 ```
 
@@ -69,7 +69,7 @@ example-paper-2026/
 3. 在 `config/sources.yaml` 新增 `read_only: true`、`adapter: generic_manifest` 的 source，并让 `asset_roots` 指向永久资料目录。
 4. 运行全来源检查和 dry-run，核对 PDF、HTML、代码路径及身份合并候选。
 5. 备份后执行两次 `ingest -All`；第二次不得新增任何记录、资产、表示、关系或字段声明。
-6. 完成抽取、HTML 审计、索引和网站打开验证。
+6. 完成抽取、HTML 审计、索引和桌面界面打开验证。
 
 ## 3. 先决定加入哪里
 
@@ -215,7 +215,7 @@ Invoke-RestMethod `
 然后把 `docs/templates/knowledge-source.example.yaml` 中 `sources` 下的单个条目复制到 `config/sources.yaml` 的 `sources` 列表，修改：
 
 - `id`：唯一来源名；
-- `label`：网站显示名；
+- `label`：桌面界面显示名；
 - `domain`：taxonomy 中的领域 ID；
 - `root`：`config/intake/<source-id>` 旁车目录；
 - `asset_roots`：原始资料所在的稳定绝对目录；
@@ -242,11 +242,11 @@ Invoke-RestMethod `
 
 ```powershell
 ./.venv/Scripts/python.exe -m pytest tests/contract/test_domain_portal_v2.py -q
-npm --prefix apps/web run typecheck
-npm --prefix apps/web run test
+pnpm --filter @research-asset-hub/desktop-ui typecheck
+pnpm --filter @research-asset-hub/desktop-ui test
 ```
 
-浏览器验收时确认默认页面没有 iframe；“原始 HTML”只是只读次级入口。
+在原生窗口验收时确认默认页面没有 iframe；“原始 HTML”只是只读次级入口。
 
 ## 6. 检查后再正式导入
 
@@ -306,7 +306,7 @@ cd "D:\ResearchLibrary\research-asset-hub"
 
 ## 8. 按需读正文并维护标题摘要搜索
 
-网站启动时 worker 会在后台运行。创建增量任务：
+原生桌面启动后，监督器会在后台运行 worker。创建增量任务：
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/seed_jobs.py
@@ -347,7 +347,7 @@ HTML 会按静态、可信本地交互或需要联网三种策略隔离打开。
 ./.venv/Scripts/python.exe scripts/verify_source_integrity.py
 ```
 
-然后在网站执行：
+然后在桌面界面执行：
 
 1. 用完整题名或 DOI/arXiv 搜索。
 2. 打开资产详情。
@@ -392,4 +392,4 @@ Zotero 包仍需你在 Zotero/Better BibTeX 界面中确认导入。
 | PDF/HTML 无法打开 | 检查表示 availability、网关健康和 HTML 审计报告 |
 | Zotero 没有新条目 | CLI 只生成导入包，还需要在 Zotero 界面确认 |
 
-如果你只想日常阅读、搜索和批注，不需要执行这些命令；直接使用网站即可。网站操作详见 [完整使用手册](USER_MANUAL.md)。
+如果你只想日常阅读、搜索和批注，不需要执行这些命令；直接使用桌面界面即可。桌面界面操作详见 [完整使用手册](USER_MANUAL.md)。

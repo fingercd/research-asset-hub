@@ -26,9 +26,9 @@
 .\.venv\Scripts\python.exe -m ruff check apps packages scripts tests
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m mypy apps packages
-pnpm --filter @research-asset-hub/web typecheck
-pnpm --filter @research-asset-hub/web test
-pnpm --filter @research-asset-hub/web build
+pnpm --filter @research-asset-hub/desktop-ui typecheck
+pnpm --filter @research-asset-hub/desktop-ui test
+pnpm --filter @research-asset-hub/desktop-ui build
 $previousTauriConfig = $env:TAURI_CONFIG
 try {
     $env:TAURI_CONFIG='{"bundle":{"resources":null}}'

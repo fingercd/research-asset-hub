@@ -1,13 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../api/client";
 import { LibraryLocationSettings } from "./LibraryLocationSettings";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const nativeInvoke = vi.mocked(invoke);
-const detectDesktop = vi.mocked(isTauri);
 const current = { path: "D:/HubData", locked_by_environment: false };
 function renderSettings() {
   return render(
@@ -34,7 +32,6 @@ async function chooseDirectory() {
   fireEvent.click(button);
 }
 beforeEach(() => {
-  detectDesktop.mockReturnValue(true);
   nativeInvoke.mockImplementation(async (command) =>
     command === "get_data_directory" ? current : undefined,
   );
@@ -42,7 +39,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   nativeInvoke.mockReset();
-  detectDesktop.mockReset();
 });
 
 describe("library location settings", () => {
@@ -174,25 +170,5 @@ describe("library location settings", () => {
       await screen.findByText("已提交切换，正在重启应用…"),
     ).toBeInTheDocument();
     expect(calls("switch_data_directory")).toHaveLength(2);
-  });
-  it("shows the configured path in a browser and never invokes native commands", async () => {
-    detectDesktop.mockReturnValue(false);
-    vi.spyOn(api, "mcpConfig").mockResolvedValue({
-      server_name: "research-assets",
-      config: { mcpServers: {} },
-      tools: [],
-      read_only: true,
-      data_dir: "E:/ServerLibrary",
-      bundled_runtime: false,
-      module_available: true,
-    });
-    renderSettings();
-    expect(await screen.findByText("E:/ServerLibrary")).toBeInTheDocument();
-    expect(
-      screen.getByText(/浏览器版的资料库目录由服务启动配置确定/),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "选择资料库目录" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "切换并重启" })).toBeNull();
-    expect(nativeInvoke).not.toHaveBeenCalled();
   });
 });

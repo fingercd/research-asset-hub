@@ -1,0 +1,17 @@
+Tool: built-in image generation
+Purpose: promotional photographic composite, not an unmodified application screenshot
+Reference: library-desktop.png
+Output: research-asset-hub-poster.png
+
+Prompt:
+Use case: ads-marketing / photographic compositing.
+Create ONE polished portrait software introduction poster for the user's own application, Research Asset Hub (研究资产库). Use the supplied image as the real software-interface reference and screen insert, not as a design to redesign.
+Style: restrained, premium editorial product photography. A clean unbranded desktop monitor on a simple light-grey desk, photographed at a slight realistic angle, showing the supplied application's interface. Soft natural daylight, realistic materials and reflections, sharp screen, white and cool-grey background with a small amount of muted teal matching the application. No people or decorative clutter. Strong clean layout and generous readable typography, suitable for sharing as a program introduction poster.
+Text: render these Chinese and English lines exactly, with no added copy:
+Main title: "研究资产库"
+Small English name: "Research Asset Hub"
+Subtitle: "找论文 · 读原文 · 看代码"
+Three concise feature labels with simple small icons: "搜索筛选" / "阅读批注" / "收藏整理"
+Bottom line: "把论文、原文和代码放在一起"
+The main title and subtitle must be crisp, prominent, correctly written simplified Chinese. The device is the central visual, with the title above and the three feature labels below. Keep the overall design clear and inviting, not a dense infographic or technical report.
+Preserve the interface's real structure, muted-teal/white colours, search fields and paper list on the screen; avoid inventing extra panels, charts or new functions. No web/browser/cloud wording, no database/ports/MCP/programming terminology, no downloads or QR codes, no fake badges, performance claims, user counts, certification or third-party hardware logos. Output a new standalone poster, not an altered source screenshot. Opaque background.

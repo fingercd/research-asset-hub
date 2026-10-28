@@ -35,7 +35,7 @@
 ## 桌面边界
 
 - 静态前端内嵌 Tauri；不再有独立 Web host、Vite devUrl、预览站点或云端 Web 模板。
-- `apps/web` 只是沿用的源码目录名。删除网站产品不等于删除 React 组件，也不等于取消 MCP 所需的 API。
+- `desktop/ui` 专用于 Tauri 内嵌静态界面，保留 React 渲染组件、PDF 阅读器和 MCP 所需的 API，不提供独立网站入口。
 - API 与安全网关保持不同端口与 Origin；来源签名、CSP、CSRF 不能为了“只剩一个端口”而取消。
 - 生产缺运行时应明确失败，不能猜源码或系统 Python。开发显式声明 source/runtime/data-dir，进入同一监督器。
 - 启动不得通过扫描模块名杀占用者，也不得仅凭一个端口接受连接就认领陌生数据库。

@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import type { DataDirectoryInfo, DataDirectorySelection } from "./types";
 
 async function invokeDirectoryCommand<T>(
@@ -14,7 +14,6 @@ async function invokeDirectoryCommand<T>(
 }
 
 export const desktopLibrary = {
-  isDesktop: isTauri,
   getDataDirectory: () =>
     invokeDirectoryCommand<DataDirectoryInfo>("get_data_directory"),
   chooseDataDirectory: () =>

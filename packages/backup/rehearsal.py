@@ -25,7 +25,7 @@ from .manager import BackupManager
 from .workflow import wsl_path
 
 ACTIVE_PROJECT_NAME = "research-asset-hub"
-ACTIVE_PORTS = frozenset({5432, 7700, 8765, 8766, 8767})
+ACTIVE_PORTS = frozenset({5432, 7700, 8766, 8767})
 CORE_TABLES = (
     "sources",
     "assets",

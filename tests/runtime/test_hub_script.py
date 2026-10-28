@@ -148,7 +148,7 @@ def test_native_build_runs_static_frontend_before_custom_protocol_cargo(tmp_path
     )
     assert result.returncode == 0, result.stderr
     commands = json.loads(result.stdout)
-    assert commands[0] == ["pnpm", "--filter", "@research-asset-hub/web", "build"]
+    assert commands[0] == ["pnpm", "--filter", "@research-asset-hub/desktop-ui", "build"]
     assert commands[1] == [
         "cargo",
         "build",

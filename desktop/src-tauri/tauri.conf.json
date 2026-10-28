@@ -4,8 +4,8 @@
   "version": "0.3.0-rc.1",
   "identifier": "local.research-asset-hub",
   "build": {
-    "beforeBuildCommand": "pnpm --filter @research-asset-hub/web build",
-    "frontendDist": "../../apps/web/dist"
+    "beforeBuildCommand": "pnpm --filter @research-asset-hub/desktop-ui build",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "windows": [

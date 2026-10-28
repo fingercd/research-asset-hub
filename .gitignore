@@ -11,8 +11,8 @@ htmlcov/
 
 # JavaScript
 node_modules/
-apps/web/dist/
-apps/web/.vite/
+desktop/ui/dist/
+desktop/ui/.vite/
 
 # Local configuration and credentials
 .env
