@@ -1,136 +1,139 @@
 # Research Asset Hub · 研究资产库
 
-在本机管理论文、PDF、代码和阅读记录的科研资料库。以论文为中心组织研究单元，通过领域目录、关键词检索和只读 MCP，把资料交给人或 Agent 阅读，并保留原文页码、代码行号、文件版本和来源关系。
+**把论文、实现代码和阅读记录放到同一条可追溯的研究路径上。**
 
-**Windows 桌面版是主要入口，Web 版保留。** 桌面安装包携带 Python、PostgreSQL、Meilisearch、Restic 和 MCP 模块，日常使用无需另装开发环境。新资料默认复制到用户自己的资料库，旧的外部来源继续原位只读。
+本地优先的科研资料管理工具：按领域找资料，按原文页码读证据，按固定版本查代码。Windows 桌面版是日常入口；Web、只读 MCP 与维护工具共用同一套资产模型。
 
-## 版本与下载
+**[使用手册](docs/USER_MANUAL.md) · [资料导航](docs/LIBRARY_MAP.md) · [MCP 接入](docs/MCP_USER_GUIDE.md) · [开发指南](docs/DEVELOPMENT.md) · [全部文档](docs/README.md)**
 
-当前源码版本为 **0.2.0-rc.4 候选版**。已安装程序的版本取决于实际安装包，更新源码不会自动升级桌面安装。此前候选包的验证范围见[交付记录](docs/reports/2026-10-05-product-candidate-delivery.md)，后续源码修复见[变更记录](CHANGELOG.md)。候选安装包已在本机生成；GitHub 仓库目前仍为私有，尚未发布公开 Release，因此这里不提供虚构的公开下载入口。
+> **源码与资料分开。** Git 保存应用代码、契约、来源清单和维护文档，不分发个人论文、第三方源码快照、数据库或密钥。克隆仓库不等于下载完整资料库；安装版也不会随源码 push 自动升级。
 
-正式分发时将使用[GitHub Releases](https://github.com/fingercd/research-asset-hub/releases)，提供 Windows x64 安装包、SHA-256、变更记录和验证范围。候选包尚未在独立的干净 Windows 虚拟机完成首次安装、升级和卸载验收，也没有代码签名；它是待验收候选，不能据本机测试宣称所有新机器都已通过。
+## 从你要做的事开始
 
-- 系统要求：Windows 10 1903 或更新版本、Windows 11，x64。
-- 安装到 Program Files 需要管理员授权；资料库和日常运行使用普通用户目录。
-- 默认安装模式会在 WebView2 缺失时联网准备它；已安装后，本地 PDF、代码和阅读记录可离线使用。
-- 安装包不含个人论文、代码、密钥、历史数据库或开发机来源路径。源码仓库中的历史 `config/` 是个人维护记录；公共安装使用独立的空库配置。
-
-## 开始建立自己的资料库
-
-1. 打开软件，在“研究领域”中点击“新建领域”，填写名称即可建立空领域。
-2. 点击“添加资料”，选择领域、上传 PDF、填写论文标题，再检查入库预览。
-3. 作者、年份、会议、摘要、简介、链接和标签可在入库后通过详情页“编辑元数据”补充；HTML 和代码也可省略。DOI/arXiv 在草稿阶段选填，入库后的身份更正需走审计流程，普通元数据编辑不修改这些标识。
-4. 确认后，平台保存托管 PDF，并通过后台任务抽取可读取的文本、更新检索状态。
-
-批量上传为每篇 PDF 建立独立草稿，逐条显示结果。预览会给出重复线索；同一 DOI/arXiv 等可靠标识参与身份核对，标题相近不会直接强制合并。草稿可修改、取消，重复提交同一草稿不会新增重复资产。
-
-论文里的 HTML 解读、代码、图和方法卡各有独立的提供/缺失状态。未提供可选材料可以正常入库；已经登记但实际丢失的文件仍会被识别为缺失。
-
-## 核心能力
-
-| 能力 | 使用方式 |
+| 你要做什么 | 从这里进入 |
 | --- | --- |
-| 研究领域 | 创建、修改领域，浏览领域门户、研究单元、最近更新与统计；空领域无需 HTML |
-| 研究单元 | PDF、导读、代码与论文关系集中展示；列表在数据库中筛选、排序和分页 |
-| 搜索 | 标题、中文题名、摘要、DOI/arXiv 等关键词检索，支持领域、日期、作者、材料类型等筛选 |
-| 阅读 | 保存阅读状态和上次 PDF 页码，文本选区高亮，批注回跳原页；锚点绑定 PDF 指纹 |
-| 个人组织 | 专题集合、保存筛选、批量修改阅读状态和标签，论文比较与 Markdown 导出 |
-| 代码资料 | 关联已有代码资产、本地只读目录或远程链接；GitHub/GitLab 可下载固定 commit 的源码快照 |
-| 资料迁移 | 领域 ZIP 包导出、校验预览和导入，含文件、manifest、哈希、关系及可选个人状态 |
-| 后台维护 | 任务状态、重试/取消、抽取、来源校验和可重建的关键词索引 |
-| 外部工具 | 只读 MCP、Obsidian 同步、Zotero 与开放目录导出 |
+| 找论文、读 PDF、看关联实现 | 桌面“研究领域 / 搜索”；[日常阅读工作流](docs/USER_MANUAL.md) |
+| 让 Agent 查论文、引用页码和代码行号 | [MCP 使用指南](docs/MCP_USER_GUIDE.md) |
+| 新增一篇论文 | 界面“添加资料”：**标题 + PDF 必填**，其他材料选填 |
+| 登记一批现有 PDF、代码和导读 | [资料入库指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)：先预演，再备份和正式导入 |
+| 看清领域、文件、论文和代码如何对应 | [资料地图](docs/LIBRARY_MAP.md)与[代码地图](docs/architecture/code-map.md) |
+| 开发、测试、排查环境 | [隔离开发指南](docs/DEVELOPMENT.md)与[贡献约定](CONTRIBUTING.md) |
+| 找维护脚本或批处理工具 | [脚本索引](scripts/README.md)与[工具箱](tools/README.md) |
 
-源码快照不会运行仓库代码，也不下载训练权重、数据集、依赖环境、LFS 大文件或子模块内容。快照固定到解析出的 commit，保留版本和文件指纹；远程链接本身不代表已有本地源码。只读目录引用要求目录保持可访问。
+## 资料如何组织
 
-论文关键词匹配不使用正文、summary 导读和标签冒充标题摘要证据。MCP 通过轻量元数据投影广召回并提供分页，正文与代码按需带页码或行号读取。现阶段不生成 embedding，不启动向量模型或 Qdrant，也不要求全库导出 Markdown。代码全文索引默认关闭。
+```text
+研究领域
+└─ 研究单元：一篇论文 / 技术报告
+   ├─ 身份与来源：稳定记录 ID、DOI / arXiv、版本、文件指纹
+   ├─ 原始材料：PDF、原网页、Notebook
+   ├─ 关联实现：本地只读代码 / 固定 commit 快照 / 在线链接
+   ├─ 派生分析：中文导读、图、方法卡（不冒充原文证据）
+   └─ 个人状态：阅读进度、批注、标签、专题集合
+```
 
-## Agent 接入：只读 MCP
+论文和代码是独立资产，通过 `implemented_by` 等有证据的关系关联。磁盘里有代码目录，不等于论文的“代码”按钮已建立关联；在线 URL、已下载源码、官方实现、第三方复现分别记录。
 
-在“设置 → Agent 接入”复制当前安装和资料库生成的配置，加入支持 stdio MCP 的客户端。配置使用随包 Python 和 `-m apps.mcp_server`，包含当前资料库路径；不要求克隆源码或另装 Python。自定义安装路径会反映在生成的配置中。
+| 能力 | 实际边界 |
+| --- | --- |
+| 领域门户与目录 | 总览、时间线、评测与阅读路线；新领域仅名称必填，精选内容可后补 |
+| 关键词检索 | 标题、中文题名、摘要与精确标识；MCP 支持领域、类型、会议、年份和分页 |
+| PDF 阅读与批注 | 保存阅读状态、上次页码和高亮；引用锚点绑定文件指纹 |
+| 代码阅读 | 原位只读目录、远程链接或固定 commit 快照；不自动运行代码、下载训练数据和权重 |
+| 个人组织 | 专题集合、保存筛选、批量状态与标签、论文比较及 Markdown 导出 |
+| 迁移与维护 | 领域包、可审计导入、后台抽取、关键词索引、备份与隔离恢复演练 |
+| 外部工具 | 只读 MCP、Obsidian 同步、Zotero 导出 |
 
-“测试连接”检查桥接构造和实际数据库读取；真实协议验收另外使用官方 MCP 客户端执行 `initialize`、`list_tools` 和 `call_tool`。本轮已从打包目录、在源码目录之外完成协议读取，详见[交付记录](docs/reports/2026-10-05-product-candidate-delivery.md)和[MCP 使用指南](docs/MCP_USER_GUIDE.md)。
+搜索不把正文、生成导读和标签混入论文标题摘要证据。当前默认**不生成 embedding、不启动向量模型或 Qdrant**；正文和代码按需带页码、行号读取。代码全文索引默认关闭，不影响安全浏览代码。
 
-`search_assets` 省略 query 或传空字符串即可按领域、类型分页列出全部已登记可见资料；关键词非空时才做匹配检索。查“全部”应按 next_offset 翻页到 has_more=false，并核对去重数量与 total，不能用关键词命中数当领域总数。
+## 快速开始
 
-七个工具均只读：`search_assets`、`get_paper`、`read_evidence`、`read_code`、`get_figure`、`get_methodology`、`library_status`。工具保留原文/analysis 区分、候选状态、页码、行号、来源哈希和缺失错误；不导入资料、写批注或运行源码。
+### 我只想使用资料库
 
-默认连接本机共享后台。`initialize` 和列工具不会启动后台；第一次实际读取才按需唤醒或复用桌面服务。多个聊天使用同一后台，关闭聊天不结束资料库。新候选包的真实冷唤醒与多客户端生命周期仍须在安装验收中补测；已有后台上的协议成功不等于这一项已经完成。
+1. 启动已安装的 Research Asset Hub，进入“研究领域”或“搜索”。
+2. 第一次使用时，新建领域，再上传 PDF、填写标题并检查预览。
+3. 打开论文详情，分别查看 PDF、HTML 与关联代码的实际状态。
+4. 要给 Agent 使用，在“设置 → Agent 接入”复制本机生成的 MCP 配置。
 
-## 数据位置、备份与升级
+新上传资料可托管复制到用户库；**既有外部来源始终原位只读**。缺少选填 HTML/代码可以正常入库，已经登记但丢失的文件则必须显示为缺失。
 
-默认数据目录为 `%USERPROFILE%\Documents\ResearchAssetHub`。桌面“设置 → 资料库位置”可以选择空目录建立新库，或选择已有兼容资料库，确认后切换并重启；原资料库保留。切换不是搬运文件，迁移资料可使用备份恢复或领域包。若启动时显式设置 `HUB_DATA_DIR`，界面会显示该限制并禁用切换。
+当前源码版本为 **0.2.0-rc.4 候选版**，版本依据 [Python 配置](pyproject.toml)和 [Node 配置](package.json)。本机安装版本、源码版本和候选包验收状态分别判断。独立干净 Windows 安装、升级、卸载及签名仍有未完成验收，不能把本机测试描述为正式发行通过，详见[桌面文档](desktop/README.md)与[发行约束](desktop/scripts/RUNTIME-RELEASE.md)。
 
-目录内的 `config/` 保存用户配置和托管来源清单，`library/` 保存托管 PDF、源码快照及领域包资料，`postgres-data/` 保存数据库，`logs/` 保存运行日志。安装资源与用户数据分开，升级保留已有来源映射和配置。已有安装的配置迁移会核对旧注册根目录，失败时中止安装并保留原资源。
+### 我想查看或修改源码
 
-点击窗口关闭按钮会收起到托盘；需要停止后台时，从托盘选择“退出”。新版本采用手动下载安装升级；托盘的“检查更新”读取本地更新目录，它不是已经配置好的联网自动更新服务。
-
-备份通过维护脚本或 API 执行，当前设置页没有备份操作按钮。备份包含数据库、用户配置、托管 PDF、源码、批注、阅读记录和开放目录。**外部只读引用原件默认不包含在内**，可以显式选择纳入已登记的外部文件；需要根据报告核对实际范围。Restic 仓库默认位于当前资料库目录的同级 `ResearchAssetHubBackups`，Restic 缓存位于资料库内的 `cache/restic`，密码保存在系统凭据库中，迁移到新机器需要另行保存相应恢复凭据。软件不自动删除历史快照。
-
-备份标记为 `verified` 表示该记录的快照存在，并且其仓库的存储完整性检查通过。完整检查读取全仓库数据，会比抽样检查更慢；它不等于 PostgreSQL 恢复演练通过，验证结果会单独标明是否执行了恢复演练。
-
-Git 保存源码和配置，不能恢复论文、数据库或本机密钥。同盘备份也不能替代异机备份。恢复演练应在隔离目录与端口进行，验证文件哈希、数据库、批注、实际文件打开和索引重建。具体维护入口见[使用手册](docs/USER_MANUAL.md)与[发行约束](desktop/scripts/RUNTIME-RELEASE.md)。
-
-## Web 与源码开发
-
-React/TypeScript 前端仍位于 `apps/web`，桌面和 Web 共用它。桌面生产版使用内置静态页面，不依赖 8765 网站服务；开发者可运行 Web 版。默认服务只监听本机；保留 Web 不表示已经开放公网或提供多用户托管。
-
-源码环境需要 Python 3.11+、uv、Node.js、根 `package.json` 固定的 pnpm，以及 Docker Desktop/可用的 WSL2 容器环境。桌面构建另外需要 Rust、Tauri 2 CLI 和 Windows 构建工具。
+在**新的 clone / 独立 checkout** 中准备依赖，不要在正式运行目录直接重启服务：
 
 ```powershell
 git clone https://github.com/fingercd/research-asset-hub.git
 cd research-asset-hub
-Copy-Item .env.example .env
-.\scripts\bootstrap.ps1 -StartInfrastructure
-pnpm --filter @research-asset-hub/web build
-.\scripts\hub.ps1 start
-.\scripts\hub.ps1 status
-```
-
-源码配置中的历史来源不会在新机器自动可用。配置自己的来源后，先按[新增资料指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md)执行只读预检、校验、盘点与导入预演，再备份和正式导入。已登记的冻结清单和原文件不可直接覆盖。
-
-| 本机入口 | 默认地址 |
-| --- | --- |
-| Web | `http://127.0.0.1:8765` |
-| API 文档 | `http://127.0.0.1:8767/docs` |
-| API 健康检查 | `http://127.0.0.1:8767/api/health` |
-| 资产网关 | `http://127.0.0.1:8766/health` |
-
-热更新使用 `.\scripts\hub.ps1 dev`，停止使用 `.\scripts\hub.ps1 stop`。停止服务保留数据库和搜索卷。
-
-## 构建与验证
-
-发行运行时从 `uv.lock` 构建干净的依赖环境，通过白名单复制运行模块和静态页面。PostgreSQL、Meilisearch、Restic 的输入版本与 SHA-256 必须提供并验证；公共配置从 `newconfig/release-defaults` 复制。完整说明见[桌面构建](desktop/README.md)、[运行时组装](desktop/scripts/README.md)和[发行约束](desktop/scripts/RUNTIME-RELEASE.md)。
-
-PostgreSQL 的发行副本加入 Windows 每进程 UTF-8 manifest，用于中文路径。原厂输入保持不变，转换报告记录每个可执行文件的输入/输出哈希；这也是要求 Windows 10 1903+ 的原因。
-
-```powershell
 uv sync --frozen --extra dev
 pnpm install --frozen-lockfile
+.\.venv\Scripts\python.exe scripts/check_repository.py
+```
+
+前置：Python 3.11+、uv、Node.js 24、根 `package.json` 固定的 pnpm。以上不启动数据库或导入资料；运行应用另需容器/基础服务，桌面构建另需 Rust 与 Windows 构建工具。
+
+**下一步按[开发指南](docs/DEVELOPMENT.md)配置独立数据目录、数据库、端口与 Compose 项目，再启动。** `HUB_DATA_DIR` 单独设置不能隔离数据库；仅复制 `.env.example` 也不会让 Python 或 `hub.ps1` 自动加载变量。
+
+## Agent：先定位，再读证据
+
+7 个只读 MCP 工具：`library_status`、`search_assets`、`get_paper`、`read_evidence`、`read_code`、`get_figure`、`get_methodology`。不导入、不改批注、不执行论文代码。
+
+```text
+1. library_status()                              → 查看领域与台账范围
+2. search_assets(query="", asset_type="paper",
+                 venue="CVPR", year=2026)         → 按库内字段浏览目录
+3. 按 next_offset 翻页，直到 has_more=false        → 去重数量与 total 核对
+4. 用返回的资产 ID 读原文 / 代码                  → 保留页码、行号、来源和版本
+```
+
+会议筛选是登记字段匹配，不等于官方录用核验；目录总数不等于关键词命中数。原文是 `original`，导读是 `analysis`，候选和待审状态不可省略。协议与故障排查见[MCP 指南](docs/MCP_USER_GUIDE.md)。
+
+默认 MCP 在实际读取时按需唤醒或复用共享桌面后台；初始化和列工具不启动后台。多个聊天复用同一后台，关闭聊天不会关闭资料库。缓存旧工具 schema 的客户端需要重新连接。
+
+## 代码与文档放在哪里
+
+| 目录 | 职责 | 配套说明 |
+| --- | --- | --- |
+| [`apps/`](apps/) | API、Web、MCP、worker、资产网关 | [代码地图](docs/architecture/code-map.md) |
+| [`packages/`](packages/) | 领域模型、导入、检索、证据、备份 | [来源边界](docs/architecture/source-boundaries.md) |
+| [`desktop/`](desktop/) | Tauri 桌面壳、运行时与安装包 | [桌面构建](desktop/README.md) |
+| [`config/`](config/) | 来源配置、冻结旁车、领域门户 | [配置说明](config/README.md) |
+| [`newconfig/release-defaults/`](newconfig/release-defaults/) | 不含个人资料的空库发行配置 | [运行时组装](desktop/scripts/README.md) |
+| [`scripts/`](scripts/) | 生命周期、维护、核验与历史批次脚本 | [脚本索引](scripts/README.md) |
+| [`tools/`](tools/) | 元数据、代码关联、证据和批次处理 | [工具箱](tools/README.md) |
+| [`tests/`](tests/) · [`migrations/`](migrations/) | 自动化回归与数据库迁移 | [测试与贡献](CONTRIBUTING.md) |
+| [`docs/`](docs/) | 使用、开发、规范、计划和验收记录 | [文档导航](docs/README.md) |
+
+`work/` 是本机日志、缓存和验证区，不进入 Git；原始资料与托管库在仓库之外。不要为“整齐”移动已登记资料，路径和指纹本身是证据。
+
+## 数据安全、备份与版本
+
+- **操作主库是 PostgreSQL。** 关键词索引与抽取缓存可重建，不能替代主库或原文件。
+- 默认数据目录为 `%USERPROFILE%\Documents\ResearchAssetHub`，可在设置中选择资料库；配置优先级见[开发指南](docs/DEVELOPMENT.md)。切换不是搬运，原库保留。
+- 备份包含数据库、用户配置与托管资料；外部只读原件默认不在其中，需核对报告范围并另做备份。`verified` 不等于数据库恢复演练通过。
+- **Git 不是资料备份。** 不提交 `.env`、密钥、数据库、论文原件、权重和运行时；不删除或重写冻结 manifest 来消除错误。
+- 当前源码点击窗口 **X 会隐藏窗口、清理后台并退出**，不再表示收起到托盘；已安装旧版本可能不同。见[修复记录](docs/reports/2026-10-26-desktop-close-fix.md)。
+
+Restic 仓库默认位于资料库同级 `ResearchAssetHubBackups`；同盘快照不能代替异机备份。恢复在独立目录与端口演练，详见[使用手册](docs/USER_MANUAL.md)。
+
+## 验证与已知限制
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_repository.py
+.\.venv\Scripts\python.exe -m ruff check apps packages scripts tests
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check apps packages tests scripts
-.\.venv\Scripts\python.exe -m mypy apps packages
 pnpm --filter @research-asset-hub/web typecheck
 pnpm --filter @research-asset-hub/web test
 pnpm --filter @research-asset-hub/web build
-cargo test --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
-NSIS 安装包通过 `cargo tauri build --bundles nsis` 构建。单独构建生产可执行文件时必须启用 `--features custom-protocol`。当前 CI 执行 Python 与前端检查；本机原生验收、完整恢复和性能测量另行保存记录，不用单元测试替代安装验收。
+文档检查发现断链和明显不应跟踪的文件，不是密钥扫描、论文质量验收或全库完整性证明。历史缺失与未完成安装验收均保留，不用“测试通过”掩盖。此次范围、实际命令与遗留问题见[2026-10-28 整理报告](docs/reports/2026-10-28-repository-organization.md)。
 
-## 验证范围与已知限制
+扫描 PDF 的 OCR 依赖外部环境；全库科研图批处理未作为默认能力开启。资料数量和覆盖率是日期化观察，不是软件固有能力，也不代表官方会议全集。
 
-0.2.0-rc.1 的实现和实际验证详见[交付记录](docs/reports/2026-10-05-product-candidate-delivery.md)，功能变更见[CHANGELOG](CHANGELOG.md)。原生测试使用随包运行时、中文/空格数据路径和独立端口，现有正式安装与数据库未升级。
+## 贡献与许可
 
-个人资料库在本轮修改前有 5,915 篇论文、3,326 个代码仓库和 14 个显示领域。这些资料不随软件分发。既有验收发现的 7 个旧来源目录指纹差异、114 个缺失表示和标准检索 Recall@10=0.7576 仍是历史待办；本轮界面与性能优化没有把它们改写为通过。未提供可选 HTML/代码与已登记文件丢失仍分别报告。
+改动前看[贡献约定](CONTRIBUTING.md)；资料维护另读 [AGENTS.md](AGENTS.md)、[增量操作手册](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)和[来源边界](docs/architecture/source-boundaries.md)。安全问题按[安全报告流程](SECURITY.md)处理。
 
-全库科研图批处理继续暂缓。已有图和方法卡按需读取，PDF 图试点改用 PDFium 渲染与 pdfplumber 几何提取；PyMuPDF 已从运行依赖移除。扫描 PDF 的 OCR 依赖外部 OCR 环境，不在本轮承诺无条件自动识别。
-
-## 贡献、许可与文档
-
-项目自身代码使用[MIT 许可证](LICENSE)，论文、代码快照及第三方依赖保留各自许可证。安装包附带第三方 notices；psycopg、PostgreSQL 内的部分库等仍有 LGPL 或其他许可义务，不能把整个运行包描述为“全部 MIT”。公开分发前须按实际二进制补齐对应的源代码提供和再分发义务。
-
-- [贡献说明](CONTRIBUTING.md)与[安全报告](SECURITY.md)
-- [用户手册](docs/USER_MANUAL.md)与[MCP 指南](docs/MCP_USER_GUIDE.md)
-- [Agent 规范](AGENTS.md)与[维护流程](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)
-- [本轮优化计划及竞品调查](docs/plans/2026-10-04-product-optimization-and-public-release.md)
-- [上一轮元数据与 MCP 交付](docs/reports/2026-10-04-metadata-runtime-delivery.md)
+本项目代码采用 [MIT](LICENSE)。论文、第三方源码和依赖保留各自许可，整个桌面运行包不能笼统称为“全部 MIT”。沿革见 [CHANGELOG](CHANGELOG.md)。

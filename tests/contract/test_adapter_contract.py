@@ -341,6 +341,12 @@ def test_documented_knowledge_unit_templates_match_generic_adapter_contract() ->
         str(representation.representation_type)
         for representation in records[0].representations
     } == {"pdf", "repository", "html", "markdown"}
+    assert all(str(representation.role) != "guide" for representation in records[0].representations)
+    assert {
+        str(representation.role)
+        for representation in records[0].representations
+        if str(representation.representation_type) == "html"
+    } == {"analysis"}
     assert not [
         warning
         for warning in records[0].warnings

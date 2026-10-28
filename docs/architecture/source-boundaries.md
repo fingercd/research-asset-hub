@@ -8,9 +8,18 @@ subdirectories, outside the `research-asset-hub` application repository. New
 intake sources declare those directories through explicit `asset_roots`.
 
 All entries in `config/sources.yaml` are imported as read-only sources. The hub
-stores normalized records, user-authored state, indexes, and reports inside the
-`research-asset-hub` project. It must not rename, move, delete, annotate, or
+stores operational records in PostgreSQL, managed files and configuration in
+the selected user data directory, and rebuildable indexes in their configured
+services. Development reports belong under the checkout's ignored `work/`
+directory, not among source materials. The application Git repository is not a
+backup of the user library. It must not rename, move, delete, annotate, or
 rewrite files below a registered source root.
+
+Explicit UI uploads may create new managed copies and immutable manifests in
+the user data directory. This does not grant permission to modify an existing
+registered source. A new empty domain needs only its name; the curated v2 portal
+can be added later. See the [configuration guide](../../config/README.md) and
+[isolated development setup](../DEVELOPMENT.md) before choosing a configuration.
 
 Paths persisted by the hub use:
 

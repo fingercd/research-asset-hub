@@ -23,6 +23,8 @@
 
 ## 2. 先判断是哪种任务
 
+本手册的 CLI 流程面向外部旁车来源维护，不替代日常界面托管上传。界面仅标题/PDF 必填，新领域仅名称必填；已有原位来源与冻结清单始终只读。精选九章节门户是单独的内容维护任务，不是建立空领域的前提。
+
 | 情况 | 处理方式 |
 | --- | --- |
 | 新资料与已登记来源属于同一领域 | 不修改原来源；创建新的旁车 intake source，复用 domain slug |
@@ -49,9 +51,9 @@ git status --short
 
 所有已登记来源都保持只读，包括 manifest。用户明确要求 Agent 新增资料时，默认创建新的旁车 intake source；不得向任何现有来源 manifest 追加记录。若用户另行运行某个来源自己的采集/生成工程，那是独立任务，必须由该工程负责来源备份和版本化，再把冻结结果交给 Hub。
 
-### 当前批量规范快照
+### 历史批量规范快照（2026-07 登记基线）
 
-当前登记基线包含 10 个领域、11 个只读 source 和 717 条规范化来源记录。以下四个 `canonical_snapshot` 旁车已完成正式导入并冻结：
+以下是当时 10 个领域、11 个只读 source 和 717 条规范化来源记录的历史基线，不代表当前全库数量。以下四个 `canonical_snapshot` 旁车已完成正式导入并冻结：
 
 | Source | Domain / 用途 | 记录数 | 旁车 |
 | --- | --- | ---: | --- |
@@ -83,7 +85,7 @@ git status --short
 <用户永久资料目录>/
 ├─ paper.pdf
 ├─ code/
-├─ guide.html
+├─ analysis.html
 ├─ original.html
 └─ note.md
 
@@ -128,7 +130,7 @@ research-asset-hub/
 
 - `pdf`：主论文 PDF，角色通常为 `original`。
 - `repository`：代码目录或正式仓库 URL。正式 importer 会物化独立 repository 资产，并建立论文到仓库的 `implemented_by` 关系。
-- `html` + `guide`：生成导读使用 `role: guide`；历史原始页面使用 `role: original`，不要混为一个文件。
+- `html`：新生成导读使用 `role: analysis`，历史原始页面使用 `role: original`；新入库不再创建 `guide` 表示，已有 guide 仅保留只读。原始网页与派生解读不可混为一个文件或一种证据。
 - `markdown`：个人导读或结构化笔记，不替代原始论文。
 - `notebook`：按 Notebook 表示登记，不要转成无法追踪单元格的纯文本。
 - 缺失文件应登记为 `missing` 或不填写该可选表示；绝不能伪造一个存在路径。
@@ -287,7 +289,7 @@ API 会按 asset UUID 校验两个端点并记录审计事件；关系详情和 
   --report work/validation/backup-before-ingest.json
 ```
 
-平台 Restic 快照保护 PostgreSQL、项目配置和开放目录，不包含项目外的来源 PDF、代码或 HTML。来源目录必须由用户另行使用外置盘、NAS、版本库或其他文件级备份保护；不得把平台快照描述成来源文件副本。
+平台 Restic 快照保护数据库、用户配置与托管资料；外部只读引用原件默认不包含，显式纳入时也须核对报告实际范围。外部来源仍需另行文件级备份；不得把快照存在、存储校验通过和数据库恢复演练通过混为一谈。
 
 正式导入只允许使用全部来源，保证跨来源身份视图完整：
 

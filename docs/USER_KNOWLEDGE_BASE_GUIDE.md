@@ -2,11 +2,13 @@
 
 这份指南说明如何把一篇论文及其 PDF、代码、HTML 导读、Notebook 或 Markdown 笔记作为一个完整知识单元加入 Research Asset Hub。
 
-最重要的原则：平台引用原文件所在位置，不会替你搬运或复制大文件。因此，正式加入前要先把资料放在一个长期稳定、不会自动清理的位置。
+**日常单篇优先使用桌面“添加资料”**：标题和 PDF 必填，HTML、代码及简介选填；界面确认后可将新材料托管复制到用户数据目录。新领域也只需名称，精选门户内容可后补。
+
+本文后续命令主要说明 **Agent 为已有永久资料创建外部旁车来源** 的方式：引用原文件位置，不搬运或覆盖原件。因此，执行这一路径前要先把资料放在长期稳定、不会自动清理的位置。它不是普通用户上传一篇 PDF 必须执行的命令清单。
 
 当前 PDF 与代码的永久资料根是 `D:/ResearchLibrary`，各领域资料放在其子目录中；`research-asset-hub` 子目录保存应用。以后新增资料继续使用这个资料根，并为新资料建立独立旁车来源。
 
-平台的 Restic 备份只保护 PostgreSQL、项目配置和开放目录，不包含放在项目外的原始 PDF、代码和 HTML；这些来源文件仍需要你使用外置硬盘、NAS、Git 或其他方式单独备份。
+平台 Restic 备份包含数据库、用户配置和托管资料；**外部只读引用原件默认不包含**，需核对实际备份范围并单独保护。快照存储校验通过不等于数据库恢复演练通过；Git 不能备份个人数据库、未跟踪 PDF 或密钥。
 
 普通的一篇论文使用 `generic_manifest` 旁车，不需要运行 VLN、游戏强化学习、WSVAD 或领域门户的批量快照构建器。完整写库顺序固定为：全量 dry-run 通过、创建备份、第一次全量正式导入、在输入不变时第二次全量正式导入并确认新增计数为 0。
 
@@ -47,14 +49,14 @@ DOI/arXiv：<知道就填，不知道可让 Agent 提取>
 example-paper-2026/
 ├─ paper.pdf
 ├─ code/
-├─ guide.html
+├─ analysis.html
 ├─ original.html
 └─ note.md
 ```
 
 - `paper.pdf`：原始论文。
 - `code/`：本地代码快照；也可以只提供 GitHub URL。
-- `guide.html`：你或 Agent 生成的导读页面。
+- `analysis.html`：你或 Agent 生成的导读页面，新资料按 HTML / analysis 登记，不新建已废除的 guide 表示；旧 guide 保留只读。
 - `original.html`：需要保留原交互的历史网页。
 - `note.md`：可搜索的 Markdown 导读或笔记。
 
@@ -62,7 +64,7 @@ example-paper-2026/
 
 一篇论文 + PDF + HTML + 代码的最短闭环是：
 
-1. 把 `paper.pdf`、`code/`、`guide.html` 或 `original.html` 放进同一个永久资料目录。
+1. 将已有 `paper.pdf`、`code/`、`analysis.html` 或 `original.html` 的永久路径登记清楚；不要为匹配示例而移动已登记文件。
 2. 新建 `config/intake/<new-source-id>/manifest.json`，其中只放这一条稳定 `items[].id` 记录。
 3. 在 `config/sources.yaml` 新增 `read_only: true`、`adapter: generic_manifest` 的 source，并让 `asset_roots` 指向永久资料目录。
 4. 运行全来源检查和 dry-run，核对 PDF、HTML、代码路径及身份合并候选。
@@ -146,8 +148,8 @@ research-asset-hub\config\intake\intake-example-paper-2026\manifest.json
       "path": "code",
       "url": "https://github.com/example/example-repository"
     },
-    "guide": {"path": "guide.html"},
-    "html": {"path": "original.html"},
+    "html": {"path": "analysis.html"},
+    "original_html": {"path": "original.html"},
     "note": {"path": "note.md"}
   }
 }
@@ -223,7 +225,7 @@ Invoke-RestMethod `
 
 ### 如果增加的是一个全新领域
 
-除 taxonomy 和 source 外，还要建立 `config/domain-portals/v2/<slug>/`。统一门户不是让你手写另一个巨型 HTML，而是把领域内容拆成以下八个可审查文件：
+新领域不必先具备精选门户即可使用。需要补齐**精选九章节门户**时，再建立 `config/domain-portals/v2/<slug>/`，把内容拆成以下八个可审查文件：
 
 - `portal.yaml`：领域说明、内容版本、原始 HTML 选择器、来源 hash/mtime 和章节证据；
 - `overview.md`：领域定位与边界；
@@ -353,7 +355,7 @@ HTML 会按静态、可信本地交互或需要联网三种策略隔离打开。
 3. 测试 PDF、代码、导读和原始 HTML。
 4. 检查领域、作者、年份和标签。
 5. 确认代码仓库关系正确。
-6. 切换阅读状态并添加一条真实批注。
+6. 只读核对阅读状态与批注；仅当用户本来要求写入时才验证写入，不能为了 smoke test 污染用户状态。
 
 如果本次新增或调整了领域，还要进入对应领域详情，确认原生 v2 总览九章节齐全、无 iframe、桌面和窄屏无横向溢出；再测试“原始 HTML”是否只在来源表示可用时启用并在新窗口打开。任何门户更新都不应造成来源文件 hash 或 mtime 变化。
 

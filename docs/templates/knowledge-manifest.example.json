@@ -31,10 +31,10 @@
           "path": "code",
           "url": "https://github.com/example/example-repository"
         },
-        "guide": {
-          "path": "guide.html"
-        },
         "html": {
+          "path": "analysis.html"
+        },
+        "original_html": {
           "path": null
         },
         "note": {

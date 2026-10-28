@@ -46,17 +46,17 @@ sources:
           path_field: representations.code.path
           url_field: representations.code.url
         - type: html
-          role: guide
+          role: analysis
           root_key: html
-          path_field: representations.guide.path
+          path_field: representations.html.path
           mime_type: text/html
         - type: html
           role: original
           root_key: html
-          path_field: representations.html.path
+          path_field: representations.original_html.path
           mime_type: text/html
         - type: markdown
-          role: guide
+          role: analysis
           root_key: note
           path_field: representations.note.path
           mime_type: text/markdown

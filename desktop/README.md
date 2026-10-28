@@ -2,7 +2,7 @@
 
 Tauri 2 桌面版使用内置页面和随包运行时，生产环境不依赖 8765 本地网站。默认数据目录为 `Documents\ResearchAssetHub\`，可在设置中选择空目录或已有兼容库；切换后原库保留。显式 `HUB_DATA_DIR` 或 `--data-dir <绝对路径>` 固定目录时，界面显示该限制。
 
-当前为 0.2.0-rc.1 本机候选包。实现、测试、性能和安装验收范围见[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)，公开 Release 尚未发布。独立干净 Windows 安装、升级与卸载验收不能用本机原生运行测试替代。
+当前源码版本为 **0.2.0-rc.4**；下述[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)记录的是 0.2.0-rc.1 候选包的实现、测试、性能和安装验收范围，不是 rc.4 安装通过的证明。源码更新不会自动更新已安装程序，公开 Release 尚未发布。独立干净 Windows 安装、升级与卸载验收不能用本机原生运行测试替代。
 
 ## 开发
 
@@ -15,6 +15,8 @@ cd desktop/src-tauri && cargo tauri dev          # 终端 B:壳(连 Vite)
 ```
 
 开发模式壳使用容器基础设施(docker compose)与项目 .venv;生产模式使用便携运行时。
+
+先读[隔离开发指南](../docs/DEVELOPMENT.md)与[启动链地图](../docs/architecture/code-map.md)。上面是桌面开发入口，不是可以与正式桌面后台并行启动的隔离方案；桌面有全局单实例约束，且 Tauri 的开发页面地址仍由配置决定。不要直接把 Web 隔离示例的端口块套入桌面命令，也不要在已有正式服务上试验关闭行为。
 
 ## 日常启动
 

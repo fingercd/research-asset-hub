@@ -2,13 +2,15 @@
 
 MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它使用官方 Python SDK 的 FastMCP，经 stdio 通信，再用 HTTP GET 读取本机 Hub API。所有七个工具声明 `readOnlyHint=true`，没有数据库写入、导入、批注或运行源码的工具。默认本机 API 未运行时，首次实际读取会按需唤醒现有桌面程序的共享后台。
 
-## 0.2.0-rc.1 候选包接入
+当前源码版本为 **0.2.0-rc.4**；源码变更、已安装程序与下述历史候选包验收是不同状态。源码入口和隔离 API 配置见[开发指南](DEVELOPMENT.md)，模块关系见[代码地图](architecture/code-map.md)。本次文档整理没有重做安装、冷唤醒或真实数据库协议验收。
+
+## 候选包接入与历史 0.2.0-rc.1 验收
 
 候选包包含 `apps/mcp_server` 和官方 Python MCP SDK。在“设置 → Agent 接入”复制当前安装位置与资料库生成的配置，加入支持 stdio MCP 的客户端。配置使用随包 Python、`-m apps.mcp_server` 和明确的 `PYTHONPATH`，可从其他工作目录运行，无需克隆源码或另装 Python。实际路径以软件生成的配置为准。
 
 “测试连接”验证桥接构造和实际数据库读取，验证范围为 `bridge_construction_and_database_read`；它不等同于执行了所有 MCP 协议工具。完整协议验收通过官方客户端执行 `initialize`、`list_tools` 和实际 `call_tool`。
 
-本轮已使用随包 Python，在源码目录之外执行 stdio：七个工具均可列出且声明只读；最小 PDF 入库后，搜索、论文元数据、原文页码、代码行号、方法卡查询和状态读取成功；没有科研图时 `get_figure` 返回明确错误。此前正式库既有图的正向读取记录保留在下文，空库错误检查不代表图抽取质量验收。结果见[候选版交付记录](reports/2026-10-05-product-candidate-delivery.md)。
+历史 rc.1 验收使用随包 Python，在源码目录之外执行 stdio：七个工具均可列出且声明只读；最小 PDF 入库后，搜索、论文元数据、原文页码、代码行号、方法卡查询和状态读取成功；没有科研图时 `get_figure` 返回明确错误。此前正式库既有图的正向读取记录保留在下文，空库错误检查不代表图抽取质量验收。结果见[候选版交付记录](reports/2026-10-05-product-candidate-delivery.md)，不能将其扩展为当前 rc.4 的完整安装或冷唤醒证明。
 
 默认读取复用本机共享桌面后台。资料库路径通过 `--data-dir <绝对路径>` 显式传给桌面程序，避免 Explorer 启动时丢失调用方环境变量。未设置 `HUB_DATA_DIR` 时使用桌面保存的目录选择，再回退到用户 `Documents/ResearchAssetHub`。新 API 会返回资料库目录指纹，桥接发现不一致时明确报错；旧 API 不提供该字段时，桥接不会宣称已经核对过目录。
 
