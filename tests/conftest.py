@@ -7,6 +7,16 @@ import pytest
 from packages.cli.config import load_sources
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Create the parent of the configured basetemp in a fresh checkout.
+
+    Pytest owns basetemp itself; do not rely on a prior Ruff run creating work/.
+    """
+    basetemp = config.getoption("basetemp")
+    if basetemp:
+        Path(basetemp).parent.mkdir(parents=True, exist_ok=True)
+
+
 @pytest.fixture(autouse=True)
 def isolated_user_library(
     tmp_path_factory: pytest.TempPathFactory,
