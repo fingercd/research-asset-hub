@@ -23,7 +23,13 @@ function assetType(asset: Asset): string {
   return asset.asset_type ?? asset.type ?? "asset";
 }
 
-export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
+export function ResearchUnitCard({
+  unit,
+  compact = false,
+}: {
+  unit: ResearchUnitSummary;
+  compact?: boolean;
+}) {
   const primary = unit.primary_asset;
   const compare = useCompare();
   const selected = compare.has(primary.id);
@@ -47,9 +53,30 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
   };
   const matchLabel = matchLabels[unit.match_source ?? ""];
 
+  const quickActions = (
+    <ResearchUnitActions
+      actions={unit.quick_actions}
+      ownerAssetId={primary.id}
+      repositoryOnly={isRepository}
+      repositoryLabel={
+        isRepository
+          ? primary.title
+          : (unit.related_repositories[0]?.title ?? primary.title)
+      }
+    />
+  );
+  const summaryContent = (
+    <>
+      <p className="asset-authors">{formatAuthors(primary.authors)}</p>
+      <p className="asset-summary">
+        {unit.snippet || primary.summary || primary.abstract || "暂无摘要。"}
+      </p>
+    </>
+  );
+
   return (
     <article
-      className={`asset-card research-unit-card ${
+      className={`asset-card research-unit-card ${compact ? "is-catalog-compact" : ""} ${
         isRepository ? "is-repository" : ""
       }`}
       data-unit-id={unit.unit_id}
@@ -82,18 +109,25 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
         {primary.title_zh && primary.title_zh !== primary.title && (
           <p className="original-title">{primary.title}</p>
         )}
-        <p className="asset-authors">{formatAuthors(primary.authors)}</p>
-        <p className="asset-summary">
-          {unit.snippet || primary.summary || primary.abstract || "暂无摘要。"}
-        </p>
-        {!isRepository && (
+        {compact ? (
+          <details className="compact-summary">
+            <summary>摘要与作者</summary>
+            {summaryContent}
+          </details>
+        ) : summaryContent}
+        {compact && (
+          <span className="compact-reading-status">
+            {({ unread: "未读", reading: "阅读中", read: "已读" })[getReadingStatus(primary)]}
+          </span>
+        )}
+        {!compact && !isRepository && (
           <ReleaseStatusBadges
             asset={primary}
             quickActions={unit.quick_actions}
             relatedRepositories={unit.related_repositories}
           />
         )}
-        {annotation !== "无" && (
+        {!compact && annotation !== "无" && (
           <p className="annotation-snippet">
             <strong>批注：</strong>
             {annotation}
@@ -109,7 +143,7 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
           </p>
         )}
 
-        {remainingDomains.length > 0 && (
+        {!compact && remainingDomains.length > 0 && (
           <div className="tag-row" aria-label="所属领域">
             {remainingDomains.map((domain) => (
               <Link to={`/domains/${encodeURIComponent(domain)}`} key={domain}>
@@ -142,19 +176,12 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
                   compact
                 />
               </div>
-              <div className="card-more-section">
-                <span>打开内容</span>
-                <ResearchUnitActions
-                  actions={unit.quick_actions}
-                  ownerAssetId={primary.id}
-                  repositoryOnly={isRepository}
-                  repositoryLabel={
-                    isRepository
-                      ? primary.title
-                      : (unit.related_repositories[0]?.title ?? primary.title)
-                  }
-                />
-              </div>
+              {!compact && (
+                <div className="card-more-section">
+                  <span>打开内容</span>
+                  {quickActions}
+                </div>
+              )}
               <div className="card-more-utilities">
                 <CopyIdButton assetId={primary.id} />
                 {!isRepository && (
@@ -182,6 +209,7 @@ export function ResearchUnitCard({ unit }: { unit: ResearchUnitSummary }) {
             </div>
           </details>
         </div>
+        {compact && quickActions}
         {matchLabel ? (
           <span className="score">{matchLabel}</span>
         ) : typeof unit.score === "number" && unit.match_source !== "browse" ? (

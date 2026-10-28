@@ -3,21 +3,23 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
-import type { Annotation, ApiList, Asset } from "../api/types";
+import type { Annotation, ApiList, Asset, Representation } from "../api/types";
 import { CompareProvider } from "../state/CompareContext";
 import { AssetDetailPage } from "./AssetDetailPage";
 
 afterEach(() => vi.restoreAllMocks());
-function setup(asset: Asset, annotations: ApiList<Annotation> = { items: [], next_cursor: null }) {
+vi.mock("../components/PdfPanel", () => ({ PdfPanel: ({ representation, initialPage }: { representation?: Representation; initialPage?: number }) => <div data-testid="pdf-reader">{representation?.id}:{initialPage ?? "saved"}</div> }));
+function setup(asset: Asset, annotations: ApiList<Annotation> = { items: [], next_cursor: null }, representations: Representation[] = [], suffix = "") {
   const read = vi.spyOn(api, "asset").mockResolvedValue(asset);
-  vi.spyOn(api, "representations").mockResolvedValue([]);
+  vi.spyOn(api, "representations").mockResolvedValue(representations);
+  vi.spyOn(api, "readingPosition").mockResolvedValue({ position: { representation_id: "pdf-saved", page: 7, source_hash: "saved-hash" }, stale: false });
   vi.spyOn(api, "annotations").mockResolvedValue(annotations);
   vi.spyOn(api, "collections").mockResolvedValue({ items: [], next_cursor: null });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <CompareProvider>
-        <MemoryRouter initialEntries={[`/assets/${asset.id}`]}>
+        <MemoryRouter initialEntries={[`/assets/${asset.id}${suffix}`]}>
           <Routes><Route path="/assets/:assetId" element={<AssetDetailPage />} /></Routes>
         </MemoryRouter>
       </CompareProvider>
@@ -26,6 +28,29 @@ function setup(asset: Asset, annotations: ApiList<Annotation> = { items: [], nex
   return read;
 }
 describe("paper metadata entry", () => {
+  const versions: Representation[] = [
+    { id: "pdf-first", representation_type: "pdf", role: "original", path_ref: "papers/paper-v1.pdf", availability: "available" },
+    { id: "pdf-saved", representation_type: "pdf", role: "primary", path_ref: "papers/paper-v2.pdf", availability: "available" },
+  ];
+  it("resumes the saved PDF representation rather than the first version and keeps version labels distinct", async () => {
+    setup({ id: "paper", title: "Paper", asset_type: "paper" }, undefined, versions, "?view=pdf");
+    expect(await screen.findByTestId("pdf-reader")).toHaveTextContent("pdf-saved:saved");
+    expect(screen.getByRole("combobox", { name: "选择 PDF 版本" })).toHaveValue("pdf-saved");
+    expect(screen.getByRole("option", { name: /原始版本.*paper-v1.pdf/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /主版本.*paper-v2.pdf/ })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "选择 PDF 版本" }), { target: { value: "pdf-first" } });
+    expect(await screen.findByTestId("pdf-reader")).toHaveTextContent("pdf-first:saved");
+  });
+  it("honors an explicit PDF anchor over the saved version", async () => {
+    setup({ id: "paper", title: "Paper", asset_type: "paper" }, undefined, versions, "?view=pdf&representation=pdf-first&page=3");
+    expect(await screen.findByTestId("pdf-reader")).toHaveTextContent("pdf-first:3");
+  });
+  it("does not silently replace an explicitly requested missing PDF with another version", async () => {
+    setup({ id: "paper", title: "Paper", asset_type: "paper" }, undefined, versions, "?view=pdf&representation=pdf-absent&page=3");
+    expect(await screen.findByText(/这条批注所对应的 PDF 当前不可用/)).toBeInTheDocument();
+    expect(await screen.findByTestId("pdf-reader")).toHaveTextContent(":3");
+    expect(screen.getByTestId("pdf-reader")).not.toHaveTextContent("pdf-first");
+  });
   it("opens the editor from paper detail and shows the saved title after closing", async () => {
     const asset: Asset = { id: "paper-1", title: "Old title", asset_type: "paper", row_version: 7 };
     const result = { ...asset, title: "Correct title", row_version: 8 };

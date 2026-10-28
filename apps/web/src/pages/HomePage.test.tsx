@@ -11,6 +11,19 @@ afterEach(() => {
 });
 
 describe("HomePage", () => {
+  it("continues available PDFs in one step without overriding the saved page; non-PDF cards stay ordinary links", async () => {
+    vi.spyOn(api, "dashboard").mockResolvedValue({
+      continue_reading: [
+        { id: "pdf-paper", title: "PDF Paper", asset_type: "paper", representations: [{ id: "pdf", representation_type: "pdf", availability: "available" }] },
+        { id: "no-pdf", title: "No PDF", asset_type: "paper", representations: [{ id: "missing", representation_type: "pdf", availability: "missing" }] },
+      ], recent_assets: [], domains: [],
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter><CompareProvider><HomePage /></CompareProvider></MemoryRouter></QueryClientProvider>);
+    expect(await screen.findByRole("link", { name: "继续阅读 PDF" })).toHaveAttribute("href", "/assets/pdf-paper?view=pdf");
+    expect(screen.getByRole("link", { name: "查看资料" })).toHaveAttribute("href", "/assets/pdf-paper");
+    expect(screen.getByRole("link", { name: /打开资料/ })).toHaveAttribute("href", "/assets/no-pdf");
+  });
   it("renders one search entry, compact metrics, and five frequent domains", async () => {
     vi.spyOn(api, "dashboard").mockResolvedValue({
       stats: {

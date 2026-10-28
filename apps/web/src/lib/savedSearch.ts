@@ -1,6 +1,6 @@
 export function searchDefinitionToUrl(definition: Record<string, unknown>) {
   const query = new URLSearchParams();
-  Object.entries(definition).forEach(([key, value]) => {
+  Object.entries(normalizeSearchDefinition(definition)).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "")
       query.set(key, String(value));
   });
@@ -9,12 +9,12 @@ export function searchDefinitionToUrl(definition: Record<string, unknown>) {
 export function normalizeSearchDefinition(definition: Record<string, unknown>) {
   return Object.fromEntries(
     Object.entries(definition)
-      .filter(([key]) => key !== "cursor")
+      .filter(([key, value]) => key !== "cursor" && key !== "has_guide" && value !== undefined && value !== null && value !== "")
       .map(([key, value]) => [
         key,
         key.startsWith("has_")
           ? value === true || value === "true"
-          : key === "year_from" || key === "year_to"
+          : key === "year" || key === "year_from" || key === "year_to"
             ? Number(value)
             : value,
       ]),

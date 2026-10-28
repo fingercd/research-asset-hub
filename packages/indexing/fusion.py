@@ -1,9 +1,8 @@
-"""Rank fusion for keyword, vector and exact-match candidates."""
+"""Rank fusion for keyword and exact-match candidates."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 from .models import SearchDocument, SearchHit
 
@@ -69,18 +68,3 @@ def reciprocal_rank_fusion(
         )
         for rank, key in enumerate(ordered[:limit], start=1)
     ]
-
-
-def apply_score_boosts(
-    hits: Sequence[SearchHit],
-    boosts: dict[str, float],
-) -> list[SearchHit]:
-    rescored = [
-        replace(
-            hit,
-            score=hit.score + boosts.get(hit.document.document_id, 0.0),
-        )
-        for hit in hits
-    ]
-    rescored.sort(key=lambda hit: (-hit.score, hit.document.document_id))
-    return [replace(hit, rank=rank) for rank, hit in enumerate(rescored, start=1)]

@@ -96,18 +96,6 @@ type Probe = Box<dyn Fn(u16) -> bool + Send + Sync>;
 /// 端口持有者 (PID, 命令行) 查询:生产实现经 PowerShell 查询,测试注入假数据。
 type PortOwnerQuery = Box<dyn Fn(u16) -> Option<(u32, String)> + Send + Sync>;
 
-/// 自有应用进程的命令行特征:壳异常退出残留的 api/worker/gateway 经
-/// `python -m apps.{api,worker,asset_gateway}.main` 启动。仅当进程同时实际持有冲突
-/// 端口(经 port_owner 按端口归属确认)时才视为本应用残留进程并清理,
-/// 同栈但非壳启动、未占用冲突端口的无关进程不会被误杀。
-const OWNED_PROCESS_PATTERNS: [&str; 5] = [
-    "apps.desktop_services",
-    "apps.worker_start",
-    "apps.api.main",
-    "apps.worker.main",
-    "apps.asset_gateway.main",
-];
-
 /// 命令行摘要:去首尾空白,超过 max 字符截断并以 "..." 结尾(按字符边界截取,
 /// 避免切开多字节字符)。报错提示用,帮助用户判断占用进程来源;空命令行返回
 /// 空串,调用方省略摘要部分。
@@ -135,16 +123,15 @@ pub struct Orchestrator {
     data: DataPaths,
     ports: Ports,
     probe: Probe,
-    /// 便携 PostgreSQL 使用 pg_isready；容器和注入测试沿用端口探测。
+    /// 便携 PostgreSQL 使用 pg_isready；注入测试可使用端口探测。
     postgres_ready: Option<Probe>,
     port_owner: PortOwnerQuery,
     on_event: Box<dyn Fn(&StartupEvent) + Send + Sync>,
     children: Vec<ChildHandle>,
     shutting_down: Arc<AtomicBool>,
+    postgres_started: bool,
     /// 取消标志:退出/重试置位后,start 的步骤检查点与端口等待循环尽快自行清理退出。
     cancel: Arc<AtomicBool>,
-    /// 开发回退:postgres/meili 走 docker compose 容器而非便携二进制。
-    uses_containers: bool,
     /// 业务库确保逻辑:生产为 None(走 ensure_database),测试可注入闭包。
     ensure_db: Option<Box<dyn Fn(&Orchestrator) -> Result<(), StartupError> + Send + Sync>>,
 }
@@ -188,18 +175,10 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            postgres_started: false,
             cancel: Arc::new(AtomicBool::new(false)),
-            uses_containers: false,
             ensure_db: None,
         }
-    }
-
-    /// 切到开发回退模式:postgres/meili 用 docker compose 容器,shutdown 时 compose stop。
-    pub fn with_containers(mut self) -> Self {
-        self.uses_containers = true;
-        // 开发容器模式没有便携 pg_isready.exe，compose --wait 后用端口判断。
-        self.postgres_ready = None;
-        self
     }
 
     /// 克隆取消令牌:壳层在退出/重试时无需获取编排锁即可置位,
@@ -276,151 +255,46 @@ impl Orchestrator {
         self.children.clear();
     }
 
-    /// Preflight 端口冲突恢复:按端口归属识别占用进程——对每个 busy 端口查询
-    /// 实际持有者(port_owner: PID + 命令行),仅当命令行匹配自有特征
-    /// (OWNED_PROCESS_PATTERNS)才 taskkill 清理;非自有进程一律不动,
-    /// 记录「端口 X 被进程 PID Y(命令行摘要)占用」供报错提示。端口查询不到
-    /// 归属同样不杀(无法确认是本应用残留),宁可不杀不误杀。
-    /// kill 失败(进程已退出/权限不足)不终止启动流程,由重探结果判定端口是否释放。
-    /// 返回仍占用端口的描述列表(含 PID 与命令行摘要),供 start 报错。
-    fn recover_stale_owned_processes(&self, busy: &mut Vec<u16>) -> Vec<String> {
-        let mut occupants: Vec<String> = Vec::new();
-        let mut killed_any = false;
-        for port in busy.iter().copied() {
-            match (self.port_owner)(port) {
-                Some((pid, cmd)) if OWNED_PROCESS_PATTERNS.iter().any(|p| cmd.contains(p)) => {
-                    let _ = crate::processes::kill_pid(pid);
-                    killed_any = true;
-                }
-                Some((pid, cmd)) => occupants.push(occupied_summary(port, pid, &cmd)),
-                None => occupants.push(format!("端口 {port} 被占用(无法查询占用进程)")),
-            }
-        }
-        if killed_any {
-            // 给 OS 释放端口留时间,再重探一次
-            std::thread::sleep(Duration::from_millis(800));
-            busy.retain(|p| (self.probe)(*p));
-            if !busy.is_empty() {
-                // 清理后仍占用:持有者可能已更换,重新查询以给出准确提示
-                occupants.clear();
-                for port in busy.iter().copied() {
-                    match (self.port_owner)(port) {
-                        Some((pid, cmd)) => occupants.push(occupied_summary(port, pid, &cmd)),
-                        None => occupants.push(format!("端口 {port} 被占用(无法查询占用进程)")),
-                    }
-                }
-            }
-        }
-        occupants
-    }
-
-    /// 运行可能耗时较长的同步命令(compose up --wait、alembic 迁移可达分钟级):
-    /// spawn 后轮询 try_wait(间隔 500ms),期间取消标志置位则 taskkill 命令子进程
-    /// 并返回"已取消"错误,退出/重试不再挂起数分钟。
-    /// 其余同步命令(initdb、pg_ctl stop)耗时秒级,保持 .status() 同步等待:
-    /// 取消收益小,且 initdb 中途强杀会留下半初始化数据目录,同步等待更安全。
-    /// log_file 非 None 时 stdout/stderr 落盘(append),否则保持 null——
-    /// 迁移/容器启动失败时必须有可读日志,不能"详见日志"却无日志可看。
-    fn run_command_cancellable(
-        &mut self,
-        step: Step,
-        program: &std::path::Path,
-        args: &[&str],
-        cwd: Option<&std::path::Path>,
-        fail_msg: &str,
-        log_file: Option<&std::path::Path>,
-    ) -> Result<(), StartupError> {
-        let mut cmd = StdCommand::new(program);
-        no_console(&mut cmd);
-        cmd.args(args);
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        match log_file {
-            Some(path) => {
-                // 走文件而非管道:长命子进程(容器启动的 docker)继承管道写端
-                // 会让读端等不到 EOF 而挂起(与 spawn/initdb 同源的 stdio 纪律)
-                let log = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .map_err(|e| {
-                        self.fail(step, format!("无法打开日志文件 {}: {e}", path.display()))
-                    })?;
-                cmd.stdout(std::process::Stdio::from(log.try_clone().unwrap()))
-                    .stderr(std::process::Stdio::from(log));
-            }
-            None => {
-                // 显式 null:壳是 GUI 程序无控制台 stdio,且避免子进程继承怪异句柄
-                cmd.stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-            }
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| self.fail(step, format!("{} 无法执行: {e}", program.display())))?;
-        loop {
-            if self.cancel.load(Ordering::SeqCst) {
-                // 取消:杀整棵进程树并回收,再复用取消语义(清理已 spawn 子进程、
-                // 返回"已取消"、不发 Failed 事件)。注:docker compose 被杀的是
-                // 客户端,容器若仍在后台启动,由下次启动的 --wait/端口探测收敛。
-                let _ = crate::processes::kill_pid(child.id());
-                let _ = child.wait();
-                return self.check_cancelled(step);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if status.success() {
-                        return Ok(());
-                    }
-                    return Err(self.fail(step, fail_msg));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(self.fail(step, format!("{} 状态检查失败: {e}", program.display())));
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+    /// 只报告占用者；模块名或监听端口不能证明进程属于本监督器。
+    fn occupied_processes(&self, busy: &[u16]) -> Vec<String> {
+        busy.iter()
+            .map(|port| match (self.port_owner)(*port) {
+                Some((pid, cmd)) => occupied_summary(*port, pid, &cmd),
+                None => format!("端口 {port} 被占用(无法查询占用进程)"),
+            })
+            .collect()
     }
 
     pub fn start(&mut self) -> Result<(), StartupError> {
         ensure_dirs(&self.data)
             .map_err(|e| self.fail(Step::Preflight, format!("无法创建数据目录: {e}")))?;
 
-        // 1. 预检:关键端口冲突检测(应用端口)
+        // No Python process or migration may run before all four service ports are free.
         self.check_cancelled(Step::Preflight)?;
         self.emit(Step::Preflight, StepStatus::Pending, None);
-        let mut busy: Vec<u16> = [self.ports.api, self.ports.gateway]
-            .into_iter()
-            .filter(|p| (self.probe)(*p))
-            .collect();
+        let busy: Vec<u16> = [
+            self.ports.api,
+            self.ports.gateway,
+            self.ports.postgres,
+            self.ports.meili,
+        ]
+        .into_iter()
+        .filter(|p| (self.probe)(*p))
+        .collect();
         if !busy.is_empty() {
-            // 壳进程异常退出(如断电/强杀)会残留自有应用进程占端口:
-            // 按端口归属识别占用进程(实际持有该端口的 PID 且命令行匹配
-            // 自有特征)才 taskkill 清理并重探,避免误杀同栈但非壳启动的
-            // 无关进程;非自有占用者的 PID 与命令行摘要随报错提示用户。
-            let occupants = self.recover_stale_owned_processes(&mut busy);
-            if !busy.is_empty() {
-                // fail 内部会先发出 (Preflight, Failed) 事件,此处不再手动 emit
-                let detail = if occupants.is_empty() {
-                    format!("端口被占用: {busy:?}")
-                } else {
-                    format!("端口被占用: {}", occupants.join("; "))
-                };
-                return Err(self.fail(
-                    Step::Preflight,
-                    format!("{detail}。可能是上次异常退出残留,可重启电脑或手动结束该进程"),
-                ));
-            }
+            let occupants = self.occupied_processes(&busy);
+            // fail 内部会先发出 (Preflight, Failed) 事件,此处不再手动 emit
+            let detail = if occupants.is_empty() {
+                format!("端口被占用: {busy:?}")
+            } else {
+                format!("端口被占用: {}", occupants.join("; "))
+            };
+            return Err(self.fail(
+                Step::Preflight,
+                format!("{detail}。已有进程保持运行；请检查实例和端口配置"),
+            ));
         }
         self.emit(Step::Preflight, StepStatus::Done, None);
-
-        // Load shared Python dependencies while infrastructure starts. The UI
-        // stays on the loading page until migrations and both listeners are ready.
-        self.launch_services()?;
 
         // 2. PostgreSQL
         self.check_cancelled(Step::Postgres)?;
@@ -433,6 +307,9 @@ impl Orchestrator {
         self.emit(Step::Meili, StepStatus::Pending, None);
         self.start_meili()?;
         self.emit(Step::Meili, StepStatus::Done, None);
+
+        // Only our own infrastructure is ready now; Python may connect and migrate.
+        self.launch_services()?;
 
         // 4. 迁移
         self.check_cancelled(Step::Migrate)?;
@@ -453,34 +330,18 @@ impl Orchestrator {
     }
 
     fn start_postgres(&mut self) -> Result<(), StartupError> {
-        if self.uses_containers {
-            // 开发回退:compose 一并拉起 postgres 与 meilisearch,--wait 等待健康检查通过。
-            // workdir = 项目根(dev 下即 python_workdir),deploy/compose.yaml 相对其解析。
-            // --wait 可达分钟级,走可取消轮询(取消时杀掉 compose 客户端,容器若仍在
-            // 后台继续启动,由下次启动的 --wait/端口探测收敛)。
-            let workdir = self.paths.python_workdir.clone();
-            let compose_log = self.log_file("postgres-compose");
-            self.run_command_cancellable(
+        if (self.probe)(self.ports.postgres) {
+            return Err(self.fail(
                 Step::Postgres,
-                std::path::Path::new("docker"),
-                &["compose", "-f", "deploy/compose.yaml", "up", "-d", "--wait"],
-                Some(&workdir),
-                "docker compose up 失败,请确认 Docker Desktop 已启动",
-                Some(&compose_log),
-            )?;
-            if !self.wait_for_port_cancellable(self.ports.postgres, Duration::from_secs(60)) {
-                self.check_cancelled(Step::Postgres)?;
-                return Err(self.fail(Step::Postgres, "PostgreSQL 容器未在 60 秒内就绪"));
-            }
-            return Ok(());
+                "PostgreSQL 端口已被占用；保留已有进程，不复用",
+            ));
         }
         let bin = &self.paths.postgres_bin;
         let data = &self.data.postgres;
         let newly_initialized = !postgres_initialized(data);
         if newly_initialized {
             // 首次初始化:initdb + 启动 + 建库。
-            // initdb 通常数秒完成,保持 .output() 同步等待(见 run_command_cancellable 注释:
-            // 中途强杀会留下半初始化数据目录,取消收益小而代价大)。
+            // initdb 同步等待；中途强杀会留下半初始化数据目录。
             // 数据目录必须为空才能 initdb:重试时上次残留的半初始化文件会导致
             // "directory exists but is not empty",先整体清空(未初始化即无有价值数据)。
             let _ = std::fs::remove_dir_all(data);
@@ -530,7 +391,7 @@ impl Orchestrator {
         }
         // 启动。pg_ctl -W 只负责发起启动，等待由下方可取消的就绪轮询完成。
         // Windows 异常关机后的 fsync/恢复可能超过 pg_ctl 默认的 60 秒等待。
-        if !(self.probe)(self.ports.postgres) || !self.postgres_ready() {
+        {
             let log = self.log_file("postgres");
             // pg_ctl 的 stdio 走 null/文件而非管道:pg_ctl start 启动的 postgres
             // 长驻并继承管道写端,读端(.output)永远等不到 EOF 而挂起
@@ -557,24 +418,12 @@ impl Orchestrator {
                 .status()
                 .map_err(|e| self.fail(Step::Postgres, format!("pg_ctl 无法执行: {e}")))?;
             if !status.success() {
-                // 上次 pg_ctl 超时后，服务器可能仍在恢复；只有 pg_ctl status
-                // 也确认未运行时才立即报错，不碰 postmaster.pid 或数据目录。
-                let mut check = StdCommand::new(bin.join("pg_ctl.exe"));
-                no_console(&mut check);
-                let running = check
-                    .args(["-D", data.to_str().unwrap_or_default(), "status"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success());
-                if !running {
-                    return Err(self.fail(
-                        Step::Postgres,
-                        "pg_ctl start 失败，请查看日志目录中的 postgres-ctl.log 和 postgres.log",
-                    ));
-                }
-                // 正在恢复的实例继续等待 pg_isready，不会再次启动同一数据目录。
+                return Err(self.fail(
+                    Step::Postgres,
+                    "pg_ctl start 失败；不复用已有实例，请查看 postgres-ctl.log",
+                ));
             }
+            self.postgres_started = true;
         }
         if !self.wait_for_postgres_ready_cancellable(Duration::from_secs(300)) {
             self.check_cancelled(Step::Postgres)?;
@@ -583,6 +432,42 @@ impl Orchestrator {
                 "PostgreSQL 未在 300 秒内就绪，请查看日志目录中的 postgres.log",
             ));
         }
+        // pg_isready alone could identify another server racing for the port.
+        // Verify that our exact data directory has a running postmaster as well.
+        let mut status = StdCommand::new(bin.join("pg_ctl.exe"));
+        no_console(&mut status);
+        if !status
+            .args(["-D", data.to_str().unwrap_or_default(), "status"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Err(self.fail(
+                Step::Postgres,
+                "本资料目录的 PostgreSQL 未运行；不会执行迁移",
+            ));
+        }
+        if !self.postgres_port_is_owned() {
+            return Err(self.fail(
+                Step::Postgres,
+                "PostgreSQL 监听进程与本资料目录不一致；不会执行迁移",
+            ));
+        }
+        self.prepare_application_database(newly_initialized)
+    }
+
+    fn postgres_port_is_owned(&self) -> bool {
+        let expected = std::fs::read_to_string(self.data.postgres.join("postmaster.pid"))
+            .ok()
+            .and_then(|content| content.lines().next()?.trim().parse::<u32>().ok());
+        match expected {
+            Some(pid) => (self.port_owner)(self.ports.postgres).map(|owner| owner.0) == Some(pid),
+            None => false,
+        }
+    }
+
+    fn prepare_application_database(&self, newly_initialized: bool) -> Result<(), StartupError> {
         // initdb 只建 postgres 模板库,业务库(alembic 迁移连接它)需显式创建。
         // 已有业务库只查询一次；首次安装才执行 createdb。
         let database_marker = self.data.root.join("database-initialized");
@@ -663,16 +548,11 @@ impl Orchestrator {
     }
 
     fn start_meili(&mut self) -> Result<(), StartupError> {
-        if self.uses_containers {
-            // meili 容器已随 Postgres 步骤的 compose up 拉起,此处仅等端口就绪。
-            if !self.wait_for_port_cancellable(self.ports.meili, Duration::from_secs(60)) {
-                self.check_cancelled(Step::Meili)?;
-                return Err(self.fail(Step::Meili, "Meilisearch 容器未在 60 秒内就绪"));
-            }
-            return Ok(());
-        }
         if (self.probe)(self.ports.meili) {
-            return Ok(());
+            return Err(self.fail(
+                Step::Meili,
+                "Meilisearch 端口已被占用；保留已有进程，不复用",
+            ));
         }
         let key = std::env::var("HUB_MEILISEARCH_API_KEY")
             .unwrap_or_else(|_| "research-hub-local-meili-key".to_string());
@@ -694,10 +574,17 @@ impl Orchestrator {
             &self.log_file("meilisearch"),
         )
         .map_err(|e| self.fail(Step::Meili, format!("无法启动 Meilisearch: {e}")))?;
+        let pid = handle.pid;
         self.children.push(handle);
         if !self.wait_for_port_cancellable(self.ports.meili, Duration::from_secs(60)) {
             self.check_cancelled(Step::Meili)?;
             return Err(self.fail(Step::Meili, "Meilisearch 未在 60 秒内就绪"));
+        }
+        if (self.port_owner)(self.ports.meili).map(|owner| owner.0) != Some(pid) {
+            return Err(self.fail(
+                Step::Meili,
+                "Meilisearch 端口不属于本轮启动进程；不会执行迁移",
+            ));
         }
         Ok(())
     }
@@ -752,28 +639,20 @@ impl Orchestrator {
     }
 
     /// 逆序停止:应用进程 → meili → postgres。幂等,可重复调用。
-    /// 先置位取消标志(打断可能仍在进行的 start 端口等待),再清子进程与容器/postgres。
+    /// 先置位取消标志(打断可能仍在进行的 start 端口等待),再清理持有的子进程与本数据目录的 PostgreSQL。
     pub fn shutdown(&mut self) {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
         }
         self.cancel.store(true, Ordering::SeqCst);
         self.cleanup_children();
-        if self.uses_containers {
-            // 只 stop 不下线:保留 compose 卷,下次启动复用数据。
-            let mut compose_stop = StdCommand::new("docker");
-            no_console(&mut compose_stop);
-            let _ = compose_stop
-                .args(["compose", "-f", "deploy/compose.yaml", "stop"])
-                .current_dir(&self.paths.python_workdir)
-                .status();
-            return;
-        }
+
         // meili 由 kill_tree 已停;postgres 优雅停止。
-        // pg_ctl stop 秒级完成,保持 .status() 同步等待(见 run_command_cancellable 注释)。
+        // pg_ctl stop 秒级完成，保持同步等待。
         // 与 start_postgres 一致显式 Stdio::null():壳是 GUI 子系统进程,避免
         // pg_ctl 输出写入无效句柄(防御性,与管道 EOF 坑同源的 stdio 纪律)。
-        if (self.probe)(self.ports.postgres) {
+        if self.postgres_started {
+            self.postgres_started = false;
             let bin = &self.paths.postgres_bin;
             let mut pgctl_stop = StdCommand::new(bin.join("pg_ctl.exe"));
             no_console(&mut pgctl_stop);
@@ -813,8 +692,8 @@ impl Orchestrator {
             on_event: Box::new(on_event),
             children: Vec::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            postgres_started: false,
             cancel: Arc::new(AtomicBool::new(false)),
-            uses_containers: false,
             ensure_db: None,
         }
     }
@@ -827,44 +706,12 @@ impl Orchestrator {
         self.ensure_db = Some(Box::new(f));
         self
     }
-
-    /// 容器模式(开发回退)的测试构造:与 with_probe 相同,但 uses_containers = true。
-    fn with_probe_and_containers(
-        paths: RuntimePaths,
-        data: DataPaths,
-        ports: Ports,
-        probe: impl Fn(u16) -> bool + Send + Sync + 'static,
-        port_owner: impl Fn(u16) -> Option<(u32, String)> + Send + Sync + 'static,
-        on_event: impl Fn(&StartupEvent) + Send + Sync + 'static,
-    ) -> Self {
-        Orchestrator {
-            paths,
-            data,
-            ports,
-            probe: Box::new(probe),
-            postgres_ready: None,
-            port_owner: Box::new(port_owner),
-            on_event: Box::new(on_event),
-            children: Vec::new(),
-            shutting_down: Arc::new(AtomicBool::new(false)),
-            cancel: Arc::new(AtomicBool::new(false)),
-            uses_containers: true,
-            ensure_db: None,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-
-    const ENV_KEYS: [&str; 4] = [
-        "HUB_API_PORT",
-        "HUB_ASSET_GATEWAY_PORT",
-        "HUB_POSTGRES_PORT",
-        "HUB_MEILISEARCH_PORT",
-    ];
 
     fn test_ports() -> Ports {
         Ports {
@@ -890,8 +737,7 @@ mod tests {
             postgres_bin: root.join("runtime/postgres/bin"),
             meilisearch: root.join("runtime/meilisearch.exe"),
         };
-        // Early HTTP launch is overlapped with infrastructure. A harmless stub
-        // lets failure/cancellation tests still reach their injected DB probes.
+        // A harmless executable stub keeps these tests independent of Python.
         std::fs::create_dir_all(paths.python.parent().unwrap()).unwrap();
         std::fs::create_dir_all(&paths.python_workdir).unwrap();
         std::fs::copy(
@@ -943,8 +789,6 @@ mod tests {
         orch.cancel.store(true, Ordering::SeqCst);
         assert!(!orch.wait_for_postgres_ready_cancellable(Duration::from_secs(300)));
 
-        let orch = orch.with_containers();
-        assert!(orch.postgres_ready(), "容器模式不依赖便携 pg_isready.exe");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -956,27 +800,23 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = calls.clone();
         let (_, sink) = record();
-        let mut orch =
-            Orchestrator::with_probe(paths, data, test_ports(), |_| true, |_| None, sink)
-                .with_ensure_db(move |_| {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                });
-        orch.start_postgres().unwrap();
-        orch.start_postgres().unwrap();
+        let orch = Orchestrator::with_probe(paths, data, test_ports(), |_| true, |_| None, sink)
+            .with_ensure_db(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        orch.prepare_application_database(false).unwrap();
+        orch.prepare_application_database(false).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         std::fs::remove_file(root.join("data/database-initialized")).unwrap();
-        orch.start_postgres().unwrap();
+        orch.prepare_application_database(false).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn ports_from_env_defaults() {
-        // 清掉相关 env 后取默认值
-        for key in ENV_KEYS {
-            std::env::remove_var(key);
-        }
+        let _guard = crate::test_env::EnvironmentGuard::isolated();
         let ports = Ports::from_env();
         assert_eq!(ports.api, 8767);
         assert_eq!(ports.gateway, 8766);
@@ -1002,8 +842,8 @@ mod tests {
                     "detail 应说明占用端口: {detail}"
                 );
                 assert!(
-                    detail.contains("重启电脑"),
-                    "非自有进程占用时应提示重启电脑/手动结束: {detail}"
+                    detail.contains("已有进程保持运行"),
+                    "占用时应保留已有进程并提示检查配置: {detail}"
                 );
             }
             other => panic!("期望 Preflight 失败,得到: {other:?}"),
@@ -1026,74 +866,132 @@ mod tests {
     }
 
     #[test]
-    fn preflight_cleans_stale_owned_process_and_retries() {
+    fn every_service_port_conflict_blocks_python_and_preserves_existing_services_on_exit() {
+        let ports = test_ports();
+        for blocked in [ports.api, ports.gateway, ports.postgres, ports.meili] {
+            let (root, paths, data) = fake_world();
+            let log = data.logs.join("api.log");
+            let (events, sink) = record();
+            let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = probes.clone();
+            let mut orch = Orchestrator::with_probe(
+                paths,
+                data,
+                ports,
+                move |port| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    port == blocked
+                },
+                |_| Some((4242, "existing-service.exe".into())),
+                sink,
+            );
+            assert!(matches!(
+                orch.start(),
+                Err(StartupError::StepFailed {
+                    step: Step::Preflight,
+                    ..
+                })
+            ));
+            assert!(!log.exists(), "Python must not have been launched");
+            assert!(orch.children.is_empty());
+            assert!(!orch.postgres_started);
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![
+                    (Step::Preflight, StepStatus::Pending),
+                    (Step::Preflight, StepStatus::Failed)
+                ]
+            );
+            let before_shutdown = probes.load(Ordering::SeqCst);
+            orch.shutdown();
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                before_shutdown,
+                "shutdown must not probe or stop unowned PostgreSQL"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn postgres_listener_must_match_the_selected_data_directory_pid() {
+        let (root, paths, data) = fake_world();
+        std::fs::create_dir_all(&data.postgres).unwrap();
+        let pid_file = data.postgres.join("postmaster.pid");
+        let (_, sink) = record();
+        let orch = Orchestrator::with_probe(
+            paths,
+            data,
+            test_ports(),
+            |_| true,
+            |_| Some((4321, "postgres.exe".into())),
+            sink,
+        );
+        assert!(!orch.postgres_port_is_owned());
+        std::fs::write(&pid_file, "1234\nselected-data\n").unwrap();
+        assert!(!orch.postgres_port_is_owned());
+        std::fs::write(&pid_file, "4321\nselected-data\n").unwrap();
+        assert!(orch.postgres_port_is_owned());
+        std::fs::write(&pid_file, "invalid\n").unwrap();
+        assert!(!orch.postgres_port_is_owned());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn infrastructure_refuses_a_port_claimed_after_preflight() {
+        let (root, paths, data) = fake_world();
+        let (_, sink) = record();
+        let mut orch =
+            Orchestrator::with_probe(paths, data, test_ports(), |_| true, |_| None, sink);
+        assert!(matches!(
+            orch.start_postgres(),
+            Err(StartupError::StepFailed {
+                step: Step::Postgres,
+                ..
+            })
+        ));
+        assert!(matches!(
+            orch.start_meili(),
+            Err(StartupError::StepFailed {
+                step: Step::Meili,
+                ..
+            })
+        ));
+        assert!(!orch.postgres_started);
+        assert!(orch.children.is_empty());
+        assert!(!orch.data.postgres.exists());
+        orch.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preflight_preserves_same_module_from_another_owner() {
         let (root, paths, data) = fake_world();
         let (events, sink) = record();
-        // 探测:api 端口首次占用(残留进程),清理重探后释放;其余端口恒空闲。
-        // 端口持有者查询注入:api 端口归属自有进程(特征 apps.api.main)→ 应被
-        // 识别并清理(真实 taskkill 对假 pid 失败被忽略,由重探结果判定)。
-        // 重探通过后 Preflight Done,流程进入 Postgres,假 initdb.exe 不存在 →
-        // Postgres Failed,序列结束。仅 busy 的 api 端口被查询持有者且仅一次:
-        // 清理重探后端口已释放,不再二次查询,未占用端口的自有进程不会被误杀。
-        let probes = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let probe_counter = probes.clone();
-        let owner_calls: Arc<Mutex<Vec<u16>>> = Arc::new(Mutex::new(Vec::new()));
-        let owner_record = owner_calls.clone();
         let ports = test_ports();
         let mut orch = Orchestrator::with_probe(
             paths,
             data,
             ports,
-            move |p| {
-                if p == ports.api {
-                    probe_counter.fetch_add(1, Ordering::SeqCst) == 0
-                } else {
-                    false
-                }
-            },
-            move |port| {
-                owner_record.lock().unwrap().push(port);
-                (port == ports.api).then_some((4242, "python.exe -m apps.api.main".to_string()))
-            },
+            move |p| p == ports.api,
+            |_| Some((4242, "python.exe -m apps.desktop_services".into())),
             sink,
         );
-        let result = orch.start();
-        match result {
-            Err(StartupError::StepFailed { step, .. }) => {
-                assert_eq!(
-                    step,
-                    Step::Postgres,
-                    "清理重探后 Preflight 应通过并进入 Postgres"
-                );
-            }
-            other => panic!("期望进入 Postgres 后失败,得到: {other:?}"),
-        }
+        assert!(matches!(
+            orch.start(),
+            Err(StartupError::StepFailed {
+                step: Step::Preflight,
+                ..
+            })
+        ));
         assert_eq!(
-            probes.load(Ordering::SeqCst),
-            2,
-            "api 端口应被探测两次:初始 busy 检测 + 清理后重探"
+            *events.lock().unwrap(),
+            vec![
+                (Step::Preflight, StepStatus::Pending),
+                (Step::Preflight, StepStatus::Failed)
+            ]
         );
-        assert_eq!(
-            *owner_calls.lock().unwrap(),
-            vec![ports.api],
-            "仅 busy 的 api 端口被查询持有者一次(清理重探通过后不再查询)"
-        );
-        let seq = events.lock().unwrap();
-        assert!(
-            seq.contains(&(Step::Preflight, StepStatus::Done)),
-            "Preflight 应在清理残留进程后通过: {seq:?}"
-        );
-        assert!(
-            !seq.iter()
-                .any(|(s, st)| *s == Step::Preflight && *st == StepStatus::Failed),
-            "清理重探后 Preflight 不应失败: {seq:?}"
-        );
-        assert!(
-            seq.iter()
-                .any(|(s, st)| *s == Step::Postgres && *st == StepStatus::Failed),
-            "序列应以 Postgres Failed 结束: {seq:?}"
-        );
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1139,8 +1037,8 @@ mod tests {
                 );
                 assert!(detail.contains("..."), "截断的摘要应以 ... 结尾: {detail}");
                 assert!(
-                    detail.contains("重启电脑"),
-                    "非自有进程占用时应提示重启电脑/手动结束: {detail}"
+                    detail.contains("已有进程保持运行"),
+                    "占用时应保留已有进程并提示检查配置: {detail}"
                 );
             }
             other => panic!("期望 Preflight 失败,得到: {other:?}"),
@@ -1192,6 +1090,7 @@ mod tests {
 
     #[test]
     fn postgres_failure_stops_without_later_events() {
+        let _guard = crate::test_env::EnvironmentGuard::isolated();
         let (root, paths, data) = fake_world();
         // data 将被 with_probe 按值消费,提前克隆数据目录路径用于断言密码文件清理
         let data_dir = data.postgres.clone();
@@ -1244,6 +1143,7 @@ mod tests {
 
     #[test]
     fn postgres_clears_stale_uninitialized_data_dir_before_initdb() {
+        let _guard = crate::test_env::EnvironmentGuard::isolated();
         // 回归:半初始化残留(重试场景)必须被清空,否则 initdb 报
         // "directory exists but is not empty" 直接失败。
         let (root, paths, data) = fake_world();
@@ -1358,58 +1258,11 @@ mod tests {
     }
 
     #[test]
-    fn with_containers_flips_flag() {
-        // Orchestrator::new 只拼 data 路径,不触碰磁盘,可安全直用
-        let (root, paths, _data) = fake_world();
-        let (_, sink) = record();
-        let orch = Orchestrator::new(paths, test_ports(), sink);
-        assert!(!orch.uses_containers, "new 保持生产语义:不启用容器");
-        assert!(
-            orch.with_containers().uses_containers,
-            "with_containers 打开容器回退"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn container_mode_preflight_failure_and_shutdown_are_safe() {
-        let (root, paths, data) = fake_world();
-        let (events, sink) = record();
-        // 恒 true 探测:Preflight 视关键端口为占用,容器分支不会被执行到;
-        // 序列与生产模式一致,证明 uses_containers 不影响早期失败路径。
-        let mut orch = Orchestrator::with_probe_and_containers(
-            paths,
-            data,
-            test_ports(),
-            |_| true,
-            |_| None,
-            sink,
-        );
-        match orch.start() {
-            Err(StartupError::StepFailed { step, .. }) => assert_eq!(step, Step::Preflight),
-            other => panic!("期望 Preflight 失败,得到: {other:?}"),
-        }
-        let seq = events.lock().unwrap();
-        assert_eq!(
-            *seq,
-            vec![
-                (Step::Preflight, StepStatus::Pending),
-                (Step::Preflight, StepStatus::Failed),
-            ]
-        );
-        drop(seq);
-        // 容器模式 shutdown 执行 docker compose stop(fake root 下命令失败被忽略),不得 panic
-        orch.shutdown();
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn start_is_cancellable_while_waiting_for_port() {
+        let _guard = crate::test_env::EnvironmentGuard::isolated();
         let (root, paths, data) = fake_world();
-        // postgres 视为已初始化:跳过 initdb;注入探测对 postgres 端口返回 true,
-        // 使 pg_ctl 与 postgres 端口等待都被跳过,start 直达 meili 端口等待循环。
-        std::fs::create_dir_all(&data.postgres).unwrap();
-        std::fs::write(data.postgres.join("PG_VERSION"), "16\n").unwrap();
+        ensure_dirs(&data).unwrap();
+        // Exercise the cancellable Meili wait directly, without any database.
         // meilisearch 假可执行文件:用真实存在的 cmd.exe 副本让 spawn 成功
         // (spawn 只要求进程能启动),此时 children 已含 meili 进程,等待循环开始。
         let cmd =
@@ -1438,7 +1291,9 @@ mod tests {
             let orch = orch.clone();
             std::thread::spawn(move || {
                 let begin = std::time::Instant::now();
-                let result = orch.lock().unwrap().start();
+                let mut guard = orch.lock().unwrap();
+                guard.emit(Step::Meili, StepStatus::Pending, None);
+                let result = guard.start_meili();
                 (result, begin.elapsed())
             })
         };
@@ -1454,9 +1309,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         std::thread::sleep(Duration::from_millis(300));
+        let cancellation_started = std::time::Instant::now();
         cancel.store(true, Ordering::SeqCst);
 
-        let (result, elapsed) = start_handle.join().expect("start 线程应正常结束");
+        let (result, _startup_elapsed) = start_handle.join().expect("start 线程应正常结束");
+        let elapsed = cancellation_started.elapsed();
         assert!(
             elapsed < Duration::from_secs(3),
             "取消后 start 应在远小于端口超时前返回,实际 {elapsed:?}"
@@ -1482,54 +1339,6 @@ mod tests {
             !seq.iter().any(|(_, st)| *st == StepStatus::Failed),
             "取消路径不应发 Failed 事件: {seq:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn cancellable_command_kills_child_and_returns_cancel() {
-        // 直接驱动 run_command_cancellable:长跑命令(ping 300 秒量级)期间置位取消,
-        // 应快速返回 CANCEL_DETAIL 错误而非等命令自然结束(否则退出会挂起数分钟)。
-        let (root, paths, data) = fake_world();
-        let (_, sink) = record();
-        let orch = Arc::new(Mutex::new(Orchestrator::with_probe(
-            paths,
-            data,
-            test_ports(),
-            |_| false,
-            |_| None,
-            sink,
-        )));
-        let cancel = orch.lock().unwrap().cancel_token();
-        let start_handle = {
-            let orch = orch.clone();
-            std::thread::spawn(move || {
-                let begin = std::time::Instant::now();
-                let result = orch.lock().unwrap().run_command_cancellable(
-                    Step::Migrate,
-                    std::path::Path::new("cmd"),
-                    &["/D", "/C", "ping -n 300 127.0.0.1"],
-                    None,
-                    "不应走到失败分支",
-                    None,
-                );
-                (result, begin.elapsed())
-            })
-        };
-        // 等子进程真正启动(留足余量),再经取消令牌无锁置位(与壳层退出路径一致)
-        std::thread::sleep(Duration::from_millis(800));
-        cancel.store(true, Ordering::SeqCst);
-        let (result, elapsed) = start_handle.join().expect("命令线程应正常结束");
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "取消后长命令应在远小于命令时长前返回,实际 {elapsed:?}"
-        );
-        match result {
-            Err(StartupError::StepFailed { step, detail }) => {
-                assert_eq!(step, Step::Migrate, "取消错误应归属当前步骤");
-                assert_eq!(detail, CANCEL_DETAIL);
-            }
-            other => panic!("期望取消错误,得到: {other:?}"),
-        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

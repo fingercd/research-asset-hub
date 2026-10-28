@@ -2,30 +2,26 @@
 
 本文按当前源码描述入口、职责和边界，不把历史交付报告当成当前运行证明。隔离运行命令见[开发指南](../DEVELOPMENT.md)，来源规则见[来源边界](source-boundaries.md)。
 
-## 1. 三条入口，不是三套资料库
+## 1. 一个原生监督器，静态界面与只读 MCP
 
-### 源码 Web
+### Windows 桌面与显式开发
 
-[`scripts/hub.ps1`](../../scripts/hub.ps1) 负责 Compose 基础设施、Alembic 迁移和以下四个应用进程：
+[`scripts/desktop.ps1`](../../scripts/desktop.ps1) 只构建静态前端和原生程序；`plan` 列出明确参数，`run` 需要显式 runtime 与 data-dir。没有 Vite devUrl、独立网站托管、Compose 或云端 Web fallback。
 
 ```text
-hub.ps1 start / dev
-  ├─ PostgreSQL + Meilisearch（Compose）
-  ├─ apps.api.main                    API
-  ├─ apps.worker.main                 后台任务
-  ├─ apps.asset_gateway.main          隔离文件网关
-  └─ apps.api.web_host / Vite         生产静态页托管 / 前端热更新
+原生监督器（生产或显式开发 profile）
+  ├─ 自管 PostgreSQL / Meilisearch
+  ├─ apps.desktop_services
+  │    ├─ 数据库迁移
+  │    ├─ API（仅本机）
+  │    └─ 安全资产网关（独立 Origin / CSP）
+  ├─ apps.worker_start
+  └─ Tauri 内嵌静态前端（不监听网站端口）
 ```
 
-`start` 要求已有 `apps/web/dist`；`dev` 用 Vite，但不会自动热重载 Python API。端口、日志与 checkout 内进程台账的边界见开发指南；不要在承载正式服务的 checkout 中启动第二个编排器。
+[`run_startup`](../../desktop/src-tauri/src/lib.rs) 与 [`Orchestrator`](../../desktop/src-tauri/src/orchestrator.rs) 是唯一生命周期实现。生产只使用随包运行时；缺失报错，不猜源码路径或系统 Python。开发明确 `--dev-source-root`、`--dev-runtime-root` 和 `--data-dir`，使用同一个监督器。静态前端仅接受原生注入的 API base，不再回退到页面相对路径。
 
-### Windows 桌面
-
-[`lib.rs::run_startup`](../../desktop/src-tauri/src/lib.rs) 选择运行时并交给 [`Orchestrator`](../../desktop/src-tauri/src/orchestrator.rs)。生产使用随包运行时和内置前端，**不依赖 8765 Web host**。找不到随包 Python 时，开发回退使用项目 `.venv` 与 Compose。
-
-桌面经 [`apps/desktop_services.py`](../../apps/desktop_services.py) 在一个 Python 进程内承载两个独立 FastAPI 应用：API 与资产网关仍有不同端口、Origin、CORS、签名及 CSP 边界。HTTP 开放前由 [`apps/migrate.py`](../../apps/migrate.py) 检查/执行迁移；worker 通过 [`apps/worker_start.py`](../../apps/worker_start.py) 另起进程并延后加载。
-
-窗口 X 与托盘“退出”共用 `request_exit`：先隐藏窗口，再清理后台并退出，不只是收起到托盘。已安装版本是否具有相同行为取决于安装的实际代码，不能用更新源码替代安装验收。
+[`apps/desktop_services.py`](../../apps/desktop_services.py) 在一个 Python 进程内承载两个独立 FastAPI 应用，仍保持 API 和 gateway 的端口、安全会话、CORS 与 CSP 边界。窗口 X 正常退出本程序拥有的后台；冲突端口不认领、不强杀。源码更新不等于已安装程序更新，原生验收必须核对实际执行文件。
 
 ### 只读 MCP
 
@@ -59,7 +55,7 @@ hub.ps1 start / dev
 
 | 要做什么 | 首先阅读 | 职责与边界 |
 | --- | --- | --- |
-| 调整前端请求 | [Web API client](../../apps/web/src/api/client.ts) | 桌面注入 API base、Vite 环境和相对 `/api/v1` 回退；请求/超时/错误转换 |
+| 调整前端请求 | [桌面 API client](../../apps/web/src/api/client.ts) | 唯一桌面注入 API base，未初始化时明确报错；请求/超时/错误转换 |
 | 调整 API 组装或浏览器写保护 | [API main](../../apps/api/main.py) | 数据库管理器、CORS、Origin/CSRF、健康检查；不是公网多用户认证系统 |
 | 找业务端点 | [routes_v1](../../apps/api/routes_v1.py)、[routes 目录](../../apps/api/routes/) | 共享查询/序列化辅助与拆分路由并存，不能假定已经完全分层 |
 | 查配置优先级 | [ApiSettings](../../apps/api/config.py)、[CLI config](../../packages/cli/config.py)、[managed sources](../../packages/managed_sources/service.py) | 进程环境、保存的资料目录、用户配置与源码配置；维护脚本可能有独立默认值 |
@@ -81,7 +77,7 @@ hub.ps1 start / dev
 ## 4. 验证入口
 
 - Python：[`tests/`](../../tests/)，MCP 窄范围：[`tests/mcp/`](../../tests/mcp/)。
-- 前端：[`apps/web/package.json`](../../apps/web/package.json) 的 typecheck/test/build；端到端测试另有独立服务要求。
+- 前端：[`apps/web/package.json`](../../apps/web/package.json) 的 typecheck/test/build；加载页与组件用 JSDOM；交付交互在真实原生窗口验证。
 - 桌面：[`desktop/src-tauri`](../../desktop/src-tauri/) 的 Rust 测试，以及独立的原生安装/生命周期验收。
 - CI：[`checks.yml`](../../.github/workflows/checks.yml) 运行离线仓库检查、Python Ruff/pytest 与前端 typecheck/test/build；Markdown/docs 的 push 也会触发检查。它不替代原生安装、真实冷唤醒或恢复演练；仍应核实目标提交对应的实际运行结果。
 

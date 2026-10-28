@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from apps.api import routes_v1 as _v1
+from apps.api.catalog_queries import visible_clause
 from apps.api.events import record_mutation, replay_idempotent
 from apps.api.pagination import decode_cursor
 from apps.api.problem import ApiProblem, conflict, not_found
@@ -79,7 +80,7 @@ def _collection_payload(session: Session, item: Asset) -> dict[str, Any]:
                 Relation.object_asset_id == item.id,
                 Relation.relation_type == "belongs_to_collection",
                 Relation.deleted_at.is_(None),
-                Asset.deleted_at.is_(None),
+                visible_clause(session),
             )
         )
         or 0
@@ -99,7 +100,7 @@ def _collection_payload(session: Session, item: Asset) -> dict[str, Any]:
 def list_collections(request: Request, cursor: str | None = None) -> dict[str, Any]:
     offset = decode_cursor(cursor)
     with _v1._database(request).session() as session:
-        where = (Asset.asset_type == "collection", Asset.deleted_at.is_(None))
+        where = (Asset.asset_type == "collection", visible_clause(session))
         total = session.scalar(select(func.count()).select_from(Asset).where(*where)) or 0
         rows = session.scalars(
             select(Asset)
@@ -188,7 +189,7 @@ def list_collection_members(
             Relation.relation_type == "belongs_to_collection",
             Relation.deleted_at.is_(None),
         )
-        where = (Asset.id.in_(member_ids), Asset.deleted_at.is_(None))
+        where = (Asset.id.in_(member_ids), visible_clause(session))
         total = session.scalar(select(func.count()).select_from(Asset).where(*where)) or 0
         assets = list(
             session.scalars(

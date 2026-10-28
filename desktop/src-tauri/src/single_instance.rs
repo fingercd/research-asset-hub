@@ -1,9 +1,7 @@
 //! 单实例保护:入口命名互斥体 + 唤起已有实例窗口。
 //!
-//! 为什么不依赖 tauri-plugin-single-instance:实测插件拦截发生在 setup 之后,
-//! 第二个实例的编排器已经跑完预检(把已有实例的后台服务当"残留"清理、弹报错)
-//! 才被退出。互斥体在 run() 第一行、任何 Builder/setup 之前生效,第二个实例
-//! 按正常/后台启动参数决定是否唤起已有窗口,立即退出,绝不触碰编排器。
+//! 互斥体在任何 Builder/setup 之前生效。第二次启动只按参数决定是否
+//! 唤起已有窗口，不触碰后台。无法确认互斥体所有权时失败，而非放行。
 
 use std::sync::OnceLock;
 
@@ -17,7 +15,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// 返回 true = 本实例是主实例(互斥体归我);false = 已有实例在运行,
 /// show_existing 为 true 时尝试唤起其窗口,调用方应立即退出且不得启动编排逻辑。
-pub fn acquire(show_existing: bool) -> bool {
+pub fn acquire(show_existing: bool) -> Result<bool, String> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
@@ -26,17 +24,17 @@ pub fn acquire(show_existing: bool) -> bool {
     unsafe {
         let handle = match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
             Ok(h) => h,
-            Err(_) => return true, // 互斥体创建失败:宁放行,不阻塞用户启动
+            Err(error) => return Err(error.to_string()),
         };
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(handle);
             if show_existing {
                 show_existing_window();
             }
-            return false;
+            return Ok(false);
         }
         let _ = MUTEX_HANDLE.set(handle.0 as isize);
-        true
+        Ok(true)
     }
 }
 

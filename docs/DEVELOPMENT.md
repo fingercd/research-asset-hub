@@ -1,114 +1,95 @@
-# 源码开发与隔离验证
+# 原生桌面源码开发与隔离验证
 
-本文面向开发者，不是个人正式资料库的启动指令。产品使用见[用户手册](USER_MANUAL.md)，代码入口见[代码地图](architecture/code-map.md)，来源不变量见[来源边界](architecture/source-boundaries.md)。
+**产品与开发均只有原生桌面入口，不再启动独立网站、Vite dev/preview、Compose 或 WSL。**
+React 仍是桌面界面实现，Vite 仅将它构建为静态资源；Tauri 自定义协议加载这些资源。
+Rust 壳统一管理便携 PostgreSQL、Meilisearch、Python API/资产网关及 worker。
 
-**下列启动命令已按当前源码核对，但本次文档整理没有真正启动容器、迁移数据库或运行安装验收。** 命令可创建开发数据和服务，执行前应检查本机端口与现有运行任务。
+本说明不代表已运行安装、真实冷启动或 UI 验收。执行 `run` 会启动原生程序、初始化/迁移
+所选资料目录并写入日志；不要把正式库作为开发实验目录，不停止未知进程来让出端口。
 
-## 1. 准备环境
+## 1. 安装开发依赖
 
-- Windows PowerShell；Python 3.11+ 与 uv。
-- Node.js 24；pnpm 版本以根 [package.json](../package.json) 的 `packageManager` 为准，当前为 `pnpm@11.9.0`。
-- 可从 Windows 调用的 Docker CLI、Compose 与正在运行的 Docker 后端。
-- 修改桌面壳另需 Rust、Tauri 2 CLI 和 Windows 构建工具，见[桌面文档](../desktop/README.md)。
+Windows PowerShell 7 (`pwsh`)、Python 3.11+、uv、Node.js 24、根 `package.json`
+固定的 pnpm、Rust 与 Windows 构建工具。安装包构建另需 Tauri 2 CLI。
 
-在**独立 clone/checkout** 中开发；不要直接使用承载正式 Web 服务的工作树。开始前运行 `git status --short`，保留已有改动。
+在独立 checkout 中执行，先保留已有改动：
 
 ```powershell
-git clone https://github.com/fingercd/research-asset-hub.git
-cd research-asset-hub
 git status --short
 .\scripts\bootstrap.ps1
 ```
 
-`bootstrap.ps1` 优先用 uv 和冻结锁文件安装依赖；没有 uv 时会降级为 venv+pip，后者不等同于冻结依赖验证。它安装前端依赖，但**不生成 `apps/web/dist`**。`-StartInfrastructure` 要求 Windows 能找到 `docker`；它没有 `hub.ps1` 的 Ubuntu WSL 回退。
+bootstrap 只安装 Python/前端依赖，不构建页面、不启动服务。uv 使用冻结锁文件；没有 uv
+时 venv+pip 是非冻结回退，不能据此声称锁文件可复现。便携数据库/搜索工具须由开发者
+显式提供，不能从 `Program Files`、历史 stage 或运行进程猜安装目录。
 
-## 2. 建立不指向正式资料库的开发环境
-
-仅设置 `HUB_DATA_DIR` 不够：数据库和搜索仍有自己的地址，Compose 命名卷与进程台账也分别隔离。下面使用空来源配置、独立端口、独立 Compose project 和 checkout 内的开发数据目录。
-
-在仓库根目录、同一个 PowerShell 会话执行。端口只是示例；已被占用时请整组调整，不能抢占现有服务。
+## 2. 唯一开发入口
 
 ```powershell
-$root = (Get-Location).Path
-$devData = Join-Path $root "work\dev-library"
-if (Test-Path -LiteralPath $devData) {
-    throw "开发数据目录已存在，请检查后选择新的空目录。"
-}
-New-Item -ItemType Directory -Path (Join-Path $devData "config") | Out-Null
-foreach ($name in @("sources.yaml", "taxonomy.yaml", "check-unit-actions-allowlist.yaml")) {
-    Copy-Item -LiteralPath (Join-Path $root "newconfig\release-defaults\$name") `
-        -Destination (Join-Path $devData "config\$name")
-}
+# 仅构建：静态 React + custom-protocol 的 debug Rust 壳，不启动程序。
+.\scripts\desktop.ps1 build
 
-$env:HUB_DATA_DIR = $devData
-$env:HUB_HOST_WORKSPACE_ROOT = $devData
-$env:HUB_SOURCES_CONFIG_PATH = Join-Path $devData "config\sources.yaml"
-$env:HUB_TAXONOMY_CONFIG_PATH = Join-Path $devData "config\taxonomy.yaml"
-$env:HUB_DOMAIN_PORTAL_CONFIG_PATH = Join-Path $devData "config\domain-portals\v2"
-$env:HUB_WORKER_HEARTBEAT_PATH = Join-Path $devData "state\worker-heartbeat.json"
+# 先检查将使用的命令和绝对路径；plan 不启动程序或创建资料目录。
+.\scripts\desktop.ps1 plan `
+  -RuntimeRoot 'D:\ResearchLibrary\ResearchAssetHub\runtime' `
+  -DataDir 'D:\HubDevData\isolated-library'
 
-$env:COMPOSE_PROJECT_NAME = "research-asset-hub-dev"
-$env:HUB_WEB_PORT = "18765"
-$env:HUB_ASSET_GATEWAY_PORT = "18766"
-$env:HUB_API_PORT = "18767"
-$env:HUB_POSTGRES_PORT = "15432"
-$env:HUB_MEILISEARCH_PORT = "17700"
-$env:HUB_POSTGRES_PASSWORD = "research_hub_local"
-$env:HUB_DATABASE_URL = "postgresql://research_hub:research_hub_local@127.0.0.1:15432/research_asset_hub"
-$env:DATABASE_URL = "postgresql+psycopg://research_hub:research_hub_local@127.0.0.1:15432/research_asset_hub"
-$env:HUB_MEILISEARCH_URL = "http://127.0.0.1:17700"
-$env:HUB_MEILISEARCH_API_KEY = "research-hub-local-meili-key"
-$env:HUB_GATEWAY_SECRET = (& .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_hex(32))").Trim()
-$env:HUB_GATEWAY_ORIGIN = "http://127.0.0.1:18766"
-$env:HUB_WEB_ORIGIN = "http://127.0.0.1:18765"
-$env:HUB_API_ORIGIN = "http://127.0.0.1:18767"
-$env:VITE_API_BASE = "/api/v1"
-$env:HUB_MCP_API_URL = "http://127.0.0.1:18767/api/v1"
+# 确认这是隔离开发目录后才执行；每次 run 都先重新构建。
+.\scripts\desktop.ps1 run `
+  -RuntimeRoot 'D:\ResearchLibrary\ResearchAssetHub\runtime' `
+  -DataDir 'D:\HubDevData\isolated-library'
 ```
 
-示例中的本地数据库/搜索密码仅用于这个隔离开发栈，不要复用正式凭据。网关密钥在本会话生成，不应提交或贴进报告。若其他开发环境也使用 `research-asset-hub-dev`，请另选唯一 project 名；仅换端口会继续复用同一 project 的命名卷。
+`SourceRoot` 默认当前脚本所属 checkout，也可显式提供另一个源码根。入口将解析后的
+`--dev-source-root`、`--dev-runtime-root` 和 `--data-dir` 全部传给 Rust，后者不猜测路径。
+RuntimeRoot 应含 `postgres/bin/{initdb,pg_ctl,pg_isready,psql}.exe` 与 `meilisearch.exe`；
+Python 固定取源码根的 `.venv/Scripts/python.exe`，不借用安装包或系统 Python。
+DataDir 必须显式给绝对路径；目录可以不存在，由原生程序按正常首次启动流程初始化。
+如需空库配置，先在这个新目录的 `config/` 放入 `newconfig/release-defaults/` 的内容，
+否则源码模式按源码配置回退，可能读取现有来源；注册来源始终只读。
 
-不需要创建空 `portal-index.yaml`：当前门户 schema 要求至少一个门户。没有精选门户索引时，领域路由可返回正常的无精选门户界面；测试内容可以随后通过正式开发流程添加。
+等价构建核心是 `pnpm --filter @research-asset-hub/web build` 后
+`cargo build --manifest-path desktop/src-tauri/Cargo.toml --features custom-protocol`。
+开发构建临时合并 `TAURI_CONFIG` 的 `bundle.resources=null`，不要求不存在的安装包
+stage/runtime；结束后恢复调用者的配置，生产组装配置不变。run 使用独立默认端口
+API 18767、网关 18766、PostgreSQL 15432、Meilisearch 17700，可用 `-ApiPort`、
+`-GatewayPort`、`-PostgresPort`、`-MeiliPort` 显式覆盖，四者必须互异。冲突由原生预检
+报错，不抢占或 kill。run 清理继承的生产数据库/搜索连接、配置路径、密钥、心跳与
+来源根环境变量，以免新 DataDir 仍连接正式库；退出后恢复调用者环境。plan 列出这些
+覆盖/清理，但不修改环境。
 
-### 启动、查看与停止
+不运行 `cargo tauri dev`、`pnpm dev` 或 `vite preview`。不带 `custom-protocol` 的直接
+Cargo 构建不是支持的桌面开发路径。退出/重试由桌面自身处理，没有 PowerShell stop、
+重复进程台账或自动 kill 占用端口的回退。现有原生实例存在时，应正常关闭它再测试，
+不要让开发脚本管理正式桌面生命周期。
+
+## 3. 旁车 CLI 与配置边界
 
 ```powershell
-pnpm --filter @research-asset-hub/web build
-.\scripts\hub.ps1 start
+.\scripts\hub.ps1 preflight -Json
+.\scripts\hub.ps1 inventory -All -Json
+.\scripts\hub.ps1 validate -All -Json
+.\scripts\hub.ps1 ingest -Source <source-id> -DryRun -Json
 .\scripts\hub.ps1 status -Json
-# 开发网站：http://127.0.0.1:18765
-# 开发 API 文档：http://127.0.0.1:18767/docs
-# 开发网关健康：http://127.0.0.1:18766/health
-
-# 用完在同一会话停止；普通 stop 不删除命名卷。
-.\scripts\hub.ps1 stop
 ```
 
-`start` 会启动 Compose、执行 Alembic 迁移并启动应用，不是只读命令。需要热更新时，在停止当前开发链之后使用 `hub.ps1 dev`，仍保留上面的环境变量；`dev` 替换的是前端托管方式，不会让 Python API 自动热重载。
+hub.ps1 只转发源码 `.venv` 中的维护 CLI；没有 start/dev/stop。`status` 列出旁车报告
+位置与 bootstrap 信息，**不表示原生程序、数据库或 API 已就绪**。正式 ingest 会写库，
+须按 [Agent 手册](AGENT_KNOWLEDGE_BASE_PLAYBOOK.md) 完成备份与检查，不因这里有命令即获授权。
+`preflight.ps1` 是同一 CLI 的兼容薄入口，不另行发现 Python 或启动服务。
 
-`hub.ps1` 的进程台账固定在**当前 checkout** 的 `work/state/processes.json`，不会按 `HUB_DATA_DIR` 或端口区分。它遇到已有部分/过期进程组会尝试停止并重建，所以不能在同一 checkout 用第二组变量管理另一套服务。日志在 `work/logs/`；不要把环境变量、密码和正式资料正文复制到诊断报告。
+Python 设置读取进程环境的 `HUB_*`，不会自动加载根 `.env`。源码 CLI 的 sources/taxonomy
+优先显式配置路径，其次用户库配置，再到源码配置。桌面开发参数明确选择源码/运行时/
+数据根；数据库、密钥及两个 loopback HTTP 服务由桌面统一准备。不能只设置
+`HUB_DATA_DIR` 就推断任意独立维护命令已经连接了相同数据库。维护正式库前核验实际
+配置/连接，禁止修改冻结 manifest 或直接改数据库来迁就错误输入。
 
-## 3. 配置到底从哪里来
-
-Python [ApiSettings](../apps/api/config.py) 读取进程环境的 `HUB_*`，**没有自动读取根 `.env`**。Docker Compose 与 Vite 各有自己的环境读取行为，不能因此推断 API/worker 已加载相同文件。
-
-| 设置 | 当前选择顺序 / 边界 |
-| --- | --- |
-| 资料目录 | 显式 `HUB_DATA_DIR`；否则桌面保存的 `%LOCALAPPDATA%/ResearchAssetHub/data-directory.txt`；再回退 `Documents/ResearchAssetHub` |
-| API 来源/分类/门户 | 显式配置路径；否则数据目录存在 `config/sources.yaml` 时改用用户配置；再回退源码 `config/` |
-| CLI 来源/分类 | 显式 `HUB_SOURCES_CONFIG_PATH` / `HUB_TAXONOMY_CONFIG_PATH`；否则优先用户库配置，再回退源码配置 |
-| PostgreSQL / 搜索 | 分别由连接 URL、端口与密钥决定；不因更换资料目录自动切库 |
-| 维护脚本 | 不保证全部复用 ApiSettings；先检查脚本参数，例如来源完整性脚本默认读取源码 `config/sources.yaml` |
-
-因此在源码目录改 `config/` 不证明正在运行的用户库使用了它。维护当前用户库前，应核对运行参数、配置路径和数据根，而不是直接导入或重建索引。已登记来源与冻结 manifest 只读，新增材料流程见[Agent 手册](AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)。
-
-## 4. 验证命令与范围
-
-下列命令是开发检查，不等于独立机器安装、真实服务冷启动、全库索引一致性或恢复演练通过。测试会生成缓存/构建产物；涉及外部服务的测试应使用隔离配置，不指向个人正式库。
+## 4. 测试边界
 
 ```powershell
 uv sync --frozen --extra dev
 pnpm install --frozen-lockfile
+.\.venv\Scripts\python.exe -m pytest tests/runtime/test_hub_script.py tests/runtime/test_cloud_template.py -q
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check apps packages tests scripts
 .\.venv\Scripts\python.exe -m mypy apps packages
@@ -118,12 +99,9 @@ pnpm --filter @research-asset-hub/web build
 cargo test --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
-MCP 窄范围测试用 `python -m pytest tests/mcp -q`，通过临时 GET-only fixture 验证协议与边界，不需要启动正式 Hub。更多说明见[MCP 指南](MCP_USER_GUIDE.md)。
-
-常见检查点：
-
-- `start` 提示缺少静态页面：先构建 `apps/web/dist`，bootstrap 不负责这一步。
-- API/网关无法就绪：先看当前开发 checkout 的日志、独立端口与数据库 URL，不停止不明占用者。
-- 维护脚本选择了错误来源：显式传配置路径；不要改冻结资料来迁就错误配置。
-- `hub.ps1 status` 代表实际进程/HTTP 状态；`python -m packages.cli.main status` 当前只列 bootstrap/报告信息，两者不能互换。
-- 源码 MCP 指定上述非默认 `HUB_MCP_API_URL` 后由开发者管理 API，不会自动唤醒正式桌面。修改 schema 后需重新连接 MCP；修改 API 后需正常重启对应开发进程，不另起重复 API。
+单元测试、PowerShell AST/命令契约和静态构建不启动正式应用，不等于原生 UI 验收。
+旧 Playwright 网站 runner、自动 preview 服务及独立浏览器产品 fixtures 已退役；组件/
+页面继续用现有 Vitest，原生跨进程/窗口/资料操作需在隔离库中实际验收并单独记录结果。
+Playwright 与 axe 仍用于原始论文/导读 HTML 的只读审计，不是产品网站部署依赖。
+MCP 窄范围测试 `python -m pytest tests/mcp -q` 使用 GET-only fixture；schema 更新后
+需重新连接客户端，不能另起重复服务绕过桌面生命周期。

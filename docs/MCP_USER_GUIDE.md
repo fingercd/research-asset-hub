@@ -2,7 +2,7 @@
 
 MCP 让 Codex 等支持 MCP 的助手通过工具查询 Research Asset Hub。它使用官方 Python SDK 的 FastMCP，经 stdio 通信，再用 HTTP GET 读取本机 Hub API。所有七个工具声明 `readOnlyHint=true`，没有数据库写入、导入、批注或运行源码的工具。默认本机 API 未运行时，首次实际读取会按需唤醒现有桌面程序的共享后台。
 
-当前源码版本为 **0.2.0-rc.4**；源码变更、已安装程序与下述历史候选包验收是不同状态。源码入口和隔离 API 配置见[开发指南](DEVELOPMENT.md)，模块关系见[代码地图](architecture/code-map.md)。本次文档整理没有重做安装、冷唤醒或真实数据库协议验收。
+当前源码版本为 **0.3.0-rc.1**。源码变更、实际安装与历史候选包验收分别判断；本轮已从更新后的随包 Python 完成真实 stdio initialize/list/call，细节和边界见[桌面改革报告](reports/2026-10-28-desktop-product-reform.md)。开发入口见[开发指南](DEVELOPMENT.md)，模块关系见[代码地图](architecture/code-map.md)。该验证不等于干净机安装、冷唤醒或全部原文覆盖通过。
 
 ## 候选包接入与历史 0.2.0-rc.1 验收
 

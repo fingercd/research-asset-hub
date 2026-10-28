@@ -57,7 +57,7 @@ def hidden_clause(session: Session, asset: Any = Asset) -> Any:
         return func.lower(value) == "true"
     kind = func.json_type(asset.attributes, "$.system_hidden")
     return or_(
-        and_(kind == "string", func.lower(value) == "true"),
+        and_(kind == "text", func.lower(value) == "true"),
         and_(
             kind.in_(["boolean", "true"]), asset.attributes["system_hidden"].as_boolean().is_(True)
         ),
@@ -277,6 +277,9 @@ def catalog_selection(
     asset_type: str | None,
     status: str | None,
     author: str | None,
+    venue: str | None,
+    year: int | None,
+    collection_id: UUID | None,
     year_from: int | None,
     year_to: int | None,
     date_from: date | None,
@@ -358,6 +361,22 @@ def catalog_selection(
             select(1)
             .select_from(authors)
             .where(func.lower(authors.c.value).contains(author.casefold(), autoescape=True))
+            .exists()
+        )
+    if venue is not None:
+        statement = statement.where(func.lower(func.trim(Asset.venue)) == venue.lower())
+    if year is not None:
+        statement = statement.where(Asset.year == year)
+    if collection_id is not None:
+        statement = statement.where(
+            select(1)
+            .select_from(Relation)
+            .where(
+                Relation.subject_asset_id == Asset.id,
+                Relation.object_asset_id == collection_id,
+                Relation.relation_type == "belongs_to_collection",
+                Relation.deleted_at.is_(None),
+            )
             .exists()
         )
     if year_from is not None:
@@ -633,7 +652,12 @@ def serialize_catalog_asset(
 
 
 def domain_counts(
-    session: Session, settings: Any, *, include_overview: bool = False, slug: str | None = None
+    session: Session,
+    settings: Any,
+    *,
+    include_overview: bool = False,
+    include_recent: bool = True,
+    slug: str | None = None,
 ) -> list[dict[str, Any]]:
     from apps.api.routes_v1 import _asset_context, _domain_overviews
     from apps.api.serialization import serialize_domain_overview
@@ -716,9 +740,18 @@ def domain_counts(
             func.coalesce(states.c.status, "unread").label("reading_status"),
             func.coalesce(annotations.c.count, 0).label("annotation_count"),
             linked_repositories.c.object_asset_id.label("covered_repository_id"),
-            func.row_number()
-            .over(partition_by=memberships.c.slug, order_by=(Asset.updated_at.desc(), Asset.id))
-            .label("rank"),
+            *(
+                [
+                    func.row_number()
+                    .over(
+                        partition_by=memberships.c.slug,
+                        order_by=(Asset.updated_at.desc(), Asset.id),
+                    )
+                    .label("rank")
+                ]
+                if include_recent
+                else []
+            ),
         )
         .join(Asset, Asset.id == memberships.c.asset_id)
         .outerjoin(annotations, annotations.c.asset_id == Asset.id)
@@ -729,17 +762,21 @@ def domain_counts(
         )
         .cte("ranked_domain_assets")
     )
-    recent_pairs = (
-        (
-            func.jsonb_agg(func.jsonb_build_array(ranked.c.rank, cast(ranked.c.asset_id, String)))
-            if _postgres(session)
-            else func.json_group_array(
-                func.json_array(ranked.c.rank, cast(ranked.c.asset_id, String))
+    recent_columns = []
+    if include_recent:
+        recent_columns.append(
+            (
+                func.jsonb_agg(
+                    func.jsonb_build_array(ranked.c.rank, cast(ranked.c.asset_id, String))
+                )
+                if _postgres(session)
+                else func.json_group_array(
+                    func.json_array(ranked.c.rank, cast(ranked.c.asset_id, String))
+                )
             )
+            .filter(ranked.c.rank <= 5)
+            .label("recent")
         )
-        .filter(ranked.c.rank <= 5)
-        .label("recent")
-    )
     rows = session.execute(
         select(
             ranked.c.slug,
@@ -763,24 +800,26 @@ def domain_counts(
                 func.sum(case((ranked.c.reading_status == status, 1), else_=0)).label(status)
                 for status in ("unread", "reading", "read")
             ),
-            recent_pairs,
+            *recent_columns,
         ).group_by(ranked.c.slug)
     ).all()
     counts = {row.slug: row for row in rows}
-    recent_ids = {
-        row.slug: [
-            UUID(asset_id)
-            for _, asset_id in sorted(
-                json.loads(row.recent) if isinstance(row.recent, str) else row.recent
-            )
-        ]
-        for row in rows
-    }
-    recent = load_catalog_assets(
-        session, list(dict.fromkeys(asset_id for ids in recent_ids.values() for asset_id in ids))
-    )
-    recent_by_id = {asset.id: asset for asset in recent}
-    reading, summaries = _asset_context(session, recent)
+    if include_recent:
+        recent_ids = {
+            row.slug: [
+                UUID(asset_id)
+                for _, asset_id in sorted(
+                    json.loads(row.recent) if isinstance(row.recent, str) else row.recent
+                )
+            ]
+            for row in rows
+        }
+        recent = load_catalog_assets(
+            session,
+            list(dict.fromkeys(asset_id for ids in recent_ids.values() for asset_id in ids)),
+        )
+        recent_by_id = {asset.id: asset for asset in recent}
+        reading, summaries = _asset_context(session, recent)
     portals = list(
         session.scalars(
             select(Asset)
@@ -819,15 +858,16 @@ def domain_counts(
                 for status in ("unread", "reading", "read")
             },
             "overview_status": overview["status"],
-            "recent_assets": [
+        }
+        if include_recent:
+            item["recent_assets"] = [
                 serialize_catalog_asset(
                     recent_by_id[asset_id],
                     reading_state=reading.get(asset_id),
                     annotation_summary=summaries.get(asset_id),
                 )
                 for asset_id in recent_ids.get(domain["slug"], [])
-            ],
-        }
+            ]
         if include_overview:
             item["overview"] = overview
         result.append(item)

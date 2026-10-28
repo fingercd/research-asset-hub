@@ -14,6 +14,7 @@ import { PageHeader } from "../components/PageHeader";
 import { SelectionToolbar } from "../components/SelectionToolbar";
 import { SavedSearchControls } from "../components/SavedSearchControls";
 import { ResearchUnitCard } from "../components/ResearchUnitCard";
+import "../styles/catalog-workspace.css";
 import { researchUnitFromAsset } from "../lib/researchUnits";
 
 const modeLabels: Record<SearchMode, string> = {
@@ -43,28 +44,33 @@ export function SearchPage() {
   const status = (searchParams.get("status") as ReadingStatus | null) ?? "";
   const assetType = searchParams.get("type") ?? "";
   const author = searchParams.get("author") ?? "";
+  const venue = searchParams.get("venue") ?? "";
+  const year = searchParams.get("year") ?? "";
+  const [density, setDensity] = useState<"list" | "card">("list");
   const tag = searchParams.get("tag") ?? "";
   const legacyYearFrom = searchParams.get("year_from") ?? "";
   const legacyYearTo = searchParams.get("year_to") ?? "";
-  const dateFrom =
-    searchParams.get("date_from") ??
-    (/^\d{4}$/.test(legacyYearFrom) ? `${legacyYearFrom}-01-01` : "");
-  const dateTo =
-    searchParams.get("date_to") ??
-    (/^\d{4}$/.test(legacyYearTo) ? `${legacyYearTo}-12-31` : "");
-  const hasPdf = searchParams.get("has_pdf") === "true";
-  const hasHtml = searchParams.get("has_html") === "true";
-  const hasCode = searchParams.get("has_code") === "true";
-  const hasAnnotation = searchParams.get("has_annotation") === "true";
+  const dateFrom = searchParams.get("date_from") ?? "";
+  const dateTo = searchParams.get("date_to") ?? "";
+  const booleanFilter = (key: string) => {
+    const value = searchParams.get(key);
+    return value === "true" ? true : value === "false" ? false : undefined;
+  };
+  const hasPdf = booleanFilter("has_pdf");
+  const hasHtml = booleanFilter("has_html");
+  const hasCode = booleanFilter("has_code");
+  const hasAnnotation = booleanFilter("has_annotation");
   const groupBy = assetType === "repository" ? "none" : "paper";
   const [input, setInput] = useState(q);
   const [advanced, setAdvanced] = useState({
     author,
     tag,
+    venue,
+    year,
   });
 
   useEffect(() => setInput(q), [q]);
-  useEffect(() => setAdvanced({ author, tag }), [author, tag]);
+  useEffect(() => setAdvanced({ author, tag, venue, year }), [author, tag, venue, year]);
   useEffect(() => {
     if (!searchParams.has("has_guide")) return;
     setSearchParams(
@@ -97,6 +103,8 @@ export function SearchPage() {
       assetType,
       author,
       tag,
+      venue,
+      year,
       dateFrom,
       dateTo,
       legacyYearFrom,
@@ -120,14 +128,16 @@ export function SearchPage() {
           type: assetType,
           author,
           tag,
+          venue: venue || undefined,
+          year: year ? Number(year) : undefined,
           year_from: legacyYearFrom ? Number(legacyYearFrom) : undefined,
           year_to: legacyYearTo ? Number(legacyYearTo) : undefined,
           date_from: dateFrom || undefined,
           date_to: dateTo || undefined,
-          has_pdf: hasPdf || undefined,
-          has_html: hasHtml || undefined,
-          has_code: hasCode || undefined,
-          has_annotation: hasAnnotation || undefined,
+          has_pdf: hasPdf,
+          has_html: hasHtml,
+          has_code: hasCode,
+          has_annotation: hasAnnotation,
           cursor: pageParam,
         },
         signal,
@@ -148,84 +158,40 @@ export function SearchPage() {
     });
   };
 
-  const updateDateFilter = (key: "date_from" | "date_to", value: string) => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      const legacyKey = key === "date_from" ? "year_from" : "year_to";
-      next.delete(legacyKey);
-      if (value) next.set(key, value);
-      else next.delete(key);
-      return next;
-    });
-  };
-
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const value = input.trim();
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
-      if (value) {
-        next.set("q", value);
-      } else {
-        next.delete("q");
-      }
-      return next;
-    });
-  };
-
-  const applyAdvanced = () => {
-    const values = {
-      author: advanced.author.trim(),
-      tag: advanced.tag.trim(),
-    };
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      Object.entries(values).forEach(([key, value]) => {
-        if (value) next.set(key, value);
+      if (value) next.set("q", value);
+      else next.delete("q");
+      Object.entries({ author: advanced.author, tag: advanced.tag, venue: advanced.venue, year: advanced.year }).forEach(([key, text]) => {
+        if (text.trim()) next.set(key, text.trim());
         else next.delete(key);
       });
       return next;
     });
   };
 
-  const clearAdvanced = () => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      [
-        "collection_id",
-        "author",
-        "tag",
-        "has_pdf",
-        "has_html",
-        "has_code",
-        "has_annotation",
-        "mode",
-      ].forEach((key) => next.delete(key));
-      return next;
-    });
+  const filterLabels: Record<string, string> = {
+    q: "关键词", domain: "领域", collection_id: "收藏集合", status: "阅读状态",
+    type: "类型", author: "作者", tag: "标签", venue: "会议/期刊", year: "发表年份",
+    year_from: "起始年份", year_to: "结束年份", date_from: "起始公开日期", date_to: "结束公开日期",
+    has_pdf: "有 PDF", has_html: "有 HTML", has_code: "有代码", has_annotation: "有批注", mode: "检索模式",
   };
-
-  const advancedActive = Boolean(
-    mode !== "keyword" ||
-      collectionId ||
-      author ||
-      tag ||
-      hasPdf ||
-      hasHtml ||
-      hasCode ||
-      hasAnnotation,
-  );
-  const advancedCount = [
-    mode !== "keyword",
-    collectionId,
-    author,
-    tag,
-    hasPdf,
-    hasHtml,
-    hasCode,
-    hasAnnotation,
-  ].filter(Boolean).length;
-  const [advancedOpen, setAdvancedOpen] = useState(advancedActive);
+  const activeFilters = Object.entries(filterLabels).flatMap(([key, label]) => {
+    const value = searchParams.get(key);
+    if (!value || (key.startsWith("has_") && value !== "true" && value !== "false") || (key === "mode" && value === "keyword")) return [];
+    let display = value;
+    if (key === "status") display = ({ unread: "未读", reading: "阅读中", read: "已读" })[value] ?? value;
+    if (key === "type") display = ({ paper: "论文", repository: "代码仓库", dataset: "数据集" })[value] ?? value;
+    if (key === "domain") display = domains.data?.items.find((item) => item.slug === value)?.label ?? value;
+    if (key === "collection_id") { const item = collections.data?.items.find((item) => item.id === value); display = item?.label ?? item?.name ?? item?.title ?? value; }
+    if (key === "mode") display = modeLabels[mode];
+    return [{ key, label: key.startsWith("has_") ? (value === "false" ? label.replace(/^有/, "无") : label) : `${label}：${display}` }];
+  });
+  const advancedCount = [mode !== "keyword", collectionId, author, tag, dateFrom, dateTo, legacyYearFrom, legacyYearTo, hasPdf !== undefined, hasHtml !== undefined, hasCode !== undefined, hasAnnotation !== undefined].filter(Boolean).length;
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const units =
     results.data?.pages
@@ -236,11 +202,11 @@ export function SearchPage() {
   const total = results.data?.pages[0]?.total;
 
   return (
-    <div className="page">
+    <div className="page catalog-workspace">
       <PageHeader
         eyebrow="资料库"
         title={q ? `“${q}”的搜索结果` : "浏览资料库"}
-        description="先用关键词、时间和常用条件缩小范围，需要时再展开更多筛选。"
+        description="关键词匹配题名、摘要与论文标识；会议和年份按库内登记元数据筛选。"
       />
 
       <form className="search-workbench" onSubmit={submit} role="search">
@@ -302,38 +268,16 @@ export function SearchPage() {
               <option value="read">已读</option>
             </select>
           </label>
-          <fieldset
-            className={`time-range-filter ${dateFrom || dateTo ? "is-active" : ""}`}
-          >
-            <legend>时间范围</legend>
-            <div className="time-range-inputs">
-              <label>
-                <span className="sr-only">起始日期</span>
-                <input
-                  aria-label="起始日期"
-                  type="date"
-                  value={dateFrom}
-                  max={dateTo || undefined}
-                  onChange={(event) =>
-                    updateDateFilter("date_from", event.target.value)
-                  }
-                />
-              </label>
-              <span aria-hidden="true">至</span>
-              <label>
-                <span className="sr-only">结束日期</span>
-                <input
-                  aria-label="结束日期"
-                  type="date"
-                  value={dateTo}
-                  min={dateFrom || undefined}
-                  onChange={(event) =>
-                    updateDateFilter("date_to", event.target.value)
-                  }
-                />
-              </label>
-            </div>
-          </fieldset>
+          <label className={venue ? "is-active" : ""}>
+            <span>会议 / 期刊</span>
+            <input aria-label="会议或期刊" value={advanced.venue} placeholder="例如 CVPR（精确）"
+              onChange={(event) => setAdvanced((current) => ({ ...current, venue: event.target.value }))} />
+          </label>
+          <label className={`year-filter ${year ? "is-active" : ""}`}>
+            <span>发表年份</span>
+            <input aria-label="发表年份" type="number" min="1450" max="2200" step="1" placeholder="全部"
+              value={advanced.year} onChange={(event) => setAdvanced((current) => ({ ...current, year: event.target.value }))} />
+          </label>
           <label className={sort !== "date_desc" ? "is-active" : ""}>
             <span>排序</span>
             <select
@@ -360,6 +304,39 @@ export function SearchPage() {
             {advancedCount > 0 && <span>{advancedCount}</span>}
           </summary>
           <div className="advanced-filter-grid">
+          <fieldset
+            className={`time-range-filter ${dateFrom || dateTo ? "is-active" : ""}`}
+          >
+            <legend>首次公开日期范围</legend>
+            <div className="time-range-inputs">
+              <label>
+                <span className="sr-only">起始日期</span>
+                <input
+                  aria-label="起始日期"
+                  type="date"
+                  value={dateFrom}
+                  max={dateTo || undefined}
+                  onChange={(event) =>
+                    updateFilter("date_from", event.target.value)
+                  }
+                />
+              </label>
+              <span aria-hidden="true">至</span>
+              <label>
+                <span className="sr-only">结束日期</span>
+                <input
+                  aria-label="结束日期"
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  onChange={(event) =>
+                    updateFilter("date_to", event.target.value)
+                  }
+                />
+              </label>
+            </div>
+          </fieldset>
+
             <label>
               <span>收藏集合</span>
               <select
@@ -443,31 +420,32 @@ export function SearchPage() {
           <div className="advanced-filter-actions">
             <button
               className="button primary compact"
-              type="button"
-              onClick={applyAdvanced}
+              type="submit"
             >
               应用筛选
             </button>
-            {advancedActive && (
-              <button
-                className="button ghost compact"
-                type="button"
-                onClick={clearAdvanced}
-              >
-                清除
-              </button>
-            )}
           </div>
         </details>
       </form>
 
+      {activeFilters.length > 0 && <div className="active-search-filters" aria-label="已应用筛选">
+        {activeFilters.map(({ key, label }) => <button className="filter-chip" key={key} type="button"
+          aria-label={`清除${label}`} onClick={() => updateFilter(key, "")}>
+          {label}<span aria-hidden="true">×</span>
+        </button>)}
+        <button className="button ghost compact" type="button" onClick={() => setSearchParams((current) => {
+          const next = new URLSearchParams(current);
+          Object.keys(filterLabels).forEach((key) => next.delete(key));
+          return next;
+        })}>清除全部筛选</button>
+      </div>}
       <SavedSearchControls
         definition={Object.fromEntries(searchParams.entries())}
       />
       <SelectionToolbar ids={selected} clear={() => setSelected([])} />
       {results.isPending ? (
         <LoadingState label={q ? `正在搜索“${q}”…` : "正在加载研究资产…"} />
-      ) : results.isError ? (
+      ) : results.isError && !units.length ? (
         <ErrorState
           error={results.error}
           retry={() => void results.refetch()}
@@ -476,6 +454,10 @@ export function SearchPage() {
         <section aria-label="搜索结果">
           <h2 className="sr-only">搜索结果</h2>
           <div className="result-summary">
+            <div className="result-density" role="group" aria-label="结果显示方式">
+              <button type="button" aria-pressed={density === "list"} onClick={() => setDensity("list")}>紧凑列表</button>
+              <button type="button" aria-pressed={density === "card"} onClick={() => setDensity("card")}>详细卡片</button>
+            </div>
             <label className="check-label">
               <input
                 type="checkbox"
@@ -504,7 +486,7 @@ export function SearchPage() {
               </small>
             </div>
           </div>
-          <div className="asset-list">
+          <div className={`asset-list catalog-results is-${density}`}>
             {units.map((unit) => (
               <div className="selectable-asset" key={unit.unit_id}>
                 <label className="asset-select">
@@ -525,11 +507,18 @@ export function SearchPage() {
                     选择 {unit.primary_asset.title}
                   </span>
                 </label>
-                <ResearchUnitCard unit={unit} />
+                <ResearchUnitCard unit={unit} compact={density === "list"} />
               </div>
             ))}
           </div>
-          {results.hasNextPage && (
+          {results.isError && results.data && <div className="pagination-error" role="alert">
+            <p>{results.isFetchNextPageError ? "下一页加载失败，已加载的结果和选择仍然保留。" : "刷新失败，仍显示上次加载的结果。"}</p>
+            <button className="button secondary compact" type="button" disabled={results.isFetching}
+              onClick={() => void (results.isFetchNextPageError ? results.fetchNextPage() : results.refetch())}>
+              {results.isFetchNextPageError ? "重试加载更多" : "重试刷新"}
+            </button>
+          </div>}
+          {results.hasNextPage && !results.isFetchNextPageError && (
             <div className="load-more">
               <button
                 className="button secondary"

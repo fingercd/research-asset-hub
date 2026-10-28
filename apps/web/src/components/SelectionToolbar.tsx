@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, getApiErrorMessage } from "../api/client";
-import type { ReadingStatus } from "../api/types";
+import type { ReadingStatus, WorkflowItemResult } from "../api/types";
 import { workflowItemError } from "../lib/workflowResult";
 import { PackageActions } from "./PackageActions";
 
@@ -28,31 +28,30 @@ export function SelectionToolbar({
     queryKey: ["domains"],
     queryFn: ({ signal }) => api.domains(signal),
   });
+  const tagList = tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean);
+  const payload = {
+    asset_ids: ids,
+    ...(status ? { reading_status: status } : {}),
+    ...(tagList.length ? { [tagAction === "add" ? "add_tags" : "remove_tags"]: tagList } : {}),
+    ...(domain ? { [domainAction === "add" ? "add_domains" : "remove_domains"]: [domain] } : {}),
+    ...(collection ? { collection_id: collection, collection_action: collectionAction } : {}),
+  };
+  const signature = JSON.stringify(payload);
+  type Batch = { payload: Record<string, unknown>; signature: string; items: WorkflowItemResult[] };
+  const [batch, setBatch] = useState<Batch | null>(null);
+  const currentBatch = batch?.signature === signature ? batch : null;
+  const failures = currentBatch?.items.filter((item) => item.status === "failed") ?? [];
   const update = useMutation({
-    mutationFn: () => {
-      const tagList = tags
-        .split(/[,，]/)
-        .map((v) => v.trim())
-        .filter(Boolean);
-      return api.bulkAssets({
-        asset_ids: ids,
-        ...(status ? { reading_status: status } : {}),
-        ...(tagList.length
-          ? { [tagAction === "add" ? "add_tags" : "remove_tags"]: tagList }
-          : {}),
-        ...(domain
-          ? {
-              [domainAction === "add" ? "add_domains" : "remove_domains"]: [
-                domain,
-              ],
-            }
-          : {}),
-        ...(collection
-          ? { collection_id: collection, collection_action: collectionAction }
-          : {}),
+    mutationFn: (request: { payload: Record<string, unknown>; signature: string; previousItems: WorkflowItemResult[] }) => api.bulkAssets(request.payload),
+    onSuccess: (result, request) => {
+      const returned = new Map(result.items.map((item) => [item.id, item]));
+      setBatch({
+        payload: request.payload,
+        signature: request.signature,
+        items: request.previousItems.length
+          ? request.previousItems.map((item) => returned.get(item.id) ?? item)
+          : result.items,
       });
-    },
-    onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["search"] });
       void client.invalidateQueries({ queryKey: ["collections"] });
       void client.invalidateQueries({ queryKey: ["collection-members"] });
@@ -64,10 +63,11 @@ export function SelectionToolbar({
     <section className="selection-toolbar" aria-label="批量操作">
       <div className="section-heading">
         <strong>已选择 {ids.length} 项</strong>
-        <button className="button ghost compact" type="button" onClick={clear}>
+        <button className="button ghost compact" type="button" onClick={clear} disabled={update.isPending}>
           取消选择
         </button>
       </div>
+      <fieldset className="bulk-edit-fields" disabled={update.isPending}>
       <div className="advanced-filter-grid">
         <label>
           <span>阅读状态</span>
@@ -146,37 +146,42 @@ export function SelectionToolbar({
           </select>
         </label>
       </div>
+      </fieldset>
       <div className="button-row">
         <button
           className="button primary compact"
           type="button"
           disabled={
-            update.isPending || !(status || tags.trim() || domain || collection)
+            update.isPending || Boolean(currentBatch) || !(status || tags.trim() || domain || collection)
           }
-          onClick={() => update.mutate()}
+          onClick={() => update.mutate({ payload, signature, previousItems: [] })}
         >
-          {update.isPending ? "正在应用…" : "应用批量修改"}
+          {update.isPending ? "正在应用…" : currentBatch ? "本批已提交" : "应用批量修改"}
         </button>
         <PackageActions assetIds={ids} />
       </div>
-      {update.isError && (
+      {update.isError && update.variables?.signature === signature && (
         <p className="inline-error" role="alert">
           {getApiErrorMessage(update.error)}
         </p>
       )}
-      {update.data && (
-        <div role="status">
-          {update.data.items.filter((v) => v.status !== "failed").length}{" "}
-          项已处理。
-          {update.data.items
-            .filter((v) => v.status === "failed")
-            .map((v) => (
-              <p className="inline-error" key={v.id}>
-                {v.id}：{workflowItemError(v)}
-              </p>
-            ))}
+      {currentBatch && (
+        <div className="bulk-operation-result" role="status">
+          <p>成功 {currentBatch.items.length - failures.length} 项 / 失败 {failures.length} 项（成功项不会重复提交）。</p>
+          {failures.length > 0 && <>
+            <details><summary>查看失败原因</summary>
+              {failures.map((item) => <p className="inline-error" key={item.id}>{item.id}：{workflowItemError(item)}</p>)}
+            </details>
+            <button className="button secondary compact" type="button" disabled={update.isPending}
+              onClick={() => update.mutate({
+                payload: { ...currentBatch.payload, asset_ids: failures.map((item) => item.id) },
+                signature,
+                previousItems: currentBatch.items,
+              })}>仅重试失败 {failures.length} 项</button>
+          </>}
         </div>
       )}
+
     </section>
   );
 }

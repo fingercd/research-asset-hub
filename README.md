@@ -2,7 +2,7 @@
 
 **把论文、实现代码和阅读记录放到同一条可追溯的研究路径上。**
 
-本地优先的科研资料管理工具：按领域找资料，按原文页码读证据，按固定版本查代码。Windows 桌面版是日常入口；Web、只读 MCP 与维护工具共用同一套资产模型。
+本地优先的科研资料管理工具：按领域找资料，按原文页码读证据，按固定版本查代码。**原生 Windows 桌面是唯一产品入口**；只读 MCP 与维护工具共用资产模型，不再运行独立网站、Vite 开发服务器或云端 Web 模板。
 
 **[使用手册](docs/USER_MANUAL.md) · [资料导航](docs/LIBRARY_MAP.md) · [MCP 接入](docs/MCP_USER_GUIDE.md) · [开发指南](docs/DEVELOPMENT.md) · [全部文档](docs/README.md)**
 
@@ -37,8 +37,9 @@
 | 能力 | 实际边界 |
 | --- | --- |
 | 领域门户与目录 | 总览、时间线、评测与阅读路线；新领域仅名称必填，精选内容可后补 |
-| 关键词检索 | 标题、中文题名、摘要与精确标识；MCP 支持领域、类型、会议、年份和分页 |
-| PDF 阅读与批注 | 保存阅读状态、上次页码和高亮；引用锚点绑定文件指纹 |
+| 资料工作台 | 常驻全部资料、阅读中、未读和保存视图；紧凑列表/详细卡片切换，筛选条件可逐项清除 |
+| 关键词检索 | 标题、中文题名、摘要与精确标识；桌面和 MCP 均支持会议/期刊、发表年份精确筛选，分页前过滤 |
+| PDF 阅读与批注 | 优先打开本地安全会话；版本辨识、页码跳转、缩放/适宽、正确版本续读与文件指纹绑定高亮 |
 | 代码阅读 | 原位只读目录、远程链接或固定 commit 快照；不自动运行代码、下载训练数据和权重 |
 | 个人组织 | 专题集合、保存筛选、批量状态与标签、论文比较及 Markdown 导出 |
 | 迁移与维护 | 领域包、可审计导入、后台抽取、关键词索引、备份与隔离恢复演练 |
@@ -57,7 +58,7 @@
 
 新上传资料可托管复制到用户库；**既有外部来源始终原位只读**。缺少选填 HTML/代码可以正常入库，已经登记但丢失的文件则必须显示为缺失。
 
-当前源码版本为 **0.2.0-rc.4 候选版**，版本依据 [Python 配置](pyproject.toml)和 [Node 配置](package.json)。本机安装版本、源码版本和候选包验收状态分别判断。独立干净 Windows 安装、升级、卸载及签名仍有未完成验收，不能把本机测试描述为正式发行通过，详见[桌面文档](desktop/README.md)与[发行约束](desktop/scripts/RUNTIME-RELEASE.md)。
+当前源码版本为 **0.3.0-rc.1 桌面改革候选版**，版本依据 [Python 配置](pyproject.toml)和 [Node 配置](package.json)。本机安装、源码和候选包验收状态分别判断；功能与实际验证见[产品改革报告](docs/reports/2026-10-28-desktop-product-reform.md)。独立干净 Windows 安装、升级、卸载及签名仍需专项验收，详见[桌面文档](desktop/README.md)与[发行约束](desktop/scripts/RUNTIME-RELEASE.md)。
 
 ### 我想查看或修改源码
 
@@ -71,9 +72,11 @@ pnpm install --frozen-lockfile
 .\.venv\Scripts\python.exe scripts/check_repository.py
 ```
 
-前置：Python 3.11+、uv、Node.js 24、根 `package.json` 固定的 pnpm。以上不启动数据库或导入资料；运行应用另需容器/基础服务，桌面构建另需 Rust 与 Windows 构建工具。
+前置：Python 3.11+、uv、Node.js 24、根 `package.json` 固定的 pnpm，原生构建另需 Rust 与 Windows 构建工具。以上不启动数据库或导入资料。
 
-**下一步按[开发指南](docs/DEVELOPMENT.md)配置独立数据目录、数据库、端口与 Compose 项目，再启动。** `HUB_DATA_DIR` 单独设置不能隔离数据库；仅复制 `.env.example` 也不会让 Python 或 `hub.ps1` 自动加载变量。
+**下一步按[开发指南](docs/DEVELOPMENT.md)执行 `pnpm desktop build`，并显式指定便携运行时与独立数据目录进行原生验证。** 静态前端嵌入 Tauri，不监听 8765、4173 或 1430。生产缺运行时直接报告错误，不回退到系统 Python 或容器；开发使用同一套原生监督器。`hub.ps1` 仅做资料维护，不再提供 start/dev/stop。
+
+`apps/web` 是历史沿用的桌面前端源码目录名，不代表仍有 Web 产品。`.env.example` 是变量参考，不会自动加载。
 
 ## Agent：先定位，再读证据
 
@@ -95,7 +98,7 @@ pnpm install --frozen-lockfile
 
 | 目录 | 职责 | 配套说明 |
 | --- | --- | --- |
-| [`apps/`](apps/) | API、Web、MCP、worker、资产网关 | [代码地图](docs/architecture/code-map.md) |
+| [`apps/`](apps/) | 桌面前端、API、MCP、worker、资产网关 | [代码地图](docs/architecture/code-map.md) |
 | [`packages/`](packages/) | 领域模型、导入、检索、证据、备份 | [来源边界](docs/architecture/source-boundaries.md) |
 | [`desktop/`](desktop/) | Tauri 桌面壳、运行时与安装包 | [桌面构建](desktop/README.md) |
 | [`config/`](config/) | 来源配置、冻结旁车、领域门户 | [配置说明](config/README.md) |
@@ -128,7 +131,7 @@ pnpm --filter @research-asset-hub/web test
 pnpm --filter @research-asset-hub/web build
 ```
 
-文档检查发现断链和明显不应跟踪的文件，不是密钥扫描、论文质量验收或全库完整性证明。历史缺失与未完成安装验收均保留，不用“测试通过”掩盖。此次范围、实际命令与遗留问题见[2026-10-28 整理报告](docs/reports/2026-10-28-repository-organization.md)。
+文档检查发现断链和明显不应跟踪的文件，不是密钥扫描、论文质量验收或全库完整性证明。历史缺失与未完成安装验收均保留，不用“测试通过”掩盖。产品行为、同类项目参考与真实体验见[设计取舍](docs/design/desktop-library-workbench.md)和[改革报告](docs/reports/2026-10-28-desktop-product-reform.md)；此前的[仓库整理报告](docs/reports/2026-10-28-repository-organization.md)保留原验收范围。
 
 扫描 PDF 的 OCR 依赖外部环境；全库科研图批处理未作为默认能力开启。资料数量和覆盖率是日期化观察，不是软件固有能力，也不代表官方会议全集。
 

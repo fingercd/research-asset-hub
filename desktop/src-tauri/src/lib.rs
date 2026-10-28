@@ -4,6 +4,8 @@ mod orchestrator;
 mod processes;
 mod runtime;
 mod single_instance;
+#[cfg(test)]
+mod test_env;
 mod tray;
 mod updater;
 
@@ -224,7 +226,11 @@ fn shutdown_orchestrator(state: &AppState) {
 /// 叉号与托盘共用同一条退出路径。先隐藏窗口，再在后台清理服务；
 /// 不在窗口事件线程等待数据库停止，也不让重复关闭启动多次清理。
 fn request_exit(app: tauri::AppHandle) {
-    if app.state::<AppState>().force_exit.swap(true, Ordering::SeqCst) {
+    if app
+        .state::<AppState>()
+        .force_exit
+        .swap(true, Ordering::SeqCst)
+    {
         return;
     }
     log_startup_milestone("exit-requested");
@@ -236,6 +242,24 @@ fn request_exit(app: tauri::AppHandle) {
         log_startup_milestone("exit-services-stopped");
         app.exit(0);
     });
+}
+
+fn report_startup_error(app: &tauri::AppHandle, show_ui: bool, detail: String) {
+    let _ = emit_startup_progress(
+        app,
+        &StartupProgress {
+            step: "预检环境".into(),
+            status: "failed".into(),
+            detail: Some(detail.clone()),
+        },
+    );
+    eprintln!("{detail}");
+    if show_ui {
+        app.dialog()
+            .message(detail)
+            .title("研究资产库启动失败")
+            .blocking_show();
+    }
 }
 
 /// 在编排线程执行一次完整启动;成功则导航到主界面,失败则弹窗。
@@ -261,20 +285,22 @@ fn run_startup(app: tauri::AppHandle, show_ui: bool) {
     }
 
     // resource_dir 在 Windows 直接返回 exe 目录,可能带 verbatim 前缀(\\?\);
-    // resolve 内部会剥前缀,但开发回退分支同样须防:统一在此先规范化。
+    // 所有传给原生子进程的路径统一去掉 verbatim 前缀。
     let resource = runtime::plain(&app.path().resource_dir().unwrap_or_default());
-    let mut paths = runtime::resolve(&resource);
-    let mut uses_containers = false;
-    if !paths.python.exists() {
-        // 开发回退:便携 runtime 未组装,用项目根 .venv + docker compose 容器
-        // (CARGO_MANIFEST_DIR = desktop/src-tauri,上两级即项目根)
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let project_root = manifest
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(manifest);
-        paths = runtime::resolve_dev(project_root);
-        uses_containers = true;
+    let paths = match runtime::development_profile(std::env::args_os().skip(1)) {
+        Ok(Some(profile)) => {
+            env::isolate_development(&profile);
+            runtime::resolve_dev(&profile)
+        }
+        Ok(None) => runtime::resolve(&resource),
+        Err(detail) => {
+            report_startup_error(&app, show_ui, detail);
+            return;
+        }
+    };
+    if let Err(detail) = paths.validate() {
+        report_startup_error(&app, show_ui, detail);
+        return;
     }
 
     let ports = orchestrator::Ports::from_env();
@@ -287,7 +313,10 @@ fn run_startup(app: tauri::AppHandle, show_ui: bool) {
     // meili master key 落盘目录:数据根下 secrets/(与 logs/postgres-data 同级)
     let secrets_dir = data_dir::data_root().join("secrets");
     let app_config_dir = paths.python_workdir.join("config");
-    let _ = env::prepare(&ports, &secrets_dir, &app_config_dir);
+    if let Err(error) = env::prepare(&ports, &secrets_dir, &app_config_dir) {
+        report_startup_error(&app, show_ui, error.to_string());
+        return;
+    }
 
     let app_for_events = app.clone();
     let orchestrator = Orchestrator::new(paths, ports, move |event| {
@@ -319,12 +348,6 @@ fn run_startup(app: tauri::AppHandle, show_ui: bool) {
             },
         );
     });
-    let orchestrator = if uses_containers {
-        orchestrator.with_containers()
-    } else {
-        orchestrator
-    };
-
     let arc = Arc::new(Mutex::new(orchestrator));
     {
         // 换入新实例;cancel 令牌与 orch 锁并排存储,退出/重试可无锁打断 start。
@@ -389,12 +412,16 @@ pub fn run() {
     }
     log_startup_milestone("process-entry");
     let background = background_requested(std::env::args_os().skip(1));
-    // 单实例保护必须在任何 Builder/setup 之前:第二个实例若进入 setup,
-    // 编排器预检会把已有实例的后台服务当作"残留"清理并弹报错(实测)。
-    // 此处互斥体拦截:已有实例则唤起其窗口后立即退出。
+    // 单实例保护在 Builder/setup 前生效，第二次启动只唤起已有窗口，
+    // 不创建 WebView 或启动另一条后台链；无法确认互斥体则失败闭合。
     #[cfg(windows)]
-    if !single_instance::acquire(!background) {
-        std::process::exit(0);
+    match single_instance::acquire(!background) {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(0),
+        Err(detail) => {
+            eprintln!("无法确认桌面单实例所有权：{detail}");
+            std::process::exit(2);
+        }
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -612,9 +639,21 @@ mod tests {
 
     #[test]
     fn library_argument_is_absolute_and_preserves_unicode_spaces() {
-        let args = |values: &[&str]| values.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
-        let path = if cfg!(windows) { "D:\\资料 库\\new" } else { "/资料 库/new" };
-        assert_eq!(data_directory_argument(args(&["--background", "--data-dir", path])), Ok(Some(path.into())));
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        let path = if cfg!(windows) {
+            "D:\\资料 库\\new"
+        } else {
+            "/资料 库/new"
+        };
+        assert_eq!(
+            data_directory_argument(args(&["--background", "--data-dir", path])),
+            Ok(Some(path.into()))
+        );
         assert!(data_directory_argument(args(&["--data-dir"])).is_err());
         assert!(data_directory_argument(args(&["--data-dir", "relative"])).is_err());
         assert!(data_directory_argument(args(&["--data-dir", path, "--data-dir", path])).is_err());

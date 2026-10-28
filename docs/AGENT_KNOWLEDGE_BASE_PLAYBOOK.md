@@ -322,7 +322,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 ## 8. 抽取、HTML 与索引
 
-`hub start` 已包含 worker。登记变化后排队：
+原生桌面监督器统一管理 worker，不再有 `hub start`。登记变化后排队：
 
 ```powershell
 ./.venv/Scripts/python.exe scripts/seed_jobs.py
@@ -370,7 +370,7 @@ CLI 会拒绝不带 `DryRun` 的 `ingest -Source`，避免单来源正式导入�
 
 网站检查：
 
-1. 在 <http://127.0.0.1:8765/search> 用题名、DOI/arXiv 和作者搜索；只有明确启用代码索引时才测试代码符号搜索。
+1. 在桌面“全部资料/搜索”用题名、DOI/arXiv 和作者搜索；只有明确启用代码索引时才测试代码符号搜索。
 2. 打开资产详情，核对题名、作者、年份、领域、标签和表示。
 3. 分别测试 PDF、代码、导读和原始 HTML；缺失按钮必须明确禁用。
 4. 检查代码作为独立 repository 资产，并有正确 `implemented_by` 关系。

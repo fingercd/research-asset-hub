@@ -9,7 +9,7 @@
 | 入口 | 作用 | 边界 |
 | --- | --- | --- |
 | [check_repository.py](check_repository.py) | Git 跟踪文件卫生、Markdown 本地链接 | 离线只读；不扫描原件、不联网、不验证内容级密钥或锚点 |
-| [hub.ps1](hub.ps1) `status -Json` | 实际进程与 HTTP 服务状态 | 不启动服务；不就绪可返回非零 |
+| [hub.ps1](hub.ps1) `status -Json` | CLI bootstrap 与报告位置 | 不代表原生服务就绪；实际状态在桌面查看 |
 | [hub.ps1](hub.ps1) `preflight / validate / inventory` | 配置、来源和资料盘点 | 读来源、写 `work/validation/` 报告；不正式导入 |
 | [hub.ps1](hub.ps1) `ingest -Source <alias> -DryRun` | 目标来源预演 | 不写正式库；正式导入仍需全来源门禁 |
 | [verify_source_integrity.py](verify_source_integrity.py) | 核对已登记来源完整性 | 必须确认 `--sources-config` 对准目标库，默认是源码配置 |
@@ -31,8 +31,8 @@
 
 | 入口 | 作用 | 运行前确认 |
 | --- | --- | --- |
-| [bootstrap.ps1](bootstrap.ps1) | 安装开发依赖；可选启动基础设施 | frozen lockfile；不覆盖正式环境 |
-| [hub.ps1](hub.ps1) `start / dev / stop` | 启停源码 API、worker、网关、Web 与基础设施 | 先按[开发指南](../docs/DEVELOPMENT.md)隔离 checkout、数据、端口与卷 |
+| [bootstrap.ps1](bootstrap.ps1) | 安装开发依赖，不启动服务 | frozen lockfile；不覆盖正式环境 |
+| [desktop.ps1](desktop.ps1) `build / plan / run` | 内嵌静态界面构建、只读计划与显式原生开发 | plan 不启动；run 明确 runtime/data-dir，冲突端口不自动接管 |
 | [run_knowledge_mcp.py](run_knowledge_mcp.py) | 源码 MCP 辅助入口 | 通常优先 `python -m apps.mcp_server` 或安装版生成配置 |
 | [build_startup_archive.py](build_startup_archive.py) | 显式生成本机运行时导入缓存 | 不是通用安装步骤；公共打包默认不生成 |
 

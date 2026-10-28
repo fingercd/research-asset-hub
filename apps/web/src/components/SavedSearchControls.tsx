@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SavedSearch } from "../api/types";
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { api, getApiErrorMessage } from "../api/client";
 import {
   normalizeSearchDefinition,
@@ -13,11 +13,15 @@ export function SavedSearchControls({
   definition: Record<string, unknown>;
 }) {
   const client = useQueryClient();
+  const location = useLocation();
+  const [open, setOpen] = useState(location.hash === "#saved-searches");
+  useEffect(() => { if (location.hash === "#saved-searches") setOpen(true); }, [location.hash, location.key]);
   const [name, setName] = useState("");
   const [editing, setEditing] = useState<SavedSearch | null>(null);
   const searches = useQuery({
     queryKey: ["saved-searches"],
     queryFn: ({ signal }) => api.savedSearches(signal),
+    staleTime: 60_000,
   });
   const save = useMutation({
     mutationFn: () =>
@@ -47,8 +51,9 @@ export function SavedSearchControls({
       void client.invalidateQueries({ queryKey: ["saved-searches"] }),
   });
   return (
-    <details className="saved-search-controls">
-      <summary>保存与复用筛选</summary>
+    <details className="saved-search-controls" id="saved-searches" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>保存与管理视图</summary>
+      <p className="saved-view-hint">视图保存筛选条件，不复制资料；删除视图不会删除论文。侧栏可随时打开。</p>
       <div className="form-row">
         <label className="grow">
           <span className="sr-only">筛选名称</span>
@@ -84,6 +89,11 @@ export function SavedSearchControls({
           {getApiErrorMessage(save.error ?? remove.error)}
         </p>
       )}
+      {searches.isError && <p className="inline-error" role="alert">
+        保存视图加载失败：{getApiErrorMessage(searches.error)}
+        <button className="button ghost compact" type="button" onClick={() => void searches.refetch()}>重试加载视图</button>
+      </p>}
+      {searches.isPending && <p role="status">正在加载保存视图…</p>}
       <div className="saved-search-list">
         {searches.data?.items.map((item) => (
           <div key={item.id}>

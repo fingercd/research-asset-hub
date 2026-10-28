@@ -11,15 +11,13 @@ STAGE_SCRIPT = PROJECT_ROOT / "desktop" / "scripts" / "stage-runtime.ps1"
 MAPPING_SCRIPT = PROJECT_ROOT / "desktop" / "scripts" / "validate-source-mapping.py"
 
 
-def test_stage_runtime_builds_web_before_copying_dist() -> None:
+def test_stage_runtime_builds_static_frontend_without_bundling_duplicate_website() -> None:
     script = STAGE_SCRIPT.read_text(encoding="utf-8")
-    build = "& pnpm --filter @research-asset-hub/web build"
-    copy_dist = "Copy-Item -LiteralPath (Join-Path $projectRoot 'apps/web/dist')"
-
-    assert build in script
+    assert "& pnpm --filter @research-asset-hub/web build" in script
     assert "if ($LASTEXITCODE -ne 0) { throw 'Web build failed' }" in script
-    assert copy_dist in script
-    assert script.index(build) < script.index(copy_dist)
+    assert "Copy-Item -LiteralPath (Join-Path $projectRoot 'apps/web/dist')" not in script
+    config = (PROJECT_ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
+    assert '"frontendDist": "../../apps/web/dist"' in config
 
 
 def _write_sources(project_root: Path) -> None:
@@ -91,3 +89,20 @@ def test_root_validation_rejects_parent_directory_even_when_roots_are_missing(
     assert result.returncode != 0
     assert "Copied sources configuration changes registered root mappings" in result.stderr
     assert "Immutable source root mappings verified" not in result.stdout
+
+
+def test_stage_allowlist_only_ships_native_entrypoints() -> None:
+    script = STAGE_SCRIPT.read_text(encoding="utf-8")
+    assert "'packages/graph'" not in script
+    assert "'apps/web_host'" not in script
+    assert "Get-ChildItem -LiteralPath (Join-Path $projectRoot 'apps')" not in script
+    for entry in (
+        "__init__.py",
+        "desktop_services.py",
+        "migrate.py",
+        "startup_metrics.py",
+        "startup_priority.py",
+        "worker_start.py",
+    ):
+        assert f"'{entry}'" in script
+        assert (PROJECT_ROOT / "apps" / entry).is_file()

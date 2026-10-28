@@ -130,7 +130,7 @@ export function HomePage() {
                   </div>
                   <div className="continue-reading-grid">
                     {continueReading.slice(0, 2).map((asset) => (
-                      <AssetCard asset={asset} compact key={asset.id} />
+                      <AssetCard asset={asset} compact continueReading key={asset.id} />
                     ))}
                   </div>
                 </section>

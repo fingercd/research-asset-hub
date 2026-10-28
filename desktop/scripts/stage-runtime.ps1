@@ -101,23 +101,22 @@ function Copy-CodeTree([string]$Relative) {
 }
 foreach ($tree in @('apps/api', 'apps/asset_gateway', 'apps/worker', 'apps/mcp_server',
     'packages/adapters', 'packages/backup', 'packages/cli', 'packages/domain',
-    'packages/domain_portals', 'packages/exporting', 'packages/extraction', 'packages/graph',
+    'packages/domain_portals', 'packages/exporting', 'packages/extraction',
     'packages/indexing', 'packages/ingestion', 'packages/integrations', 'packages/knowledge',
     'packages/security', 'packages/vln_guides', 'packages/managed_sources',
     'packages/domain_catalog', 'packages/intake', 'packages/repository_snapshots',
     'packages/workflows', 'migrations')) { Copy-CodeTree $tree }
-# The desktop shell launches top-level apps modules as well as the service
-# packages. Copy that complete module boundary so new launchers cannot be
-# silently omitted from an otherwise valid service package.
-foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'apps') -File -Filter '*.py') {
-    Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path (Join-Path $appDir 'apps') $entry.Name) -Force
+# The desktop launcher boundary is explicit: retired web hosts are never bundled.
+# Add new native entrypoints here together with bundled import verification.
+foreach ($entry in @('__init__.py', 'desktop_services.py', 'migrate.py', 'startup_metrics.py',
+    'startup_priority.py', 'worker_start.py')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "apps/$entry") -Destination (Join-Path $appDir "apps/$entry") -Force
 }
 foreach ($entry in @('packages/__init__.py', 'packages/version.py')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $entry) -Destination (Join-Path $appDir $entry) -Force
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination (Join-Path $appDir 'LICENSE')
-New-Item -ItemType Directory -Force -Path (Join-Path $appDir 'apps/web') | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot 'apps/web/dist') -Destination (Join-Path $appDir 'apps/web/dist') -Recurse -Force
+# The static dist is embedded by Tauri frontendDist; do not ship a second website tree.
 $configSource = if ($Profile -eq 'public') { Join-Path $projectRoot 'newconfig/release-defaults' } else { Join-Path $projectRoot 'config' }
 Copy-Item -LiteralPath $configSource -Destination (Join-Path $appDir 'config') -Recurse -Force
 [IO.File]::WriteAllText((Join-Path $appDir 'config/release-profile.txt'), $Profile, $utf8)

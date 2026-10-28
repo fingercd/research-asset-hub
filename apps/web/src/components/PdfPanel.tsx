@@ -9,18 +9,33 @@ import {
 } from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useEffect, useRef, useState } from "react";
-import { api, getApiErrorMessage } from "../api/client";
+import { api, ApiError, getApiErrorMessage } from "../api/client";
 import type {
   Annotation,
   PdfAnchor,
   ReadingPositionResponse,
   Representation,
 } from "../api/types";
-import { representationLabel } from "../lib/format";
+import { pdfRepresentationLabel } from "../lib/pdfRepresentationLabel";
+import "../styles/reading-workspace.css";
 import { useRepresentationUrl } from "../lib/useRepresentationUrl";
-import { EmptyState, ErrorState, LoadingState } from "./PageState";
+import { EmptyState, LoadingState } from "./PageState";
 import { SafeOpenLink } from "./SafeOpenLink";
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+function pdfFailure(error: unknown): string {
+  const detail = getApiErrorMessage(error);
+  const status = error instanceof ApiError ? error.status : undefined;
+  if (status === 401 || status === 403 || /401|403|expired|unauthorized|forbidden/i.test(detail))
+    return "文件读取被拒绝或安全会话已过期。请重新创建安全会话后重试。";
+  if (status === 404 || /404|missingpdf|not found/i.test(detail))
+    return "未找到已登记的 PDF 文件。请在概览中核对文件与版本；不会自动改用外网文件。";
+  if (/invalidpdf|invalid pdf|format|corrupt/i.test(detail))
+    return "文件无法解析为 PDF，可能不完整或格式损坏。请核对这个版本的原文件。";
+  if (/fetch|network|load failed/i.test(detail))
+    return "无法取得 PDF 文件：可能是安全会话、网关连接或网络访问问题；当前无法据此判断文件是否存在。";
+  return `PDF 加载失败：${detail}`;
+}
 
 export function PdfPanel({
   representation,
@@ -46,16 +61,23 @@ export function PdfPanel({
   const [note, setNote] = useState("");
   const [size, setSize] = useState({ width: 800, height: 1000 });
   const [positionError, setPositionError] = useState("");
+  const [loadRevision, setLoadRevision] = useState(0);
+  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const [containerWidth, setContainerWidth] = useState(800);
+  const [positionReady, setPositionReady] = useState(false);
+  const [saveRevision, setSaveRevision] = useState(0);
   const restored = useRef(false);
-  const positionRef = useRef<ReadingPositionResponse | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const saveBlocked = useRef(false);
+  const lastSavedPage = useRef(1);
   const position = useQuery({
     queryKey: ["reading-position", assetId],
     queryFn: ({ signal }) => api.readingPosition(assetId!, signal),
     enabled: !!assetId,
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
-  positionRef.current = position.data ?? null;
   const highlight = useMutation({
     mutationFn: () =>
       api.createAnnotation({
@@ -75,13 +97,14 @@ export function PdfPanel({
   });
   useEffect(() => {
     restored.current = false;
+    setPositionReady(false);
     setSelection(null);
     setPageNumber(1);
   }, [representation?.id]);
   useEffect(() => {
     if (!source.data) return;
     let current = true;
-    const task = getDocument({ url: source.data, withCredentials: true });
+    const task = getDocument({ url: source.data.url, withCredentials: true });
     setDocument(null);
     setLoadError(null);
     void task.promise
@@ -89,13 +112,13 @@ export function PdfPanel({
         if (current) setDocument(loaded);
       })
       .catch((error: unknown) => {
-        if (current) setLoadError(getApiErrorMessage(error));
+        if (current) setLoadError(pdfFailure(error));
       });
     return () => {
       current = false;
       void task.destroy();
     };
-  }, [source.data]);
+  }, [source.data, loadRevision]);
   useEffect(() => {
     if (!pdfDocument || restored.current || (position.isPending && assetId))
       return;
@@ -105,15 +128,21 @@ export function PdfPanel({
       initialPage ??
       (!position.data?.stale &&
       saved &&
-      saved.representation_id === representation?.id
+      saved.representation_id === representation?.id &&
+      saved.source_hash && representation?.sha256 &&
+      saved.source_hash === representation.sha256
         ? saved.page
         : 1);
-    setPageNumber(Math.max(1, Math.min(pdfDocument.numPages, target)));
+    const restoredPage = Math.max(1, Math.min(pdfDocument.numPages, target));
+    lastSavedPage.current = restoredPage;
+    setPageNumber(restoredPage);
+    setPositionReady(true);
   }, [
     pdfDocument,
     position.isPending,
     position.data,
     representation?.id,
+    representation?.sha256,
     assetId,
     initialPage,
   ]);
@@ -122,7 +151,16 @@ export function PdfPanel({
       setPageNumber(Math.max(1, Math.min(pdfDocument.numPages, initialPage)));
   }, [initialPage, pdfDocument]);
   useEffect(() => {
-    if (!pdfDocument || !canvasRef.current || !textRef.current) return;
+    const container = surfaceRef.current?.parentElement;
+    if (!container || !pdfDocument || !positionReady) return;
+    const update = () => setContainerWidth(container.clientWidth || 800);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [pdfDocument, positionReady]);
+  useEffect(() => {
+    if (!pdfDocument || !positionReady || !canvasRef.current || !textRef.current) return;
     let current = true;
     let renderTask: RenderTask | undefined;
     let textLayer: TextLayer | undefined;
@@ -133,10 +171,9 @@ export function PdfPanel({
       .then(async (page) => {
         const textContent = await page.getTextContent();
         if (!current || !canvasRef.current || !textRef.current) return;
-        const available = surfaceRef.current?.parentElement?.clientWidth ?? 800;
         const base = page.getViewport({ scale: 1 });
         const viewport = page.getViewport({
-          scale: Math.min(1.45, (available - 32) / base.width),
+          scale: zoom === "fit" ? Math.max(0.1, (containerWidth - 32) / base.width) : zoom,
         });
         const canvas = canvasRef.current;
         const context = canvas.getContext("2d");
@@ -165,27 +202,29 @@ export function PdfPanel({
           error?.name !== "RenderingCancelledException" &&
           error?.name !== "AbortException"
         )
-          setRenderError(getApiErrorMessage(error));
+          setRenderError(pdfFailure(error));
       });
     return () => {
       current = false;
       renderTask?.cancel();
       textLayer?.cancel();
     };
-  }, [pdfDocument, pageNumber]);
+  }, [pdfDocument, pageNumber, zoom, containerWidth, positionReady]);
   useEffect(() => {
     if (
       !assetId ||
       !representation ||
       !pdfDocument ||
-      !restored.current ||
+      !positionReady ||
+      pageNumber === lastSavedPage.current ||
       position.isPending ||
       position.isError
     )
       return;
     const timer = window.setTimeout(() => {
       saveQueue.current = saveQueue.current.then(async () => {
-        const previous = positionRef.current?.position;
+        if (saveBlocked.current) return;
+        const previous = client.getQueryData<ReadingPositionResponse>(["reading-position", assetId])?.position;
         try {
           const result = await api.saveReadingPosition(
             assetId,
@@ -196,10 +235,13 @@ export function PdfPanel({
             },
             previous?.row_version,
           );
-          positionRef.current = result;
+          lastSavedPage.current = pageNumber;
           client.setQueryData(["reading-position", assetId], result);
           setPositionError("");
         } catch (error) {
+          // Never overwrite a newer reader after an ETag conflict. Queued writes
+          // stop until the user explicitly refreshes the saved version.
+          saveBlocked.current = true;
           setPositionError(getApiErrorMessage(error));
         }
       });
@@ -212,12 +254,14 @@ export function PdfPanel({
     pageNumber,
     position.isPending,
     position.isError,
+    positionReady,
+    saveRevision,
     client,
   ]);
   function captureSelection() {
     const selected = window.getSelection();
     const surface = surfaceRef.current;
-    if (!selected?.rangeCount || !surface || !representation || !assetId)
+    if (!selected?.rangeCount || !surface || !representation?.sha256 || !assetId)
       return;
     const range = selected.getRangeAt(0);
     if (!textRef.current?.contains(range.commonAncestorContainer)) return;
@@ -247,7 +291,12 @@ export function PdfPanel({
   if (source.isPending) return <LoadingState label="正在创建 PDF 安全会话…" />;
   if (source.isError || !source.data)
     return (
-      <ErrorState error={source.error ?? new Error("未返回可打开地址。")} />
+      <section className="viewer-fallback" role="alert">
+        <strong>无法创建 PDF 安全会话</strong>
+        <p>{pdfFailure(source.error ?? new Error("未返回可打开地址。"))}</p>
+        <button className="button secondary" onClick={() => void source.refetch()}>重试安全会话</button>
+        <small>不会绕过本地读取检查或自动切换到外网文件。</small>
+      </section>
     );
   const anchored = annotations.filter(
     (a) =>
@@ -256,36 +305,47 @@ export function PdfPanel({
   );
   const stale = anchored.filter(
     (a) =>
-      a.anchor?.source_hash &&
-      representation.sha256 &&
+      !a.anchor?.source_hash || !representation.sha256 ||
       a.anchor.source_hash !== representation.sha256,
   );
   return (
     <section className="document-viewer" aria-label="PDF 阅读器">
       <header>
         <div>
-          <strong>{representationLabel(representation)}</strong>
-          <span>选中文字可保存高亮，阅读页码自动保存。</span>
+          <strong>{pdfRepresentationLabel(representation)}</strong>
+          <span>{source.data.kind === "external_url" ? "仅登记了外网文件，需要联网读取。" : "经安全会话读取已登记文件；不会自动切换外网版本。"}选中文字可保存高亮，翻页后自动保存位置。</span>
         </div>
-        <SafeOpenLink url={source.data} label="在新窗口打开 PDF" />
+        <SafeOpenLink url={source.data.url} label="在新窗口打开 PDF" />
       </header>
-      {position.data?.stale && (
+      {(position.data?.stale || (position.data?.position?.representation_id === representation.id && position.data.position.source_hash !== representation.sha256)) && (
         <p className="inline-warning">
-          这份文件已变化，上次阅读位置可能失效：{position.data.reason}
+          这份文件与上次阅读指纹不一致或无法核验，未自动恢复旧页码。{position.data?.reason}
         </p>
       )}
       {(positionError || position.isError) && (
         <p className="inline-warning" role="status">
-          阅读位置未保存：{positionError || getApiErrorMessage(position.error)}
+          {position.isError ? "上次阅读位置读取失败，自动保存已暂停：" : "阅读位置未保存，后续保存已暂停："}{positionError || getApiErrorMessage(position.error)}
+          <button className="text-link" onClick={async () => {
+            const result = await position.refetch();
+            if (result.isSuccess) {
+              saveBlocked.current = false;
+              setPositionError("");
+              setSaveRevision((value) => value + 1);
+            }
+          }}>刷新已保存位置并重试</button>
         </p>
       )}
       {loadError ? (
-        <div className="viewer-fallback">
+        <div className="viewer-fallback" role="alert">
           <AlertTriangle size={20} />
           <strong>{loadError}</strong>
-          <span>可使用上方按钮打开原文件。</span>
+          <span>重试只读取当前已选版本；新窗口按钮使用同一安全地址，不代表已验证可读。</span>
+          <div className="button-row">
+            <button className="button secondary" onClick={() => setLoadRevision((value) => value + 1)}>重试加载 PDF</button>
+            <button className="button secondary" onClick={() => void source.refetch().then(() => setLoadRevision((value) => value + 1))}>重试安全会话</button>
+          </div>
         </div>
-      ) : pdfDocument ? (
+      ) : pdfDocument && positionReady ? (
         <>
           <div className="pdf-toolbar" aria-label="PDF 翻页">
             <button
@@ -306,7 +366,7 @@ export function PdfPanel({
                 value={pageNumber}
                 onChange={(e) => {
                   const value = Number(e.target.value);
-                  if (value >= 1 && value <= pdfDocument.numPages)
+                  if (Number.isInteger(value) && value >= 1 && value <= pdfDocument.numPages)
                     setPageNumber(value);
                 }}
               />{" "}
@@ -320,16 +380,24 @@ export function PdfPanel({
               下一页
               <ChevronRight size={14} />
             </button>
+            <label className="pdf-zoom-picker">缩放
+              <select aria-label="PDF 缩放" value={zoom} onChange={(event) => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}>
+                <option value="fit">适合宽度</option>
+                {[0.5, 0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{value * 100}%</option>)}
+              </select>
+            </label>
           </div>
+          {!representation.sha256 && <p className="inline-warning">当前文件没有可核验的指纹，暂不支持创建或显示页内高亮；原有摘录仍保留。</p>}
           {renderError && (
             <p className="inline-error" role="alert">
               {renderError}
+              <button className="text-link" onClick={() => setLoadRevision((value) => value + 1)}>重试加载本页</button>
             </p>
           )}
           {!!stale.length && (
             <p className="inline-warning">
               本页 {stale.length}{" "}
-              条高亮来自旧版本，已隐藏其标记。摘录内容仍保留。
+              条高亮的文件指纹不匹配或无法核验，已隐藏其标记。摘录内容仍保留。
             </p>
           )}
           {selection && (
@@ -391,7 +459,7 @@ export function PdfPanel({
           </div>
         </>
       ) : (
-        <LoadingState label="正在解析 PDF…" />
+        <LoadingState label={pdfDocument ? "正在恢复阅读位置…" : "正在解析 PDF…"} />
       )}
     </section>
   );

@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link, MemoryRouter, useLocation } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../api/client";
 import { CompareProvider } from "../state/CompareContext";
 import { AppShell } from "./AppShell";
@@ -33,6 +33,9 @@ function renderShell(initialEntry = "/") {
     </QueryClientProvider>,
   );
 }
+
+beforeEach(() => { vi.spyOn(window, "scrollTo").mockImplementation(() => {}); vi.spyOn(api, "savedSearches").mockResolvedValue({items: [], next_cursor: null, total: 0}); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe("AppShell", () => {
   it("opens the global search with Ctrl+K and focuses the search box", async () => {
@@ -147,4 +150,39 @@ describe("AppShell", () => {
     expect(await screen.findByRole("button", { name: "状态检查超时" })).toBeInTheDocument();
     expect(screen.queryByText("API 离线")).not.toBeInTheDocument();
   });
+  it("keeps reading queues and saved views in the sidebar with complete filter URLs", async () => {
+    vi.spyOn(api, "health").mockRejectedValue(new Error("offline"));
+    vi.mocked(api.savedSearches).mockResolvedValue({items: [{id: "v1", name: "CVPR 未读", definition: {venue: "CVPR", year: 2025, status: "unread"}, row_version: 1}], next_cursor: null, total: 1});
+    renderShell();
+    const views = screen.getByRole("navigation", {name: "资料视图"});
+    expect(within(views).getByRole("link", {name: "全部资料"})).toHaveAttribute("href", "/search");
+    expect(within(views).getByRole("link", {name: "阅读中"})).toHaveAttribute("href", "/search?status=reading");
+    expect(within(views).getByRole("link", {name: "未读"})).toHaveAttribute("href", "/search?status=unread");
+    expect(await within(views).findByRole("link", {name: "CVPR 未读"})).toHaveAttribute("href", "/search?venue=CVPR&year=2025&status=unread");
+    fireEvent.click(within(views).getByRole("link", {name: "CVPR 未读"}));
+    expect(screen.getByLabelText("当前地址")).toHaveTextContent("/search?venue=CVPR&year=2025&status=unread");
+  });
+
+  it("recovers saved-view loading without hiding primary navigation", async () => {
+    vi.spyOn(api, "health").mockRejectedValue(new Error("offline"));
+    vi.mocked(api.savedSearches).mockRejectedValueOnce(new Error("saved offline")).mockResolvedValue({items: [], next_cursor: null});
+    renderShell();
+    expect(await screen.findByText("保存视图加载失败")).toBeInTheDocument();
+    expect(screen.getByRole("navigation", {name: "主导航"})).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: "重试"}));
+    expect(await screen.findByText("在搜索页保存常用筛选")).toBeInTheDocument();
+  });
+
+  it("starts new destinations at the top without forcing POP history entries to zero", async () => {
+    vi.spyOn(api, "health").mockRejectedValue(new Error("offline"));
+    renderShell("/search?q=agent");
+    expect(window.scrollTo).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("link", {name: "示例详情"}));
+    expect(window.scrollTo).toHaveBeenCalledWith({top: 0, left: 0, behavior: "instant"});
+    const calls = vi.mocked(window.scrollTo).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", {name: "返回上一页"}));
+    await waitFor(() => expect(screen.getByLabelText("当前地址")).toHaveTextContent("/search?q=agent"));
+    expect(window.scrollTo).toHaveBeenCalledTimes(calls);
+  });
+
 });

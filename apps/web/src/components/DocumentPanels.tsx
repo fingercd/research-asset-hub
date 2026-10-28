@@ -23,7 +23,7 @@ function IsolatedFrame({
   }
   if (source.isPending) return <LoadingState label={`正在创建${title}安全会话…`} />;
   if (source.isError || !source.data) {
-    return <ErrorState error={source.error ?? new Error("未返回可打开地址。")} />;
+    return <ErrorState error={source.error ?? new Error("未返回可打开地址。")} title={`无法创建${title}安全会话`} retry={() => void source.refetch()} />;
   }
   return (
     <section className="document-viewer">
@@ -32,11 +32,11 @@ function IsolatedFrame({
           <strong>{representationLabel(representation)}</strong>
           <span>{representation.network_required ? "需要联网资源" : "隔离本地视图"}</span>
         </div>
-        <SafeOpenLink url={source.data} label={`在新窗口打开${title}`} />
+        <SafeOpenLink url={source.data.url} label={`在新窗口打开${title}`} />
       </header>
       <iframe
         className="document-frame"
-        src={source.data}
+        src={source.data.url}
         title={title}
         sandbox={sandbox}
         referrerPolicy="no-referrer"
@@ -50,7 +50,7 @@ function MarkdownPanel({ representation }: { representation: Representation }) {
   const markdown = useQuery({
     queryKey: ["representation-markdown", representation.id, source.data],
     queryFn: async () => {
-      const response = await fetch(source.data!, {
+      const response = await fetch(source.data!.url, {
         credentials: "include",
         headers: { Accept: "text/markdown,text/plain;q=0.9" },
       });
@@ -100,7 +100,7 @@ function MarkdownPanel({ representation }: { representation: Representation }) {
           <strong>{representationLabel(representation)}</strong>
           <span>安全 Markdown 阅读视图</span>
         </div>
-        <SafeOpenLink url={source.data} label="打开原始导读" />
+        <SafeOpenLink url={source.data.url} label="打开原始导读" />
       </header>
       <article className="markdown-view">
         <ReactMarkdown rehypePlugins={[rehypeSanitize]}>{markdown.data}</ReactMarkdown>

@@ -12,6 +12,7 @@ import { api } from "../api/client";
 import { EmptyState, ErrorState, LoadingState } from "../components/PageState";
 import { PageHeader } from "../components/PageHeader";
 import { safeJson } from "../lib/format";
+import "../styles/reading-workspace.css";
 
 const sensitivePattern = /(secret|token|password|api[_-]?key|credential)/i;
 
@@ -86,11 +87,11 @@ export function SettingsPage() {
     : {};
 
   return (
-    <div className="page">
+    <div className="page settings-workspace">
       <PageHeader
         eyebrow="连接与配置"
         title="设置"
-        description="配置研究助手接入，查看本地服务、搜索与来源状态。"
+        description="管理资料库位置与研究助手接入。排障信息按需展开。"
       />
       <div className="notice">
         <LockKeyhole size={17} aria-hidden="true" />
@@ -101,6 +102,9 @@ export function SettingsPage() {
       </div>
       <LibraryLocationSettings />
       <McpSettings />
+      <details className="settings-diagnostics">
+        <summary>技术诊断与来源登记（只读）</summary>
+        <p className="muted">用于排查连接与来源问题。登记为可用不代表每份文件已验证；来源文件保持只读。</p>
       {settings.isPending ? (
         <LoadingState label="正在加载设置…" />
       ) : settings.isError ? (
@@ -200,6 +204,7 @@ export function SettingsPage() {
           )}
         </div>
       ) : null}
+      </details>
     </div>
   );
 }

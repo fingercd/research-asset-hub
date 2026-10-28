@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipPython,
-    [switch]$SkipWeb,
-    [switch]$StartInfrastructure
+    [switch]$SkipWeb
 )
 
 Set-StrictMode -Version Latest
@@ -87,36 +86,10 @@ try {
         }
     }
 
-    $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
-    if ($dockerCommand) {
-        Invoke-CheckedCommand -Command $dockerCommand.Source -Arguments @(
-            "compose",
-            "-f",
-            "deploy/compose.yaml",
-            "config",
-            "--quiet"
-        )
-        if ($StartInfrastructure) {
-            Invoke-CheckedCommand -Command $dockerCommand.Source -Arguments @(
-                "compose",
-                "-f",
-                "deploy/compose.yaml",
-                "up",
-                "-d"
-            )
-        }
-    }
-    elseif ($StartInfrastructure) {
-        throw "Docker is required when -StartInfrastructure is supplied."
-    }
-    else {
-        Write-Warning "Docker was not found; Compose validation was skipped."
-    }
-
     Write-Host ""
     Write-Host "Bootstrap completed." -ForegroundColor Green
-    Write-Host "Start all local services with: .\scripts\hub.ps1 start"
-    Write-Host "Open the platform at:          http://127.0.0.1:8765"
+    Write-Host "Dependencies only; no services were started."
+    Write-Host "Native development: .\scripts\desktop.ps1 (see docs/DEVELOPMENT.md)"
 }
 finally {
     Pop-Location

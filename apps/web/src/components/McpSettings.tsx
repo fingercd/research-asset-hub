@@ -39,10 +39,13 @@ export function McpSettings() {
         </p>
       ) : (
         <>
+          <details className="mcp-config-details">
+            <summary>查看客户端配置 JSON</summary>
           <label>
             <span>客户端配置 JSON</span>
             <textarea className="mono" rows={12} readOnly value={text} />
           </label>
+          </details>
           <button
             className="button primary compact"
             type="button"

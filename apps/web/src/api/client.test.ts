@@ -223,14 +223,31 @@ describe("resolveApiBase", () => {
     vi.unstubAllGlobals();
   });
 
-  it("falls back to the build-time env value", () => {
+  it("does not substitute a build-time endpoint when the shell is missing", () => {
+    vi.stubGlobal("window", {} as HubWindow);
     vi.stubEnv("VITE_API_BASE", "http://127.0.0.1:9000/api/v1");
-    expect(resolveApiBase()).toBe("http://127.0.0.1:9000/api/v1");
+    expect(resolveApiBase).toThrow("请从 Research Asset Hub 桌面程序打开");
     vi.unstubAllEnvs();
   });
 
-  it("defaults to the dev-proxied relative path", () => {
-    expect(resolveApiBase()).toBe("/api/v1");
+  it("reports missing native initialization instead of using a proxy fallback", () => {
+    vi.stubGlobal("window", {} as HubWindow);
+    vi.stubGlobal("fetch", vi.fn());
+    expect(() => api.dashboard()).toThrow("请从 Research Asset Hub 桌面程序打开");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("conference catalog filters", () => {
+  it("sends venue and publication year alongside keyword and paging filters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ items: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.search({ q: "", venue: "CVPR", year: 2026, group_by: "paper", cursor: "next" });
+    const url = new URL(fetchMock.mock.calls[0]![0] as string, "http://localhost");
+    expect(url.searchParams.get("venue")).toBe("CVPR");
+    expect(url.searchParams.get("year")).toBe("2026");
+    expect(url.searchParams.get("cursor")).toBe("next");
+    expect(url.searchParams.has("q")).toBe(false);
   });
 });
 

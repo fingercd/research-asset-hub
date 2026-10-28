@@ -1434,7 +1434,7 @@ wheels = [
 
 [[package]]
 name = "research-asset-hub"
-version = "0.2.0rc4"
+version = "0.3.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

@@ -7,7 +7,7 @@
 1. 运行 `git status --short`，记录并绕开已有与无关改动；不执行 `reset --hard`、`clean -fd` 或强推来制造干净状态。
 2. 阅读 [AGENTS.md](AGENTS.md)与[来源边界](docs/architecture/source-boundaries.md)。涉及入库时另读[完整操作手册](docs/AGENT_KNOWLEDGE_BASE_PLAYBOOK.md)。
 3. 已登记来源、冻结 manifest、原 PDF 与第三方代码只读。测试使用临时 fixture 和隔离数据库，不对个人正式库写入。
-4. 使用[独立 checkout 开发流程](docs/DEVELOPMENT.md)。仅设置 `HUB_DATA_DIR` 不能隔离数据库、搜索服务和进程台账。
+4. 使用[原生隔离开发流程](docs/DEVELOPMENT.md)。明确指定 runtime/source/data-dir，冲突端口必须保留已有进程；不得启动独立 Web/Compose 后端。
 
 ## 按改动范围验证
 
@@ -16,7 +16,7 @@
 | 文档、导航、仓库规则 | `python scripts/check_repository.py`、`git diff --check` | 链接检查不是内容正确性或页面视觉验收 |
 | Python 业务代码 | 相关 pytest、Ruff、目标模块 mypy | 外部服务与真实文件依赖是否可用 |
 | 入库 / 身份 / 来源 | 相关契约与幂等测试；有真实入库则遵循完整门禁 | dry-run、备份、第二次导入、缺失与拒绝结果 |
-| Web | typecheck、test、build；交互改动做实际浏览器验证 | 自动化测试不能代替 PDF/代码实际打开 |
+| 桌面前端 | typecheck、test、build；交互改动做真实原生窗口验证 | JSDOM 不能代替 WebView 的 PDF/代码实际打开 |
 | 桌面壳 / 打包 | Rust 测试与目标运行时检查 | 安装、升级、退出、卸载和恢复的实际验证范围 |
 
 在仓库根执行（Windows）：
@@ -29,7 +29,11 @@
 pnpm --filter @research-asset-hub/web typecheck
 pnpm --filter @research-asset-hub/web test
 pnpm --filter @research-asset-hub/web build
-cargo test --manifest-path desktop/src-tauri/Cargo.toml
+$previousTauriConfig = $env:TAURI_CONFIG
+try {
+    $env:TAURI_CONFIG='{"bundle":{"resources":null}}'
+    cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
+} finally { $env:TAURI_CONFIG = $previousTauriConfig }
 git diff --check
 ```
 

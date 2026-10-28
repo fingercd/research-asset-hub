@@ -24,8 +24,6 @@ class ApiSettings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8767, ge=1, le=65535)
     api_reload: bool = False
-    web_host: str = "127.0.0.1"
-    web_port: int = Field(default=8765, ge=1, le=65535)
     asset_gateway_host: str = "127.0.0.1"
     asset_gateway_port: int = Field(default=8766, ge=1, le=65535)
 
@@ -55,7 +53,6 @@ class ApiSettings(BaseSettings):
     health_timeout_seconds: float = Field(default=1.5, gt=0, le=30)
 
     gateway_origin: str = "http://127.0.0.1:8766"
-    web_origin: str = "http://127.0.0.1:8765"
     desktop_origins: Annotated[list[str], NoDecode] = Field(
         default=["http://tauri.localhost", "tauri://localhost"],
         description=(
@@ -63,7 +60,6 @@ class ApiSettings(BaseSettings):
             "环境变量 HUB_DESKTOP_ORIGINS 用逗号分隔覆盖。"
         ),
     )
-    web_api_proxy_timeout_seconds: float = Field(default=180.0, gt=0, le=3600)
     gateway_secret: str = ""
     gateway_session_seconds: int = Field(default=900, ge=30, le=86400)
     sources_config_path: Path = PROJECT_ROOT / "config" / "sources.yaml"
@@ -71,7 +67,6 @@ class ApiSettings(BaseSettings):
     taxonomy_config_path: Path = PROJECT_ROOT / "config" / "taxonomy.yaml"
     domain_portal_config_path: Path = PROJECT_ROOT / "config" / "domain-portals" / "v2"
     domain_portal_renderer: Literal["v1", "v2"] = "v2"
-    web_dist_path: Path = PROJECT_ROOT / "apps" / "web" / "dist"
     obsidian_vault_path: Path = Path.home() / "Documents" / "Obsidian Vault"
     obsidian_hub_directory: str = "00_Home/Research Asset Hub"
     zotero_base_url: str = "http://127.0.0.1:23119"

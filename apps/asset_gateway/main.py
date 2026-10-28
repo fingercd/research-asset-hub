@@ -76,14 +76,8 @@ def _normalized_origin(value: str) -> str | None:
 
 
 def _browser_origins(settings: ApiSettings) -> list[str]:
-    candidates = [
-        settings.web_origin,
-        settings.web_origin.replace("127.0.0.1", "localhost"),
-        settings.web_origin.replace("localhost", "127.0.0.1"),
-        *settings.desktop_origins,
-    ]
     origins: list[str] = []
-    for value in candidates:
+    for value in settings.desktop_origins:
         origin = _normalized_origin(value)
         if origin is not None and origin not in origins:
             origins.append(origin)

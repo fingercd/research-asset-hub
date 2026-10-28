@@ -16,7 +16,7 @@ from .filters import (
     meilisearch_filter,
     metadata_filters,
 )
-from .fusion import apply_score_boosts, reciprocal_rank_fusion
+from .fusion import reciprocal_rank_fusion
 from .keyword import KeywordSearchResult, KeywordSearchService, SearchMode
 from .meili import (
     HttpxJSONTransport,
@@ -58,7 +58,6 @@ __all__ = [
     "SearchDocument",
     "SearchHit",
     "SearchMode",
-    "apply_score_boosts",
     "canonical_filters",
     "matches_metadata",
     "meilisearch_filter",

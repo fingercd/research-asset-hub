@@ -19,12 +19,15 @@ import {
 import {
   Suspense,
   useEffect,
+  useLayoutEffect,
   useState,
   type FormEvent,
   type ReactNode,
 } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { api, ApiError, getApiErrorMessage } from "../api/client";
+import { searchDefinitionToUrl } from "../lib/savedSearch";
+import "../styles/catalog-workspace.css";
 import { useCompare } from "../state/CompareContext";
 import { useDialogFocus } from "../lib/useDialogFocus";
 import { usePageHistory } from "../lib/usePageHistory";
@@ -70,6 +73,46 @@ function NavigationItem({
       <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
       <span>{label}</span>
     </NavLink>
+  );
+}
+
+function LibraryViews() {
+  const location = useLocation();
+  const searches = useQuery({
+    queryKey: ["saved-searches"],
+    queryFn: ({ signal }) => api.savedSearches(signal),
+    staleTime: 60_000,
+  });
+  const currentSearch = new URLSearchParams(location.search).toString();
+  const views = [
+    { name: "全部资料", url: "/search" },
+    { name: "阅读中", url: "/search?status=reading" },
+    { name: "未读", url: "/search?status=unread" },
+  ];
+  return (
+    <nav className="library-views" aria-label="资料视图">
+      <h2 className="nav-section-label">资料视图</h2>
+      {views.map(({ name, url }) => (
+        <Link key={url} to={url} className={`nav-item ${
+          location.pathname === "/search" && currentSearch === (url.split("?")[1] ?? "") ? "is-active" : ""
+        }`} aria-current={location.pathname === "/search" && currentSearch === (url.split("?")[1] ?? "") ? "page" : undefined}>
+          <BookOpen size={16} aria-hidden="true" /><span>{name}</span>
+        </Link>
+      ))}
+      <h2 className="nav-section-label">保存的视图</h2>
+      {searches.isPending && <p className="sidebar-view-note" role="status">正在加载视图…</p>}
+      {searches.isError && <div className="sidebar-view-note" role="alert">
+        <span>保存视图加载失败</span>
+        <button type="button" onClick={() => void searches.refetch()}>重试</button>
+      </div>}
+      {searches.data?.items.slice(0, 5).map((item) => (
+        <Link className="nav-item saved-view-link" key={item.id} to={searchDefinitionToUrl(item.definition)}>
+          <Search size={15} aria-hidden="true" /><span>{item.name ?? item.title}</span>
+        </Link>
+      ))}
+      {searches.data && !searches.data.items.length && <p className="sidebar-view-note">在搜索页保存常用筛选</p>}
+      <Link className="sidebar-manage-views" to="/search#saved-searches">管理保存视图</Link>
+    </nav>
   );
 }
 
@@ -142,7 +185,7 @@ function CommandPalette({ open, close }: { open: boolean; close: () => void }) {
             type="search"
             value={value}
             onChange={(event) => setValue(event.target.value)}
-            placeholder="搜索论文、代码或笔记…"
+            placeholder="搜索题名、摘要、DOI 或 arXiv ID…"
             aria-label="全局搜索关键词"
           />
           <kbd>Esc</kbd>
@@ -308,6 +351,12 @@ function CompareTray() {
 
 export function AppShell({ children }: { children?: ReactNode }) {
   const location = useLocation();
+  const navigationType = useNavigationType();
+  useLayoutEffect(() => {
+    // New destinations start at the top; POP is left to browser history restoration.
+    if (navigationType === "PUSH" && !location.hash) window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  }, [location.pathname, location.search, location.hash, navigationType]);
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
@@ -357,7 +406,7 @@ export function AppShell({ children }: { children?: ReactNode }) {
 
   useEffect(() => {
     setMobileNavOpen(false);
-  }, [location.pathname]);
+  }, [location.pathname, location.search, location.hash]);
 
   return (
     <div className="app-shell">
@@ -391,6 +440,8 @@ export function AppShell({ children }: { children?: ReactNode }) {
             <NavigationItem {...item} key={item.to} />
           ))}
         </nav>
+
+        <LibraryViews />
 
         <div className="sidebar-footer">
           <button

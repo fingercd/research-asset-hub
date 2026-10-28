@@ -39,6 +39,8 @@ import {
   representationLabel,
 } from "../lib/format";
 import { preferGuide } from "../lib/preferredGuide";
+import { pdfRepresentationLabel } from "../lib/pdfRepresentationLabel";
+import "../styles/reading-workspace.css";
 import { useCompare } from "../state/CompareContext";
 
 const PdfPanel = lazy(() =>
@@ -67,7 +69,7 @@ function firstRepresentation(
   predicate: (item: Representation) => boolean,
 ) {
   return representations.find(
-    (item) => item.availability !== "missing" && predicate(item),
+    (item) => (item.availability === undefined || item.availability === "available") && predicate(item),
   );
 }
 
@@ -76,11 +78,10 @@ export function AssetDetailPage() {
   const compare = useCompare();
   const [editingMetadata, setEditingMetadata] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
-  const requestedPage = Number(searchParams.get("page")) || undefined;
+  const pageParam = Number(searchParams.get("page"));
+  const requestedPage = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : undefined;
   const requestedRepresentation = searchParams.get("representation");
-  const [activeTab, setActiveTab] = useState<DetailTab>(
-    searchParams.get("view") === "pdf" ? "pdf" : "overview",
-  );
+  const activeTab: DetailTab = tabs.find((tab) => tab.id === searchParams.get("view"))?.id ?? "overview";
   const asset = useQuery({
     queryKey: ["asset", assetId],
     queryFn: ({ signal }) => api.asset(assetId, signal),
@@ -90,6 +91,14 @@ export function AssetDetailPage() {
     queryKey: ["representations", assetId],
     queryFn: ({ signal }) => api.representations(assetId, signal),
     enabled: Boolean(assetId),
+  });
+  const readingPosition = useQuery({
+    queryKey: ["reading-position", assetId],
+    queryFn: ({ signal }) => api.readingPosition(assetId, signal),
+    enabled: Boolean(assetId) && activeTab === "pdf",
+    retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const annotations = useInfiniteQuery({
     queryKey: ["annotations", assetId],
@@ -127,12 +136,12 @@ export function AssetDetailPage() {
   const notes = annotations.data?.pages.flatMap((page) => page.items) ?? data.annotations ?? [];
   const domains = getAssetDomains(data);
   const selected = compare.has(data.id);
-  const pdf = firstRepresentation(
-    reps,
-    (item) =>
-      getRepresentationType(item) === "pdf" &&
-      (!requestedRepresentation || item.id === requestedRepresentation),
-  );
+  const pdfs = reps.filter((item) => getRepresentationType(item) === "pdf");
+  const savedRepresentation = readingPosition.data?.position?.representation_id;
+  const pdf = requestedRepresentation
+    ? firstRepresentation(pdfs, (item) => item.id === requestedRepresentation)
+    : firstRepresentation(pdfs, (item) => item.id === savedRepresentation)
+      ?? firstRepresentation(pdfs, () => true);
   const code =
     firstRepresentation(reps, (item) =>
       ["repository", "source_code", "notebook"].includes(
@@ -184,7 +193,9 @@ export function AssetDetailPage() {
             quickActions={data.quick_actions}
             relatedRepositories={data.related_repositories}
           />
-          {!!domains.length && (
+          {(!!domains.length || !!data.tags?.length) && (
+            <details className="detail-topics">
+              <summary>领域与标签（{domains.length + (data.tags?.length ?? 0)}）</summary>
             <div className="tag-row">
               {domains.map((domain) => (
                 <Link
@@ -198,6 +209,7 @@ export function AssetDetailPage() {
                 <span key={tag}>#{tag}</span>
               ))}
             </div>
+            </details>
           )}
         </div>
         <div className="asset-hero-actions">
@@ -247,7 +259,7 @@ export function AssetDetailPage() {
             role="tab"
             aria-selected={activeTab === id}
             aria-controls={`detail-panel-${id}`}
-            onClick={() => setActiveTab(id)}
+            onClick={() => setSearchParams({ view: id })}
             key={id}
           >
             <Icon size={15} aria-hidden="true" />
@@ -338,7 +350,6 @@ export function AssetDetailPage() {
                                     }
                                   : {}),
                               });
-                              setActiveTab("pdf");
                             }}
                           >
                             回到 PDF 第 {annotation.anchor.page} 页
@@ -448,11 +459,11 @@ export function AssetDetailPage() {
 
         {activeTab === "pdf" && (
           <Suspense fallback={<LoadingState label="正在加载 PDF 阅读器…" />}>
-            {reps.filter((item) => getRepresentationType(item) === "pdf")
-              .length > 1 && (
+            {pdfs.length > 1 && (
               <label className="pdf-representation-picker">
                 <span>选择 PDF 版本</span>
                 <select
+                  aria-label="选择 PDF 版本"
                   value={pdf?.id ?? ""}
                   onChange={(event) =>
                     setSearchParams({
@@ -461,11 +472,10 @@ export function AssetDetailPage() {
                     })
                   }
                 >
-                  {reps
-                    .filter((item) => getRepresentationType(item) === "pdf")
+                  {pdfs
                     .map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {representationLabel(item)}
+                      <option key={item.id} value={item.id} disabled={item.availability !== undefined && item.availability !== "available"}>
+                        {pdfRepresentationLabel(item)}{item.availability === "missing" ? "（文件缺失）" : item.availability && item.availability !== "available" ? "（不可用）" : ""}
                       </option>
                     ))}
                 </select>
@@ -476,12 +486,16 @@ export function AssetDetailPage() {
                 这条批注所对应的 PDF 当前不可用。可在概览中核对原文件与版本。
               </p>
             )}
-            <PdfPanel
+            {!requestedRepresentation && savedRepresentation && pdf?.id !== savedRepresentation && !readingPosition.isPending && (
+              <p className="inline-warning">上次阅读的 PDF 版本当前不可用。{pdf ? "已选择另一可用版本，将从第一页开始，不会套用其他文件的页码。" : "请在概览中核对文件与版本。"}</p>
+            )}
+            {readingPosition.isPending ? <LoadingState label="正在恢复上次阅读版本…" /> : <PdfPanel
+              key={`${data.id}:${pdf?.id ?? "none"}`}
               representation={pdf}
               assetId={data.id}
               initialPage={requestedPage}
               annotations={notes}
-            />
+            />}
           </Suspense>
         )}
         {activeTab === "code" && (

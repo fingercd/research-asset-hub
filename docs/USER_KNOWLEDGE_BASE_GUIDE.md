@@ -254,16 +254,15 @@ npm --prefix apps/web run test
 
 ```powershell
 cd "D:\ResearchLibrary\research-asset-hub"
-./scripts/hub.ps1 start
 ./scripts/hub.ps1 preflight
 ./scripts/hub.ps1 validate -All -Json
 ./scripts/hub.ps1 inventory -All
 ./scripts/hub.ps1 ingest -All -DryRun
 ```
 
-`DryRun` 本身只需要 Python、配置和可读来源。这里先运行 `start` 是为了继续完成正式数据库导入、抽取、索引和网站验证；如果你只想检查 manifest，可以暂时不启动完整服务。
+`DryRun` 本身只需要 Python、配置和可读来源。需要正式导入时先正常打开桌面程序，让唯一监督器提供数据库与后台任务；只检查 manifest 时不必启动桌面。
 
-本机入口分别是：网站 <http://127.0.0.1:8765>、API 文档 <http://127.0.0.1:8767/docs>、隔离资产网关健康检查 <http://127.0.0.1:8766/health>。
+日常入口是原生桌面。API 文档与资产网关是维护用的本机服务，不再提供独立网站入口。
 
 网关健康表示数据库与签名配置就绪；知识库状态只汇总表示台账和来源根注册情况，不扫描全部 PDF 或代码。判断某份资料能否阅读，要看其表示状态和实际打开结果；缺失文件仍会返回明确错误。
 
@@ -313,7 +312,7 @@ cd "D:\ResearchLibrary\research-asset-hub"
 ./.venv/Scripts/python.exe scripts/seed_jobs.py
 ```
 
-打开 <http://127.0.0.1:8765/jobs>，等“等待中”和“运行中”任务归零。失败任务会明确显示；不要因为其他资产成功就忽略失败项。
+在桌面系统状态中打开“后台任务”，等“等待中”和“运行中”任务归零。失败任务会明确显示；不要因为其他资产成功就忽略失败项。
 
 构建正式索引：
 

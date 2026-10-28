@@ -134,6 +134,7 @@ export interface Asset {
   source_urls?: string[];
   reading_status?: ReadingStatus;
   reading_state?: { status?: ReadingStatus } | ReadingStatus | null;
+  reading_position?: ReadingPositionResponse;
   annotation_summary?: string | null;
   annotations?: Annotation[];
   representations?: Representation[];

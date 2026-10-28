@@ -5,7 +5,7 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { getAssetDomains, getReadingStatus, type Asset } from "../api/types";
+import { getAssetDomains, getReadingStatus, getRepresentationType, type Asset } from "../api/types";
 import { annotationSnippet, formatAuthors } from "../lib/format";
 import { useCompare } from "../state/CompareContext";
 import { CopyIdButton } from "./CopyIdButton";
@@ -15,15 +15,21 @@ import { RepresentationActions } from "./RepresentationActions";
 export function AssetCard({
   asset,
   compact = false,
+  continueReading = false,
 }: {
   asset: Asset;
   compact?: boolean;
+  continueReading?: boolean;
 }) {
   const compare = useCompare();
   const selected = compare.has(asset.id);
   const domains = getAssetDomains(asset);
   const annotation = annotationSnippet(asset);
   const isPaper = (asset.asset_type ?? asset.type) === "paper";
+  const resumePdf = continueReading && (
+    asset.representations?.some((item) => getRepresentationType(item) === "pdf" && item.availability === "available") ||
+    asset.quick_actions?.some((item) => item.kind === "pdf" && item.status === "available")
+  );
 
   return (
     <article className={`asset-card ${compact ? "is-compact" : ""}`}>
@@ -67,10 +73,11 @@ export function AssetCard({
         <div className="card-primary-actions">
           <Link
             className="button primary compact"
-            to={`/assets/${encodeURIComponent(asset.id)}`}
+            to={`/assets/${encodeURIComponent(asset.id)}${resumePdf ? "?view=pdf" : ""}`}
           >
-            打开资料 <ArrowRight size={14} aria-hidden="true" />
+            {resumePdf ? "继续阅读 PDF" : "打开资料"} <ArrowRight size={14} aria-hidden="true" />
           </Link>
+          {resumePdf && <Link className="text-link" to={`/assets/${encodeURIComponent(asset.id)}`}>查看资料</Link>}
           <details className="card-more-menu">
             <summary className="button secondary compact" role="button">
               <MoreHorizontal size={15} aria-hidden="true" /> 更多

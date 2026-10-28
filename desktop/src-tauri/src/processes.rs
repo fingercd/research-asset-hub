@@ -70,6 +70,10 @@ pub fn wait_exit(handle: &ChildHandle, timeout: Duration) -> bool {
 
 /// 停止整个进程树(taskkill /T /F);随后等待进程退出。
 pub fn kill_tree(handle: &ChildHandle) -> std::io::Result<()> {
+    // An exited child no longer owns its PID; never taskkill a recycled PID.
+    if handle.child.lock().unwrap().try_wait()?.is_some() {
+        return Ok(());
+    }
     let mut taskkill = Command::new("taskkill");
     no_console(&mut taskkill);
     let _ = taskkill
@@ -93,105 +97,200 @@ pub fn tcp_probe(port: u16) -> bool {
     .is_ok()
 }
 
-/// taskkill 单个进程(连同其进程树)。
-pub fn kill_pid(pid: u32) -> std::io::Result<()> {
-    let mut taskkill = Command::new("taskkill");
-    no_console(&mut taskkill);
-    let status = taskkill
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "taskkill /PID {pid} 返回失败"
-        )))
-    }
-}
-
-/// 查询端口当前监听进程的 (PID, 命令行):PowerShell Get-NetTCPConnection
-/// -LocalPort <port> -State Listen 取 OwningProcess(PID),再经 list_processes
-/// 查该 PID 的命令行。供 Preflight 按端口归属识别残留进程——只有实际持有
-/// 冲突端口的进程且命令行匹配自有特征时才允许清理,避免误杀同栈但非壳启动
-/// 的无关进程。查询失败(无监听归属/权限/解析失败)返回 None,调用方按
-/// "端口无 PID 归属"处理:不清理,报错提示用户,宁可不杀不误杀。
+/// Query only IPv4 listeners reachable through 127.0.0.1. No subprocess,
+/// command-line enumeration, cached ownership, or alternate lookup backend.
+#[cfg(windows)]
 pub fn port_owner(port: u16) -> Option<(u32, String)> {
-    let mut ps = Command::new("powershell");
-    no_console(&mut ps);
-    let output = ps
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "ConvertTo-Json -Compress @(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess)"
-            ),
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_LISTENER,
+    };
+    use windows::Win32::Networking::WinSock::AF_INET;
+
+    let mut size = 0u32;
+    // Microsoft requires a size query, then an aligned caller-owned buffer.
+    // https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable
+    let status = unsafe {
+        GetExtendedTcpTable(
+            None,
+            &mut size,
+            false,
+            AF_INET.0 as u32,
+            TCP_TABLE_OWNER_PID_LISTENER,
+            0,
+        )
+    };
+    if status != ERROR_INSUFFICIENT_BUFFER.0 {
         return None;
     }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    // 同端口 IPv4/IPv6 双监听时返回数组,取首个 OwningProcess(通常同一进程)
-    let pid = match value.as_array().and_then(|items| items.first()) {
-        Some(item) => item.as_u64()?,
-        None => value.as_u64()?,
-    };
-    let pid = u32::try_from(pid).ok()?;
-    let cmd = list_processes()
-        .into_iter()
-        .find(|(p, _)| *p == pid)
-        .map(|(_, cmd)| cmd)
-        .unwrap_or_default();
-    Some((pid, cmd))
+    for _ in 0..3 {
+        // The table and rows consist of DWORD fields: u32 supplies their alignment.
+        let mut buffer = vec![0u32; (size as usize).div_ceil(std::mem::size_of::<u32>())];
+        let allocated = buffer.len() * std::mem::size_of::<u32>();
+        let status = unsafe {
+            GetExtendedTcpTable(
+                Some(buffer.as_mut_ptr().cast()),
+                &mut size,
+                false,
+                AF_INET.0 as u32,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            )
+        };
+        if status == ERROR_INSUFFICIENT_BUFFER.0 {
+            continue;
+        }
+        if status != NO_ERROR.0 || size as usize > allocated {
+            return None;
+        }
+        let offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
+        let count = *buffer.first()? as usize;
+        let end =
+            offset.checked_add(count.checked_mul(std::mem::size_of::<MIB_TCPROW_OWNER_PID>())?)?;
+        if end > size as usize {
+            return None;
+        }
+        // Bounds use the SDK layout, including padding; the API succeeded and
+        // initialized these rows. The buffer remains alive throughout selection.
+        let rows = unsafe {
+            std::slice::from_raw_parts(
+                buffer
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset)
+                    .cast::<MIB_TCPROW_OWNER_PID>(),
+                count,
+            )
+        };
+        return loopback_listener_owner(rows, port).map(|pid| (pid, String::new()));
+    }
+    None
 }
 
-/// 查询本机全部进程 (pid, 命令行),Windows 经 PowerShell Get-CimInstance。
-/// 供 port_owner 按 PID 取命令行。查询失败返回空列表:调用方按
-/// "无非自有进程可清理"处理,不影响报错路径。
-pub fn list_processes() -> Vec<(u32, String)> {
-    let mut ps = Command::new("powershell");
-    no_console(&mut ps);
-    let output = match ps
-        .args([
-            "-NoProfile",
-            "-Command",
-            "ConvertTo-Json -Compress @(Get-CimInstance Win32_Process | Select-Object ProcessId, CommandLine)",
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return Vec::new();
-    };
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let pid = item.get("ProcessId").and_then(|v| v.as_u64()).or_else(|| {
-                item.get("ProcessId")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-            })?;
-            let cmd = item
-                .get("CommandLine")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            Some((pid as u32, cmd))
-        })
-        .collect()
+#[cfg(windows)]
+fn loopback_listener_owner(
+    rows: &[windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID],
+    port: u16,
+) -> Option<u32> {
+    use windows::Win32::NetworkManagement::IpHelper::MIB_TCP_STATE_LISTEN;
+    let loopback = u32::from_ne_bytes([127, 0, 0, 1]);
+    let mut owner = None;
+    for row in rows {
+        if row.dwState != MIB_TCP_STATE_LISTEN.0 as u32
+            || (row.dwLocalAddr != loopback && row.dwLocalAddr != 0)
+            || u16::from_be(row.dwLocalPort as u16) != port
+        {
+            continue;
+        }
+        if row.dwOwningPid == 0 || owner.is_some_and(|pid| pid != row.dwOwningPid) {
+            return None; // Conflicting bindings do not prove a unique owner.
+        }
+        owner = Some(row.dwOwningPid);
+    }
+    owner
+}
+
+#[cfg(not(windows))]
+pub fn port_owner(_port: u16) -> Option<(u32, String)> {
+    None // This desktop supervisor has no ownership backend on other platforms.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn listener_rows_require_correct_address_state_network_port_and_unique_pid() {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            MIB_TCPROW_OWNER_PID, MIB_TCP_STATE_LISTEN,
+        };
+        let row = MIB_TCPROW_OWNER_PID {
+            dwState: MIB_TCP_STATE_LISTEN.0 as u32,
+            dwLocalAddr: u32::from_ne_bytes([127, 0, 0, 1]),
+            dwLocalPort: 5432u16.to_be() as u32,
+            dwOwningPid: 42,
+            ..Default::default()
+        };
+        assert_eq!(loopback_listener_owner(&[row], 5432), Some(42));
+        assert_eq!(loopback_listener_owner(&[row], 7700), None);
+        assert_eq!(
+            loopback_listener_owner(
+                &[MIB_TCPROW_OWNER_PID {
+                    dwLocalAddr: 0,
+                    ..row
+                }],
+                5432
+            ),
+            Some(42)
+        );
+        assert_eq!(
+            loopback_listener_owner(
+                &[MIB_TCPROW_OWNER_PID {
+                    dwLocalAddr: u32::from_ne_bytes([192, 168, 0, 2]),
+                    ..row
+                }],
+                5432
+            ),
+            None
+        );
+        assert_eq!(
+            loopback_listener_owner(&[MIB_TCPROW_OWNER_PID { dwState: 5, ..row }], 5432),
+            None
+        );
+        assert_eq!(loopback_listener_owner(&[row, row], 5432), Some(42));
+        assert_eq!(
+            loopback_listener_owner(
+                &[
+                    row,
+                    MIB_TCPROW_OWNER_PID {
+                        dwOwningPid: 43,
+                        ..row
+                    }
+                ],
+                5432
+            ),
+            None
+        );
+        assert_eq!(
+            loopback_listener_owner(
+                &[MIB_TCPROW_OWNER_PID {
+                    dwOwningPid: 0,
+                    ..row
+                }],
+                5432
+            ),
+            None
+        );
+    }
+
+    /// Explicit read-only benchmark against an already-running desktop backend.
+    #[test]
+    #[ignore = "requires existing services on 5432/7700; does not start or stop them"]
+    fn benchmark_existing_service_owner_lookup() {
+        let mut elapsed = Vec::new();
+        for port in [5432, 7700] {
+            for sample in 0..3 {
+                let started = Instant::now();
+                let owner = port_owner(port).expect("existing IPv4 service owner");
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                elapsed.push(ms);
+                println!(
+                    "port={port} sample={sample} pid={} elapsed_ms={ms:.3}",
+                    owner.0
+                );
+            }
+        }
+        elapsed.sort_by(f64::total_cmp);
+        println!(
+            "lookup_count={} median_ms={:.3} min_ms={:.3} max_ms={:.3}",
+            elapsed.len(),
+            (elapsed[2] + elapsed[3]) / 2.0,
+            elapsed[0],
+            elapsed[5]
+        );
+    }
 
     #[test]
     fn spawn_and_kill_tree() {

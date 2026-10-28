@@ -1,4 +1,4 @@
-//! 启动前环境变量准备(镜像 scripts/hub.ps1 的 env 块;变量名与各 app config 对齐)。
+//! 桌面监督器为本轮受管运行时构造环境；开发环境不继承其他资料库配置。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -125,6 +125,35 @@ fn prepare_user_configuration(data_root: &Path, app_config_dir: &Path) -> io::Re
     Ok(app_config_dir.to_path_buf())
 }
 
+/// Direct executable launches receive the same isolation as the developer script.
+pub fn isolate_development(profile: &crate::runtime::DevelopmentProfile) {
+    for key in [
+        "HUB_DATABASE_URL",
+        "DATABASE_URL",
+        "HUB_MEILISEARCH_URL",
+        "HUB_MEILISEARCH_API_KEY",
+        "HUB_GATEWAY_SECRET",
+        "HUB_POSTGRES_PASSWORD",
+        "HUB_SOURCES_CONFIG_PATH",
+        "HUB_TAXONOMY_CONFIG_PATH",
+        "HUB_DOMAIN_PORTAL_CONFIG_PATH",
+        "HUB_WORKER_HEARTBEAT_PATH",
+        "HUB_HOST_WORKSPACE_ROOT",
+        "PGHOST",
+        "PGPORT",
+        "PGDATABASE",
+        "PGUSER",
+        "PGPASSWORD",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGOPTIONS",
+    ] {
+        std::env::remove_var(key);
+    }
+    std::env::set_var("HUB_DATA_DIR", &profile.data_dir);
+    std::env::set_var("HUB_HOST_WORKSPACE_ROOT", &profile.source_root);
+}
+
 pub fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::Result<()> {
     let data_root = crate::data_dir::data_root();
     std::env::set_var("HUB_DATA_DIR", &data_root);
@@ -148,32 +177,23 @@ pub fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::
     {
         std::env::set_var("HUB_GATEWAY_SECRET", random_base64(48));
     }
-    if std::env::var("HUB_MEILISEARCH_API_KEY")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
-    {
-        // 用户显式设置时尊重用户值,不落盘;仅自动生成路径做持久化复用
-        std::env::set_var(
-            "HUB_MEILISEARCH_API_KEY",
-            load_or_create_meili_key(secrets_dir)?,
-        );
-    }
-    if std::env::var("HUB_DATABASE_URL")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
-    {
-        let pw = std::env::var("HUB_POSTGRES_PASSWORD")
-            .unwrap_or_else(|_| "research_hub_local".to_string());
-        let url = format!(
-            "postgresql://research_hub:{pw}@127.0.0.1:{}/{}",
-            ports.postgres, APP_DB_NAME
-        );
-        std::env::set_var("HUB_DATABASE_URL", &url);
-        std::env::set_var(
-            "DATABASE_URL",
-            url.replace("postgresql://", "postgresql+psycopg://"),
-        );
-    }
+    // Desktop always owns its database/search process; external connection
+    // overrides belong to the standalone CLI/API contracts, not this supervisor.
+    std::env::set_var(
+        "HUB_MEILISEARCH_API_KEY",
+        load_or_create_meili_key(secrets_dir)?,
+    );
+    let pw =
+        std::env::var("HUB_POSTGRES_PASSWORD").unwrap_or_else(|_| "research_hub_local".to_string());
+    let url = format!(
+        "postgresql://research_hub:{pw}@127.0.0.1:{}/{}",
+        ports.postgres, APP_DB_NAME
+    );
+    std::env::set_var("HUB_DATABASE_URL", &url);
+    std::env::set_var(
+        "DATABASE_URL",
+        url.replace("postgresql://", "postgresql+psycopg://"),
+    );
     std::env::set_var("HUB_API_HOST", "127.0.0.1");
     std::env::set_var("HUB_API_PORT", ports.api.to_string());
     std::env::set_var("HUB_ASSET_GATEWAY_HOST", "127.0.0.1");
@@ -182,13 +202,6 @@ pub fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::
         "HUB_GATEWAY_ORIGIN",
         format!("http://127.0.0.1:{}", ports.gateway),
     );
-    // 对照检查补齐(api/asset_gateway/worker 共用的 ApiSettings 字段 + hub.ps1 env 块):
-    // HUB_WEB_HOST/HUB_WEB_PORT/HUB_WEB_ORIGIN(web_host/web_port/web_origin)、
-    // HUB_MEILISEARCH_URL(meilisearch_url)。web 端口保留用户设置,缺省 8765(与 hub.ps1 一致)。
-    let web_port = std::env::var("HUB_WEB_PORT").unwrap_or_else(|_| "8765".to_string());
-    std::env::set_var("HUB_WEB_HOST", "127.0.0.1");
-    std::env::set_var("HUB_WEB_PORT", &web_port);
-    std::env::set_var("HUB_WEB_ORIGIN", format!("http://127.0.0.1:{web_port}"));
     std::env::set_var(
         "HUB_MEILISEARCH_URL",
         format!("http://127.0.0.1:{}", ports.meili),
@@ -217,11 +230,7 @@ pub fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// prepare 读写进程级 env var,rustc 测试默认并行执行会互相干扰;
-    /// 本模块全部测试用同一把锁串行化。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_env::EnvironmentGuard;
 
     fn prepare(ports: &Ports, secrets_dir: &Path, app_config_dir: &Path) -> io::Result<()> {
         std::env::set_var("HUB_DATA_DIR", secrets_dir.join("test-data"));
@@ -242,23 +251,6 @@ mod tests {
             gateway: 8766,
             postgres: 5432,
             meili: 7700,
-        }
-    }
-
-    fn cleanup_env() {
-        for key in [
-            "HUB_GATEWAY_SECRET",
-            "HUB_MEILISEARCH_API_KEY",
-            "HUB_DATABASE_URL",
-            "DATABASE_URL",
-            "HUB_WORKER_HEARTBEAT_PATH",
-            "HUB_HOST_WORKSPACE_ROOT",
-            "HUB_DATA_DIR",
-            "HUB_SOURCES_CONFIG_PATH",
-            "HUB_TAXONOMY_CONFIG_PATH",
-            "HUB_DOMAIN_PORTAL_CONFIG_PATH",
-        ] {
-            std::env::remove_var(key);
         }
     }
 
@@ -283,10 +275,127 @@ mod tests {
     }
 
     #[test]
-    fn prepare_sets_database_urls_and_keeps_secrets_stable() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn direct_development_launch_rebuilds_environment_from_explicit_roots() {
+        let _guard = EnvironmentGuard::isolated();
+        let root = temp_secrets();
+        let profile = crate::runtime::DevelopmentProfile {
+            source_root: root.join("source"),
+            runtime_root: root.join("runtime"),
+            data_dir: root.join("isolated-data"),
+        };
+        for key in [
+            "HUB_DATABASE_URL",
+            "DATABASE_URL",
+            "HUB_MEILISEARCH_URL",
+            "HUB_MEILISEARCH_API_KEY",
+            "HUB_GATEWAY_SECRET",
+            "HUB_POSTGRES_PASSWORD",
+            "HUB_DATA_DIR",
+            "HUB_HOST_WORKSPACE_ROOT",
+            "HUB_SOURCES_CONFIG_PATH",
+            "HUB_TAXONOMY_CONFIG_PATH",
+            "HUB_DOMAIN_PORTAL_CONFIG_PATH",
+            "HUB_WORKER_HEARTBEAT_PATH",
+            "PGSERVICE",
+            "PGOPTIONS",
+            "PGPASSWORD",
+        ] {
+            std::env::set_var(key, "other-library-do-not-use");
+        }
+        isolate_development(&profile);
+        let ports = Ports {
+            api: 18767,
+            gateway: 18766,
+            postgres: 15432,
+            meili: 17700,
+        };
+        super::prepare(
+            &ports,
+            &profile.data_dir.join("secrets"),
+            &profile.source_root.join("config"),
+        )
+        .unwrap();
+        assert_eq!(crate::data_dir::data_root(), profile.data_dir);
+        assert_eq!(
+            std::env::var("HUB_DATABASE_URL").unwrap(),
+            "postgresql://research_hub:research_hub_local@127.0.0.1:15432/research_asset_hub"
+        );
+        assert_eq!(
+            std::env::var("HUB_MEILISEARCH_URL").unwrap(),
+            "http://127.0.0.1:17700"
+        );
+        for (key, file) in [
+            ("HUB_SOURCES_CONFIG_PATH", "sources.yaml"),
+            ("HUB_TAXONOMY_CONFIG_PATH", "taxonomy.yaml"),
+            ("HUB_DOMAIN_PORTAL_CONFIG_PATH", "domain-portals/v2"),
+        ] {
+            assert_eq!(
+                std::env::var_os(key),
+                Some(
+                    profile
+                        .source_root
+                        .join("config")
+                        .join(file)
+                        .into_os_string()
+                )
+            );
+        }
+        assert_eq!(
+            std::env::var_os("HUB_WORKER_HEARTBEAT_PATH"),
+            Some(
+                profile
+                    .data_dir
+                    .join("work")
+                    .join("state")
+                    .join("worker-heartbeat.json")
+                    .into_os_string()
+            )
+        );
+        assert_eq!(
+            std::env::var_os("HUB_HOST_WORKSPACE_ROOT"),
+            Some(profile.source_root.into_os_string())
+        );
+        for key in ["PGSERVICE", "PGOPTIONS", "PGPASSWORD"] {
+            assert!(std::env::var_os(key).is_none());
+        }
+        assert_ne!(
+            std::env::var("HUB_MEILISEARCH_API_KEY").unwrap(),
+            "other-library-do-not-use"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_connections_override_external_database_and_search_settings() {
+        let _guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
-        cleanup_env();
+        std::env::set_var("HUB_DATABASE_URL", "postgresql://foreign/production");
+        std::env::set_var("DATABASE_URL", "postgresql://foreign/production");
+        std::env::set_var("HUB_MEILISEARCH_URL", "http://foreign:7700");
+        std::env::set_var("HUB_MEILISEARCH_API_KEY", "foreign-key");
+        prepare(&test_ports(), &secrets, &secrets.join("config")).unwrap();
+        assert!(std::env::var("HUB_DATABASE_URL")
+            .unwrap()
+            .contains("127.0.0.1:5432/research_asset_hub"));
+        assert!(std::env::var("DATABASE_URL")
+            .unwrap()
+            .contains("127.0.0.1:5432/research_asset_hub"));
+        assert_eq!(
+            std::env::var("HUB_MEILISEARCH_URL").unwrap(),
+            "http://127.0.0.1:7700"
+        );
+        assert_eq!(
+            std::env::var("HUB_MEILISEARCH_API_KEY").unwrap(),
+            std::fs::read_to_string(secrets.join("meili-master-key")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(secrets);
+    }
+
+    #[test]
+    fn prepare_sets_database_urls_and_keeps_secrets_stable() {
+        let guard = EnvironmentGuard::isolated();
+        let secrets = temp_secrets();
+        guard.clear();
         let ports = test_ports();
         prepare(&ports, &secrets, &secrets.join("missing-config")).unwrap();
         let secret = std::env::var("HUB_GATEWAY_SECRET").unwrap();
@@ -307,15 +416,15 @@ mod tests {
         // 幂等:再次 prepare 不换 gateway secret
         prepare(&ports, &secrets, &secrets.join("missing-config")).unwrap();
         assert_eq!(std::env::var("HUB_GATEWAY_SECRET").unwrap(), secret);
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn meili_key_persists_across_prepares() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
-        cleanup_env();
+        guard.clear();
         let ports = test_ports();
         prepare(&ports, &secrets, &secrets.join("missing-config")).unwrap();
         let first = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
@@ -327,18 +436,18 @@ mod tests {
         // 落盘内容与 env 一致
         let on_disk = std::fs::read_to_string(secrets.join("meili-master-key")).unwrap();
         assert_eq!(on_disk.trim(), first);
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn meili_key_reuses_preexisting_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
         std::fs::create_dir_all(&secrets).unwrap();
         let preloaded = "0123456789abcdef0123456789abcdef";
         std::fs::write(secrets.join("meili-master-key"), preloaded).unwrap();
-        cleanup_env();
+        guard.clear();
         prepare(&test_ports(), &secrets, &secrets.join("missing-config")).unwrap();
         assert_eq!(std::env::var("HUB_MEILISEARCH_API_KEY").unwrap(), preloaded);
         // 文件保持原内容(未被覆盖)
@@ -346,19 +455,19 @@ mod tests {
             std::fs::read_to_string(secrets.join("meili-master-key")).unwrap(),
             preloaded
         );
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn meili_key_regenerates_on_corrupt_or_empty_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let ports = test_ports();
         // 损坏内容:非 hex
         let secrets = temp_secrets();
         std::fs::create_dir_all(&secrets).unwrap();
         std::fs::write(secrets.join("meili-master-key"), "garbage!!\n").unwrap();
-        cleanup_env();
+        guard.clear();
         prepare(&ports, &secrets, &secrets.join("missing-config")).unwrap();
         let regenerated = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
         assert_ne!(regenerated, "garbage!!");
@@ -377,7 +486,7 @@ mod tests {
         let secrets = temp_secrets();
         std::fs::create_dir_all(&secrets).unwrap();
         std::fs::write(secrets.join("meili-master-key"), "\n").unwrap();
-        cleanup_env();
+        guard.clear();
         prepare(&ports, &secrets, &secrets.join("missing-config")).unwrap();
         let key = std::env::var("HUB_MEILISEARCH_API_KEY").unwrap();
         assert_eq!(key.len(), 32);
@@ -388,13 +497,13 @@ mod tests {
             key,
             "空文件应被覆盖为新 key"
         );
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn prepare_loads_valid_workspace_hint_when_env_is_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
         let config_dir = secrets.join("app").join("config");
         let workspace_root = secrets.join("host-workspace");
@@ -410,7 +519,7 @@ mod tests {
             format!("\u{feff}{}\n", workspace_root.display()),
         )
         .unwrap();
-        cleanup_env();
+        guard.clear();
 
         prepare(&test_ports(), &secrets, &config_dir).unwrap();
 
@@ -418,13 +527,13 @@ mod tests {
             std::env::var_os("HUB_HOST_WORKSPACE_ROOT"),
             Some(workspace_root.as_os_str().to_owned())
         );
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn prepare_repairs_legacy_parent_workspace_hint() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
         let config_dir = secrets.join("app").join("config");
         let parent_root = secrets.join("core-domain");
@@ -441,7 +550,7 @@ mod tests {
             parent_root.to_string_lossy().as_bytes(),
         )
         .unwrap();
-        cleanup_env();
+        guard.clear();
 
         prepare(&test_ports(), &secrets, &config_dir).unwrap();
 
@@ -449,13 +558,13 @@ mod tests {
             std::env::var_os("HUB_HOST_WORKSPACE_ROOT"),
             Some(workspace_root.as_os_str().to_owned())
         );
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 
     #[test]
     fn prepare_preserves_explicit_workspace_root_and_ignores_invalid_hint() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let guard = EnvironmentGuard::isolated();
         let secrets = temp_secrets();
         let config_dir = secrets.join("app").join("config");
         let explicit_root = secrets.join("explicit-workspace");
@@ -469,7 +578,7 @@ mod tests {
                 .as_bytes(),
         )
         .unwrap();
-        cleanup_env();
+        guard.clear();
         std::env::set_var("HUB_HOST_WORKSPACE_ROOT", &explicit_root);
 
         prepare(&test_ports(), &secrets, &config_dir).unwrap();
@@ -478,11 +587,11 @@ mod tests {
             std::env::var_os("HUB_HOST_WORKSPACE_ROOT"),
             Some(explicit_root.as_os_str().to_owned())
         );
-        cleanup_env();
+        guard.clear();
 
         prepare(&test_ports(), &secrets, &config_dir).unwrap();
         assert!(std::env::var_os("HUB_HOST_WORKSPACE_ROOT").is_none());
-        cleanup_env();
+        guard.clear();
         let _ = std::fs::remove_dir_all(&secrets);
     }
 }

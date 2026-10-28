@@ -13,7 +13,7 @@ import type { ResearchUnitSummary } from "../api/types";
 import { CompareProvider } from "../state/CompareContext";
 import { ResearchUnitCard } from "./ResearchUnitCard";
 
-function renderCard(unit: ResearchUnitSummary) {
+function renderCard(unit: ResearchUnitSummary, compact = false) {
   window.localStorage.clear();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -22,7 +22,7 @@ function renderCard(unit: ResearchUnitSummary) {
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <CompareProvider>
-          <ResearchUnitCard unit={unit} />
+          <ResearchUnitCard unit={unit} compact={compact} />
         </CompareProvider>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -421,4 +421,23 @@ describe("ResearchUnitCard", () => {
     expect(within(actionGroup).queryByRole("button", { name: "HTML" })).toBeNull();
     expect(screen.queryByRole("button", { name: "加入对比" })).toBeNull();
   });
+  it("keeps long titles, reading status, and exact quick actions visible in compact mode", () => {
+    renderCard({
+      unit_id: "paper:compact", unit_kind: "paper", primary_asset: {
+        id: "paper-compact", asset_type: "paper", title: "A very long original research title with identifying details", title_zh: "保留完整中文题名及能够区分论文的细节", year: 2025, venue: "CVPR", reading_status: "reading",
+      }, related_repositories: [], matched_assets: [], covered_asset_count: 1,
+      quick_actions: [{kind: "pdf", status: "available", owner_asset_id: "paper-compact", representation_id: "pdf-compact"}, {kind: "html", status: "missing", owner_asset_id: "paper-compact"}],
+    }, true);
+    expect(screen.getByRole("heading", {name: "保留完整中文题名及能够区分论文的细节"})).toBeInTheDocument();
+    expect(screen.getByText("A very long original research title with identifying details")).toBeInTheDocument();
+    expect(screen.getByText("CVPR 2025")).toBeInTheDocument();
+    expect(screen.getByText("阅读中", {selector: "span"})).toBeVisible();
+    const actions = screen.getByLabelText("快速打开");
+    expect(actions.closest("details")).toBeNull();
+    expect(within(actions).getByRole("button", {name: "PDF"})).not.toBeDisabled();
+    expect(within(actions).getByRole("button", {name: "HTML"})).toBeDisabled();
+    expect(screen.getByText("摘要与作者").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("暂无摘要。")).not.toBeVisible();
+  });
+
 });

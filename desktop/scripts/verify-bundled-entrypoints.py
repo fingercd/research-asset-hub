@@ -13,9 +13,12 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", type=Path, required=True)
-    stage = parser.parse_args().stage.resolve()
+    parser.add_argument("--runtime-root", type=Path)
+    args = parser.parse_args()
+    stage = args.stage.resolve()
     app = stage / "app"
-    assert Path(sys.executable).resolve() == stage / "runtime/python/python.exe"
+    runtime = (args.runtime_root or stage / "runtime").resolve()
+    assert Path(sys.executable).resolve() == (runtime / "python/python.exe").resolve()
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(app))
     with tempfile.TemporaryDirectory(prefix="hub-bundle-import-") as temporary:
