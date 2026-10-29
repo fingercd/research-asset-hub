@@ -1,0 +1,11 @@
+schema_version: research-asset-hub.domain-portal-index/v2
+portals:
+- slug: world-model
+  label: Synthetic world model
+  content_directory: world-model
+  original_selector:
+    source_id: public-fixture
+    source_record_id: overview:world-model
+  allowed_mounts:
+  - /
+  default_view: overview

@@ -37,6 +37,11 @@ try {
     Assert-Rejected {Get-SafeRoot 'C:\'} 'drive root rejected'
     Assert-Rejected {Get-SafeRoot 'relative/path'} 'relative path rejected'
     Assert-Rejected {Assert-FreshTarget (Join-Path $env:HUB_DATA_DIR 'subfolder')} 'user-library overlap rejected'
+    $hiddenParent=Join-Path $temporary 'hidden-parent'
+    $hiddenChild=Join-Path $hiddenParent 'child'
+    New-Item -ItemType Directory -Path $hiddenChild -Force | Out-Null
+    [IO.File]::SetAttributes($hiddenParent,([IO.File]::GetAttributes($hiddenParent) -bor [IO.FileAttributes]::Hidden))
+    Assert-True ((Get-SafeRoot $hiddenChild) -eq [IO.Path]::GetFullPath($hiddenChild)) 'hidden cache ancestor is inspected instead of rejected'
     # Junction test requires no service/GUI. Its external target is also a
     # sibling owned fixture, not an actual library or installation.
     $outside=Join-Path $temporary 'junction-target'
@@ -56,7 +61,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $CacheDir)) 'ValidateOnly creates no cache'
     # Test file-removal helper only on owned fixtures, never NSIS uninstall.
     $remove=Join-Path $online 'remove-runtime.ps1'
-    $owned=Join-Path $temporary 'owned-install';$runtime=Join-Path $owned 'runtime'
+    $owned=Join-Path $hiddenParent 'owned-install';$runtime=Join-Path $owned 'runtime'
     New-Item -ItemType Directory -Path $runtime | Out-Null
     [IO.File]::WriteAllText((Join-Path $runtime 'online-vendor-runtime.json'),'{"schema":"research-asset-hub.online-runtime/v1"}')
     [IO.File]::WriteAllText((Join-Path $owned 'sibling-data.txt'),'keep')

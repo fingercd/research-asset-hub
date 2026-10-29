@@ -1,0 +1,53 @@
+schema_version: research-asset-hub.domain-portal-reading-routes/v2
+routes:
+- id: route-1
+  title: Route 1
+  goal: Exercise the portal loader.
+  prerequisites: []
+  steps:
+  - order: 1
+    asset_id: fixture-paper-1
+    title: Fixture 1
+    rationale: Synthetic reading step.
+  - order: 2
+    asset_id: fixture-paper-2
+    title: Fixture 2
+    rationale: Synthetic reading step.
+  - order: 3
+    asset_id: fixture-paper-3
+    title: Fixture 3
+    rationale: Synthetic reading step.
+- id: route-2
+  title: Route 2
+  goal: Exercise the portal loader.
+  prerequisites: []
+  steps:
+  - order: 1
+    asset_id: fixture-paper-1
+    title: Fixture 1
+    rationale: Synthetic reading step.
+  - order: 2
+    asset_id: fixture-paper-2
+    title: Fixture 2
+    rationale: Synthetic reading step.
+  - order: 3
+    asset_id: fixture-paper-3
+    title: Fixture 3
+    rationale: Synthetic reading step.
+- id: route-3
+  title: Route 3
+  goal: Exercise the portal loader.
+  prerequisites: []
+  steps:
+  - order: 1
+    asset_id: fixture-paper-1
+    title: Fixture 1
+    rationale: Synthetic reading step.
+  - order: 2
+    asset_id: fixture-paper-2
+    title: Fixture 2
+    rationale: Synthetic reading step.
+  - order: 3
+    asset_id: fixture-paper-3
+    title: Fixture 3
+    rationale: Synthetic reading step.

@@ -5,12 +5,12 @@ $desktop=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $stage=[IO.Path]::GetFullPath($StageDir).TrimEnd('\','/')
 if ((Split-Path -Parent $stage) -ne $desktop -or (Split-Path -Leaf $stage) -notlike 'stage-*') { throw 'Online stage must be a named stage-* direct child of desktop' }
 for ($a=$stage; $a; $a=(Split-Path -Parent $a)) {
-    if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Stage cannot use linked ancestors' }
+    if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Stage cannot use linked ancestors' }
 }
 $runtime=Join-Path $stage 'runtime'
 foreach($boundary in @($runtime,(Join-Path $stage 'app/config'))) {
     for($a=$boundary;$a;$a=(Split-Path -Parent $a)) {
-        if((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Stage resource ancestors cannot be linked'}
+        if((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Stage resource ancestors cannot be linked'}
     }
 }
 $manifest=Get-Content -LiteralPath (Join-Path $runtime 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -22,7 +22,7 @@ if($LASTEXITCODE -ne 0){throw 'Online preview must start with empty sources and 
 foreach($name in @('postgres','meilisearch.exe','restic.exe','postgres-utf8-manifests.json')) {
     $target=Join-Path $runtime $name
     if (Test-Path -LiteralPath $target) {
-        foreach($item in @((Get-Item -LiteralPath $target)) + @(Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction Stop)) {
+        foreach($item in @((Get-Item -LiteralPath $target -Force)) + @(Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction Stop)) {
             if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Refusing to remove linked vendor stage content'}
         }
         Remove-Item -LiteralPath $target -Recurse -Force
