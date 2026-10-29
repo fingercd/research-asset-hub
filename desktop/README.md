@@ -2,7 +2,7 @@
 
 Tauri 2 桌面版在原生窗口中使用内嵌界面和随包运行时。默认数据目录为 `Documents\ResearchAssetHub\`，可在设置中选择空目录或已有兼容库；切换后原库保留。显式 `HUB_DATA_DIR` 或 `--data-dir <绝对路径>` 固定目录时，界面显示该限制。
 
-当前源码版本为 **0.3.0-rc.1**，本机更新与原生实测见[桌面改革报告](../docs/reports/2026-10-28-desktop-product-reform.md)。此前[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)记录的是 0.2.0-rc.1 候选包范围，不是后续版本安装通过的证明。公开 Release 尚未发布，独立干净 Windows 安装、升级与卸载验收不能用本机运行替代。
+当前源码版本为 **0.3.0-rc.1**，本机更新与原生实测见[桌面改革报告](../docs/reports/2026-10-28-desktop-product-reform.md)。此前[交付记录](../docs/reports/2026-10-05-product-candidate-delivery.md)记录的是 0.2.0-rc.1 候选包范围，不是后续版本安装通过的证明。公开[在线预览安装包](https://github.com/fingercd/research-asset-hub-public/releases/tag/v0.3.0-rc.1)与[完整源码](https://github.com/fingercd/research-asset-hub-public)使用空库配置，与本机个人台账分开；在线包只支持全新空目录，独立干净 Windows 安装与卸载尚未实机验收。
 
 ## 开发
 
