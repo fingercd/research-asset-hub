@@ -5,13 +5,13 @@
 
 <p align="center">
   <a href="https://research-asset-hub.aurora-coati-0241.chatgpt.site"><strong>浏览公开资料</strong></a> ·
-  <a href="https://github.com/fingercd/research-asset-hub-public/releases/tag/v0.3.0-rc.1"><strong>下载 Windows 版</strong></a> ·
+  <a href="https://github.com/fingercd/research-asset-hub/releases/tag/v0.3.0-rc.1"><strong>下载 Windows 版</strong></a> ·
   <a href="#快速上手">快速上手</a> ·
   <a href="docs/USER_MANUAL.md">使用手册</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/fingercd/research-asset-hub-public/actions/workflows/checks.yml"><img src="https://github.com/fingercd/research-asset-hub-public/actions/workflows/checks.yml/badge.svg?branch=master" alt="项目检查"></a>
+  <a href="https://github.com/fingercd/research-asset-hub/actions/workflows/checks.yml"><img src="https://github.com/fingercd/research-asset-hub/actions/workflows/checks.yml/badge.svg?branch=master" alt="项目检查"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/原创源码-MIT-206574" alt="原创源码采用 MIT 许可证"></a>
   <img src="https://img.shields.io/badge/桌面版-Windows_x64-455A64" alt="桌面版支持 Windows x64">
 </p>
@@ -49,7 +49,7 @@
 
 安装前请准备微软的 [Visual C++ x64 运行库](https://learn.microsoft.com/zh-cn/cpp/windows/latest-supported-vc-redist)。已装有兼容版本时无需重复安装。
 
-1. 前往 **[版本下载页](https://github.com/fingercd/research-asset-hub-public/releases/tag/v0.3.0-rc.1)**，选择文件名以 **`x64-setup.exe`** 结尾的安装程序。`Source code` 是源码，不是安装包。
+1. 前往 **[版本下载页](https://github.com/fingercd/research-asset-hub/releases/tag/v0.3.0-rc.1)**，选择文件名以 **`x64-setup.exe`** 结尾的安装程序。`Source code` 是源码，不是安装包。
 2. 运行安装程序，选择一个新的空安装目录，按向导完成安装。程序会从官方来源下载并校验配套组件，约 **464 MB**；Microsoft WebView2 缺失时还需联网准备。
 3. 从开始菜单打开 **研究资产库**，等待初始化完成。首次打开是空资料库，点击 **添加论文** 放入自己的 PDF。日常使用无需另装 Python、Node.js 或数据库。
 
@@ -61,7 +61,7 @@
 需要 Python 3.11+、uv、Node.js 24、pnpm、PowerShell 7，以及 Rust 和 Windows C++ 构建工具。
 
 ```powershell
-git clone https://github.com/fingercd/research-asset-hub-public.git
+git clone https://github.com/fingercd/research-asset-hub.git
 cd research-asset-hub
 .\scripts\bootstrap.ps1
 .\scripts\desktop.ps1 build
@@ -128,7 +128,7 @@ AI 接入是可选功能，需单独配置兼容的客户端与模型；它用�
 | 把现有论文和代码登记进来 | [资料加入指南](docs/USER_KNOWLEDGE_BASE_GUIDE.md) |
 | 让 AI 客户端查询本机资料库 | [MCP 接入指南](docs/MCP_USER_GUIDE.md) |
 | 查看源码、运行测试或参与改进 | [开发指南](docs/DEVELOPMENT.md) · [贡献说明](CONTRIBUTING.md) |
-| 看版本变化、报告问题 | [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/fingercd/research-asset-hub-public/issues) |
+| 看版本变化、报告问题 | [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/fingercd/research-asset-hub/issues) |
 
 更多内容见[文档导航](docs/README.md)。也可以查看[程序介绍海报](docs/images/research-asset-hub-poster.png)；海报是宣传合成图，上方展示的才是真实桌面截图。
 

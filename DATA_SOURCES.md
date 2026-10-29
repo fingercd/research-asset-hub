@@ -29,4 +29,4 @@ Research Asset Hub 公开应用源码和经过筛选的论文参考目录。应�
 
 浏览本目录不授予再分发论文或第三方代码的权利。访问、下载、引用或复用第三方材料，请遵守原站条款、作品许可证及相应引用要求。
 
-若发现错误关联、来源标注不准确或不适宜公开的摘录，请通过 [Issues](https://github.com/fingercd/research-asset-hub-public/issues) 提供条目题名、相关文件路径或页面链接及说明。涉及隐私或安全问题时，请使用 [安全报告说明](SECURITY.md) 中的渠道，不在公开 Issue 中贴出密钥或私人正文。
+若发现错误关联、来源标注不准确或不适宜公开的摘录，请通过 [Issues](https://github.com/fingercd/research-asset-hub/issues) 提供条目题名、相关文件路径或页面链接及说明。涉及隐私或安全问题时，请使用 [安全报告说明](SECURITY.md) 中的渠道，不在公开 Issue 中贴出密钥或私人正文。
