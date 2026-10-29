@@ -132,6 +132,8 @@ AI 接入是可选功能，需单独配置兼容的客户端与模型；它用�
 
 更多内容见[文档导航](docs/README.md)。也可以查看[程序介绍海报](docs/images/research-asset-hub-poster.png)；海报是宣传合成图，上方展示的才是真实桌面截图。
 
+**项目历史没有丢失。** 原有 109 个提交已清理私人和受限材料后恢复到 `master`，远端只保留这一个分支。可以[逐条查看提交](https://github.com/fingercd/research-asset-hub/commits/master/)，或阅读[恢复说明与 SHA 对照](docs/HISTORY_RECOVERY.md)。
+
 ## 许可证与资料来源
 
 项目原创源码采用 **[MIT 许可证](LICENSE)**。论文、摘要、第三方代码及依赖保留各自的版权与许可，**不因收录进目录而变成 MIT 内容**。公开目录仅提供检索线索与来源链接，获取和使用原文、代码时请遵守原站要求。详见[资料来源与公开范围](DATA_SOURCES.md)。
