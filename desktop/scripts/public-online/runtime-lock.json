@@ -1,0 +1,35 @@
+{
+  "schema": "research-asset-hub.online-runtime/v1",
+  "downloads": [
+    {
+      "id": "postgresql",
+      "version": "16.11-1",
+      "url": "https://get.enterprisedb.com/postgresql/postgresql-16.11-1-windows-x64-binaries.zip",
+      "filename": "postgresql-16.11-1-windows-x64-binaries.zip",
+      "bytes": 324093756,
+      "sha256": "3761aee1252a2083679020b5dc79c75df2d567eea708a2cbb9f6ff5402e27101",
+      "license_url": "https://www.postgresql.org/about/licence/",
+      "supplier_source_catalog": "https://www.enterprisedb.com/modified-gpl"
+    },
+    {
+      "id": "meilisearch",
+      "version": "1.53.0",
+      "filename": "meilisearch-windows-amd64.exe",
+      "url": "https://github.com/meilisearch/meilisearch/releases/download/v1.53.0/meilisearch-windows-amd64.exe",
+      "bytes": 128627712,
+      "sha256": "9a13d316148cbd42608999d6ea0759c8314ab728063a5bfd4a21065d5c23d7d4",
+      "license_url": "https://github.com/meilisearch/meilisearch/blob/v1.53.0/LICENSE"
+    },
+    {
+      "id": "restic",
+      "version": "0.19.1",
+      "filename": "restic_0.19.1_windows_amd64.zip",
+      "url": "https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_windows_amd64.zip",
+      "bytes": 11237567,
+      "sha256": "da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d",
+      "executable": "restic_0.19.1_windows_amd64.exe",
+      "executable_sha256": "b0dd1fd21eea5d8fe1325f55f7118213c21f36de8a261e04c0624a5ab9fd7830",
+      "license_url": "https://github.com/restic/restic/blob/v0.19.1/LICENSE"
+    }
+  ]
+}

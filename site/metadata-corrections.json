@@ -1,0 +1,13 @@
+{
+  "schema": "research-asset-hub.public-metadata-corrections/v1",
+  "corrections": [
+    {
+      "url": "https://arxiv.org/abs/2605.30349",
+      "expected_title": "AdaState: Self-Evolving Anchors for Streaming Video Generation",
+      "clear_fields": ["title_zh"],
+      "evidence_url": "https://arxiv.org/abs/2605.30349",
+      "verified_on": "2026-10-29",
+      "reason": "原站英文题名已核实；快照中译字段误配为 Audible World Models 的题名。只清除错误中译，不另行推测译名；冻结来源与数据库保持不变。"
+    }
+  ]
+}

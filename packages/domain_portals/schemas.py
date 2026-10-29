@@ -83,7 +83,7 @@ class PortalRegistryItem(PortalModel):
 
 class PortalIndex(PortalModel):
     schema_version: Literal["research-asset-hub.domain-portal-index/v2"]
-    portals: list[PortalRegistryItem] = Field(min_length=1)
+    portals: list[PortalRegistryItem]
 
     @field_validator("portals")
     @classmethod
