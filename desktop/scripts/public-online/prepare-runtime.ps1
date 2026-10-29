@@ -7,7 +7,7 @@ function Get-SafeRoot([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     if ($full -eq [IO.Path]::GetPathRoot($full).TrimEnd('\')) { throw 'Drive roots are not allowed' }
     for ($a=$full; $a; $a=(Split-Path -Parent $a)) {
-        if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked directories are not allowed' }
+        if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked directories are not allowed' }
     }
     return $full
 }

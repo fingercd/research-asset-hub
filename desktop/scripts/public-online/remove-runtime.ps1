@@ -7,7 +7,7 @@ try {
     if ($root -eq [IO.Path]::GetPathRoot($root).TrimEnd('\')) { throw 'Drive root rejected' }
     $runtime=Join-Path $root 'runtime'
     for ($a=$runtime; $a; $a=(Split-Path -Parent $a)) {
-        if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked installation paths rejected' }
+        if ((Test-Path -LiteralPath $a) -and ((Get-Item -LiteralPath $a -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked installation paths rejected' }
     }
     $data=$env:HUB_DATA_DIR
     if(-not $data){
@@ -22,7 +22,7 @@ try {
     $queue=New-Object 'Collections.Generic.Queue[string]'
     foreach($tree in @((Join-Path $root 'app'),$runtime)){
         if(Test-Path -LiteralPath $tree){
-            if((Get-Item -LiteralPath $tree).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked app/runtime root; uninstall refused'}
+            if((Get-Item -LiteralPath $tree -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked app/runtime root; uninstall refused'}
             $queue.Enqueue($tree)
         }
     }

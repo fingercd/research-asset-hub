@@ -169,7 +169,7 @@ def test_system_portal_source_does_not_count_all_workspace_files_as_its_assets(
     }
 
 
-def _isolated_cli_configuration(tmp_path: Path) -> Path:
+def _isolated_cli_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "isolated-source"
     root.mkdir()
     (root / "manifest.json").write_text(
@@ -208,6 +208,12 @@ def _isolated_cli_configuration(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
+    taxonomy = tmp_path / "taxonomy.yaml"
+    taxonomy.write_text(
+        "schema_version: 1\ndomains:\n  - id: agent\n    label: CLI fixture domain\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HUB_TAXONOMY_CONFIG_PATH", str(taxonomy))
     return config
 
 
@@ -225,7 +231,7 @@ def test_formal_ingest_uses_the_configured_database_after_checkpoint(
 ) -> None:
     calls: list[tuple[str, int]] = []
     reports: dict[str, dict[str, Any]] = {}
-    config = _isolated_cli_configuration(tmp_path)
+    config = _isolated_cli_configuration(tmp_path, monkeypatch)
     database_url = _isolated_policy_database(tmp_path)
 
     def fake_formal_import(session: Session, sources: Any) -> dict[str, Any]:
@@ -257,7 +263,7 @@ def test_formal_ingest_uses_the_configured_database_after_checkpoint(
         capture_report,
     )
 
-    assert main(["--config", str(config), "ingest", "--all"]) == 0
+    assert main(["--config", str(config), "ingest", "--all"]) == 0, reports
     assert calls == [("sqlite", 1)]
     assert unused_database.exists() is False
     assert reports["ingest-formal.json"]["schema_version"] == 2
@@ -270,7 +276,7 @@ def test_formal_ingest_fails_closed_without_identity_policy_tables(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config = _isolated_cli_configuration(tmp_path)
+    config = _isolated_cli_configuration(tmp_path, monkeypatch)
     database_url = _isolated_policy_database(tmp_path)
     engine = create_engine(database_url)
     FieldResolution.__table__.drop(engine)
@@ -294,7 +300,7 @@ def test_formal_ingest_rejects_failed_dry_run_before_mock_importer(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config = _isolated_cli_configuration(tmp_path)
+    config = _isolated_cli_configuration(tmp_path, monkeypatch)
     manifest = tmp_path / "isolated-source" / "manifest.json"
     document = json.loads(manifest.read_text(encoding="utf-8"))
     document["items"].append(document["items"][0])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
@@ -31,12 +33,29 @@ from packages.indexing import InMemoryKeywordIndex, KeywordSearchService, Search
 
 @pytest.fixture
 def api_runtime(tmp_path: Path) -> Iterator[tuple[TestClient, DatabaseManager, Engine]]:
+    fixture_root = Path(__file__).resolve().parents[1] / "fixtures/public_catalog/domain-portals"
+    portal_root = tmp_path / "domain-portals"
+    shutil.copytree(fixture_root, portal_root)
+    portal_config = portal_root / "v2"
+    # Reuse the synthetic nine-section content, with the domain used by this API fixture.
+    for path, key in (
+        (portal_config / "portal-index.yaml", "portals"),
+        (portal_config / "world-model/portal.yaml", None),
+    ):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        entry = document[key][0] if key else document
+        entry["slug"] = "agent"
+        entry["label"] = "Synthetic agent portal"
+        entry["original_selector"]["source_record_id"] = "overview:agent"
+        path.write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
     settings = ApiSettings(
         database_url="sqlite+pysqlite:///:memory:",
         database_require_migrations=False,
         gateway_secret="g" * 64,
         sources_config_path=tmp_path / "sources.yaml",
         taxonomy_config_path=tmp_path / "taxonomy.yaml",
+        domain_portal_config_path=portal_config,
+        host_workspace_root=portal_root / "workspace",
     )
     settings.sources_config_path.write_text(
         "schema_version: 1\nworkspace_root: .\nsources: []\n",
