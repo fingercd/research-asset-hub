@@ -54,8 +54,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/src-tauri/target
-          key: ${{ runner.os }}-desktop-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-desktop-
+          # Tauri permission metadata contains absolute checkout paths.
+          key: ${{ runner.os }}-desktop-${{ github.event.repository.name }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-desktop-${{ github.event.repository.name }}-
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @research-asset-hub/desktop-ui build
       - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --check
