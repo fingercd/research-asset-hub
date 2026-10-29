@@ -1,0 +1,15 @@
+{
+  "url": "https://raw.githubusercontent.com/tauri-apps/tauri/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi",
+  "tag": "tauri-cli-v2.11.4",
+  "sha256": "20f4ecc730defb71f1342eaeaec4021df13be3d843abba0effe88ea5835fa079",
+  "patches": [
+    {
+      "anchor": "  nsis_tauri_utils::SemverCompare \"${VERSION}\" $R0\n  Pop $R0\n",
+      "replacement": "  nsis_tauri_utils::SemverCompare \"${VERSION}\" $R0\n  Pop $R0\n\n  ; ResearchAssetHub: keep old NSIS resources until the Install section.\n  !ifmacrodef RAH_HOOK_REINSTALL_PAGE\n    !insertmacro RAH_HOOK_REINSTALL_PAGE\n  !endif\n"
+    },
+    {
+      "anchor": "  !ifmacrodef NSIS_HOOK_PREINSTALL\n    !insertmacro NSIS_HOOK_PREINSTALL\n  !endif\n\n  !insertmacro CheckIfAppIsRunning \"${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\"",
+      "replacement": "  ; ResearchAssetHub: allow cancel/exit before preserving resource directories.\n  !insertmacro CheckIfAppIsRunning \"${MAINBINARYNAME}.exe\" \"${PRODUCTNAME}\"\n\n  !ifmacrodef NSIS_HOOK_PREINSTALL\n    !insertmacro NSIS_HOOK_PREINSTALL\n  !endif"
+    }
+  ]
+}

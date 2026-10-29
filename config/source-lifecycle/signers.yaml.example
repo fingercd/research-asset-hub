@@ -1,0 +1,12 @@
+schema_version: 1
+keys: []
+
+# Copy this file to a protected operator-managed location and register public
+# Ed25519 keys only. Never place private keys, environment values, signatures,
+# keyring exports, passwords, or tokens in this repository.
+#
+# keys:
+#   - id: retirement-operator-2026
+#     algorithm: ed25519
+#     public_key: "base64:<32-byte-raw-public-key>"
+#     enabled: true

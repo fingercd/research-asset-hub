@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-asset-hub.local/schemas/domain-portal-v2.schema.json",
+  "title": "Research Asset Hub domain portal v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "slug",
+    "label",
+    "description",
+    "content_version",
+    "content_digest",
+    "review_status",
+    "stale",
+    "stale_reasons",
+    "original_selector",
+    "sections"
+  ],
+  "properties": {
+    "schema": {
+      "const": "research-asset-hub.domain-portal/v2"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "review_status": {
+      "enum": [
+        "generated",
+        "reviewed",
+        "not_applicable",
+        "needs_review"
+      ]
+    },
+    "stale": {
+      "type": "boolean"
+    },
+    "stale_reasons": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "original_selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_record_id"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string"
+        },
+        "source_record_id": {
+          "type": "string"
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "status",
+          "content"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "content": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

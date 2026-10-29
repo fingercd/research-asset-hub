@@ -1,0 +1,7 @@
+{
+  "base": "desktop/src-tauri/nsis/installer.nsi",
+  "base_sha256": "43473903d065b057e65aa8be06bfc7de20c31a0c6299dd49b26c0e5027ff60ab",
+  "upstream": "Tauri CLI 2.11.4; original baseline and two original patches are documented in desktop/src-tauri/nsis/installer-template-source.json",
+  "additional_patch": "Insert init guard after /UPDATE parsing in installer .onInit; replace both running-app gate calls with a refusal-only/no-force-kill macro",
+  "sha256": "d3ad5896358530349b4afed0177149f3d6dac51fa7ce09fba76bc1e8c94298c4"
+}

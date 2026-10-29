@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-asset-hub.local/schemas/paper-record.schema.json",
+  "title": "Research Asset Hub paper HTML input record",
+  "type": "object",
+  "required": ["paper_id"],
+  "properties": {
+    "paper_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,127}$"
+    },
+    "title": {"type": ["string", "null"]},
+    "title_zh": {"type": ["string", "null"]},
+    "authors": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string"},
+        {"type": "array", "items": {"type": "string"}}
+      ]
+    },
+    "year": {"type": ["integer", "string", "null"]},
+    "venue": {"type": ["string", "null"]},
+    "doi": {"type": ["string", "null"]},
+    "arxiv_id": {"type": ["string", "null"]},
+    "abstract": {"type": ["string", "null"]},
+    "summary": {"type": ["string", "null"]},
+    "tags": {"type": ["array", "null"], "items": {"type": "string"}},
+    "domain_slugs": {"type": ["array", "null"], "items": {"type": "string"}},
+    "source_urls": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"type": "string", "minLength": 1},
+              {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                  "label": {"type": ["string", "null"]},
+                  "url": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "pdf": {
+      "type": ["object", "null"],
+      "properties": {
+        "path": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"]},
+        "size": {"type": ["integer", "null"], "minimum": 1},
+        "page_count": {"type": ["integer", "null"], "minimum": 1},
+        "version": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "analysis": {
+      "type": ["object", "null"],
+      "properties": {
+        "problem": {"$ref": "#/$defs/textOrTextList"},
+        "method": {"$ref": "#/$defs/textOrTextList"},
+        "results": {"$ref": "#/$defs/textOrTextList"},
+        "limitations": {"$ref": "#/$defs/textOrTextList"},
+        "relationships": {"$ref": "#/$defs/textOrTextList"},
+        "reproduction": {"$ref": "#/$defs/textOrTextList"}
+      },
+      "additionalProperties": true
+    },
+    "code": {
+      "type": ["object", "null"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "official_local",
+            "official_url_only",
+            "announced_pending",
+            "none_found",
+            "third_party_only",
+            "not_applicable",
+            "unknown"
+          ]
+        },
+        "url": {"type": ["string", "null"]},
+        "local_path": {"type": ["string", "null"]},
+        "commit": {"type": ["string", "null"]},
+        "license": {"type": ["string", "null"]},
+        "evidence": {"$ref": "#/$defs/textOrTextList"}
+      },
+      "additionalProperties": true
+    },
+    "decision_evidence": {"type": ["array", "null"], "items": {"type": "string"}},
+    "warnings": {"type": ["array", "null"], "items": {"type": "string"}}
+  },
+  "$defs": {
+    "textOrTextList": {
+      "oneOf": [
+        {"type": ["string", "null"]},
+        {"type": "array", "items": {"type": "string"}}
+      ]
+    }
+  },
+  "additionalProperties": true
+}

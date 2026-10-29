@@ -1,0 +1,32 @@
+schema_version: 1
+
+gateway:
+  host: 127.0.0.1
+  port: 8766
+  read_only: true
+  expose_absolute_paths: false
+  resolve_real_path: true
+  reject_symlink_escape: true
+
+iframe_profiles:
+  default:
+    sandbox:
+      - allow-scripts
+      - allow-same-origin
+      - allow-forms
+      - allow-downloads
+    separate_origin_required: true
+  static:
+    sandbox: []
+    separate_origin_required: true
+
+network_dependencies:
+  audit_with_browser: true
+  freeze_when_license_allows: true
+  otherwise_mark_network_required: true
+
+indexing:
+  preferred_roots: [main, article]
+  ignore_elements: [nav, footer, script, style, noscript, form]
+  preserve_headings: true
+

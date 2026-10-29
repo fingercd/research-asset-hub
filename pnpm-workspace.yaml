@@ -1,0 +1,5 @@
+packages:
+  - "desktop/ui"
+
+allowBuilds:
+  esbuild: true

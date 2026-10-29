@@ -1,0 +1,36 @@
+"""Built-in adapter registry.
+
+Importing this module performs only in-process class registration. External
+plugins remain opt-in through ``discover_entry_points``.
+"""
+
+from __future__ import annotations
+
+from packages.workflows.adapter import DomainPackageAdapter
+
+from .agent import AgentAdapter
+from .base import AdapterRegistry
+from .canonical_snapshot import CanonicalSnapshotAdapter
+from .fine_tuning import FineTuningAdapter
+from .generation import GenerationAdapter
+from .generic import GenericManifestAdapter
+from .infra import InfraAdapter
+from .reinforcement_learning import ReinforcementLearningAdapter
+from .world_model import WorldModelAdapter
+
+
+def build_default_registry() -> AdapterRegistry:
+    registry = AdapterRegistry()
+    registry.register("generic_manifest", GenericManifestAdapter)
+    registry.register("domain_package", DomainPackageAdapter)
+    registry.register("canonical_snapshot", CanonicalSnapshotAdapter)
+    registry.register("agent", AgentAdapter)
+    registry.register("infra", InfraAdapter)
+    registry.register("world_model", WorldModelAdapter)
+    registry.register("reinforcement_learning", ReinforcementLearningAdapter)
+    registry.register("fine_tuning", FineTuningAdapter)
+    registry.register("generation", GenerationAdapter)
+    return registry
+
+
+DEFAULT_REGISTRY = build_default_registry()

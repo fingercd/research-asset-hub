@@ -1,0 +1,4 @@
+schema_version: research-asset-hub.domain-portal-benchmarks/v2
+status: not_applicable
+rows: []
+not_applicable_reason: This is a synthetic test fixture, not a benchmark.

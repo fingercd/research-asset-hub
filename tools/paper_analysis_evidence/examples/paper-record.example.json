@@ -1,0 +1,14 @@
+{
+  "paper_id": "example-compression-paper-2026",
+  "title": "Example Compression Paper",
+  "title_zh": "示例压缩论文",
+  "year": 2026,
+  "venue": "Example Venue",
+  "pdf": {
+    "path": "papers/example-compression-paper-2026/paper.pdf",
+    "sha256": null
+  },
+  "mineru_markdown": {
+    "path": "mineru/example-compression-paper-2026/full.md"
+  }
+}

@@ -1,0 +1,20 @@
+.pdf-representation-picker { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.pdf-representation-picker select { flex: 1; min-width: 0; max-width: 100%; }
+.pdf-toolbar { flex-wrap: wrap; gap: 12px; position: sticky; top: 0; z-index: 3; background: var(--surface-soft); border-bottom: 1px solid var(--line-strong); }
+.pdf-zoom-picker { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.pdf-zoom-picker select { max-width: 140px; }
+.pdf-canvas-wrap { display: block; overflow: auto; }
+.pdf-page-surface { flex-shrink: 0; margin-inline: auto; }
+.viewer-fallback[role="alert"] { display: grid; gap: 12px; align-items: start; }
+.document-viewer > header strong { overflow-wrap: anywhere; white-space: normal; line-height: 1.5; }
+.detail-topics { margin-top: 12px; }
+.detail-topics summary, .settings-diagnostics > summary, .mcp-config-details > summary { cursor: pointer; font-weight: 600; padding: 10px 0; }
+.detail-topics .tag-row { margin-top: 8px; }
+.settings-diagnostics { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 24px; }
+.mcp-config-details textarea { width: 100%; }
+.mcp-config-details { margin-bottom: 12px; }
+@media (max-width: 680px) {
+  .pdf-representation-picker { align-items: stretch; flex-direction: column; }
+  .pdf-zoom-picker { margin-left: 0; }
+  .pdf-toolbar { position: static; }
+}

@@ -1,0 +1,107 @@
+# Test-only domain-name fixture; no sources or research assets.
+domains:
+- id: agent
+  label: Agent 学习
+  aliases:
+  - agent
+  - agents
+  - 智能体
+- id: infra
+  label: AI / 大模型 Infra
+  aliases:
+  - infra
+  - infrastructure
+  - 系统基础设施
+- id: world-model
+  label: 世界模型
+  aliases:
+  - world model
+  - world models
+- id: reinforcement-learning
+  label: 强化学习
+  aliases:
+  - RL
+  - reinforcement learning
+- id: fine-tuning
+  label: 大模型微调
+  aliases:
+  - finetuning
+  - fine-tuning
+  - post-training
+- id: generation
+  label: 图像与视频生成
+  aliases:
+  - image generation
+  - video generation
+  - diffusion
+  hidden_from_catalog: true
+- id: video-generation
+  label: 视频生成
+  aliases:
+  - video generation
+  - 视频生成
+  - text-to-video
+- id: llm-tech-reports
+  label: 大语言模型与大厂技术报告
+  aliases:
+  - LLM reports
+  - technical reports
+  - 大厂技术报告
+- id: vision-language-navigation
+  label: 视觉语言导航（VLN）
+  aliases:
+  - VLN
+  - vision-language navigation
+  - 视觉语言导航
+- id: game-rl
+  label: 游戏强化学习
+  aliases:
+  - Game RL
+  - game reinforcement learning
+  - 游戏 RL
+- id: wsvad
+  label: 弱监督视频异常检测（WSVAD）
+  aliases:
+  - WSVAD
+  - weakly supervised video anomaly detection
+  - 弱监督视频异常检测
+- id: image-editing
+  label: 图像生成与编辑
+  aliases:
+  - image generation
+  - image editing
+  - 图片编辑
+  - 图像编辑
+  - diffusion editing
+  - DiT editing
+- id: video-llm-compression
+  label: 视频大模型压缩
+  aliases:
+  - VideoLLM compression
+  - video LLM compression
+  - 视频压缩
+  - 视频大模型压缩
+- id: embodied-ai-compression
+  label: 具身智能与导航压缩
+  aliases:
+  - embodied AI compression
+  - embodied compression
+  - 具身压缩
+  - VLA compression
+  - 导航压缩
+- id: navigation-compression
+  label: 导航压缩
+  aliases:
+  - navigation compression
+  - VLN compression
+  - 导航压缩
+  - 视觉语言导航压缩
+  hidden_from_catalog: true
+- id: ai-for-math
+  label: AI for Math
+  aliases:
+  - AI for Mathematics
+  - AI for Math
+  - 数学人工智能
+  - 自动定理证明
+  - 形式化数学

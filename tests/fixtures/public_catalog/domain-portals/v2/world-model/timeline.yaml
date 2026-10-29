@@ -1,0 +1,14 @@
+schema_version: research-asset-hub.domain-portal-timeline/v2
+stages:
+- id: stage-1
+  title: Stage 1
+  period: Phase 1
+  summary: Synthetic stage.
+  asset_ids:
+  - fixture-paper-1
+- id: stage-2
+  title: Stage 2
+  period: Phase 2
+  summary: Synthetic stage.
+  asset_ids:
+  - fixture-paper-2

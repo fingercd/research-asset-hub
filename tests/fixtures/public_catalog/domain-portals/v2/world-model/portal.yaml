@@ -1,0 +1,19 @@
+schema_version: research-asset-hub.domain-portal-config/v2
+slug: world-model
+label: Synthetic world model
+description: Test-only synthetic portal, not a research claim.
+content_version: public-fixture-v1
+review_status: reviewed
+original_selector:
+  source_id: public-fixture
+  source_record_id: overview:world-model
+source_inputs:
+- path: reference.html
+  sha256: aa9a22160d10e1694121252068077809e1cfe44ed35343e27ba5d49a7c92a62e
+  size_bytes: 36
+  mtime_ns: 0
+section_evidence:
+  scope:
+  - fixture-paper-1
+  frontiers:
+  - fixture-paper-2

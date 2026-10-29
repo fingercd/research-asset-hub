@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="paper-id" content="$paper_id_attr">
+  <meta name="description" content="$description_attr">
+  <title>$document_title</title>
+  <style>
+$styles
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="#main">核心领域论文资料库</a>
+      <nav aria-label="页面章节">
+        <a href="#problem">问题</a>
+        <a href="#method">方法</a>
+        <a href="#results">结果</a>
+        <a href="#limitations">限制</a>
+        <a href="#sources">来源</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main" class="shell" data-paper-id="$paper_id_attr">
+    $hero
+    <div class="paper-layout">
+      <article class="paper-content" aria-label="论文解读">
+        $sections
+      </article>
+      <aside class="paper-aside" aria-label="论文事实与本地资源">
+        $aside
+      </aside>
+    </div>
+  </main>
+  <footer class="footer">
+    <div class="shell">本页由经过审计的结构化记录生成。标为“待核验”的内容不可作为论文事实引用。</div>
+  </footer>
+</body>
+</html>

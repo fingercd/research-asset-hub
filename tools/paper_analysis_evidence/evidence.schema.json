@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-asset-hub.local/schemas/paper-analysis-evidence.v1.json",
+  "title": "Paper analysis source evidence package",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool_version",
+    "status",
+    "paper",
+    "policy",
+    "evidence",
+    "coverage",
+    "missing_categories",
+    "total_evidence_chars",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": {"const": "paper-analysis-evidence.v1"},
+    "tool_version": {"type": "string"},
+    "status": {"enum": ["ok", "error"]},
+    "paper": {
+      "type": "object",
+      "required": ["paper_id"],
+      "properties": {
+        "paper_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,127}$"},
+        "title": {"type": ["string", "null"]},
+        "title_zh": {"type": ["string", "null"]},
+        "year": {"type": ["integer", "string", "null"]},
+        "venue": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "policy": {"type": "object"},
+    "sources": {"type": "object"},
+    "evidence": {
+      "type": "object",
+      "required": [
+        "abstract",
+        "introduction_contributions",
+        "method",
+        "experiments_results",
+        "limitations_conclusion",
+        "code_urls"
+      ],
+      "properties": {
+        "abstract": {"$ref": "#/$defs/evidenceList"},
+        "introduction_contributions": {"$ref": "#/$defs/evidenceList"},
+        "method": {"$ref": "#/$defs/evidenceList"},
+        "experiments_results": {"$ref": "#/$defs/evidenceList"},
+        "limitations_conclusion": {"$ref": "#/$defs/evidenceList"},
+        "code_urls": {"$ref": "#/$defs/evidenceList"}
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "missing_categories": {"type": "array", "items": {"type": "string"}},
+    "total_evidence_chars": {"type": "integer", "minimum": 0},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "error": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": {"type": "string"},
+        "message": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "evidenceList": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidenceItem"}
+    },
+    "evidenceItem": {
+      "type": "object",
+      "required": [
+        "evidence_id",
+        "section",
+        "page",
+        "excerpt",
+        "excerpt_sha256",
+        "source_kind",
+        "locator",
+        "selection_reason",
+        "truncated"
+      ],
+      "properties": {
+        "evidence_id": {"type": "string", "pattern": "^ev-[0-9]{4}$"},
+        "section": {"type": "string", "minLength": 1},
+        "page": {"type": "integer", "minimum": 1},
+        "excerpt": {"type": "string", "minLength": 1},
+        "excerpt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_kind": {
+          "enum": ["pdf_text", "mineru_markdown", "pdf_annotation"]
+        },
+        "locator": {"type": "object"},
+        "page_mapping": {"type": ["string", "null"]},
+        "selection_reason": {"type": "string"},
+        "normalization": {"type": "string"},
+        "truncated": {"type": "boolean"},
+        "url": {"type": "string"},
+        "candidate_kind": {"type": "string"},
+        "verification": {"const": "candidate_unverified"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

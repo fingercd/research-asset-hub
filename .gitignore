@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+htmlcov/
+.coverage
+
+# JavaScript
+node_modules/
+desktop/ui/dist/
+desktop/ui/.vite/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Runtime and generated data
+work/
+dumps/
+.claude/
+.superpowers/
+# Local databases and model artifacts are not repository deliverables.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.dump
+*.ckpt
+*.safetensors
+# Tiny, reviewed test fixtures may be versioned explicitly.
+!tests/fixtures/**/*.db
+!tests/fixtures/**/*.sqlite
+!tests/fixtures/**/*.sqlite3
+state/backups/
+state/catalog-export/
+outputs/reports/
+# Public source must not absorb personal corpus snapshots or private ledgers.
+config/intake/
+outputs/release/
+tools/external_asset_copy/reports/
+outputs/open-catalog/
+outputs/knowledge-pilot/
+outputs/zotero/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

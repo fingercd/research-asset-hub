@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://research-asset-hub.local/schemas/domain-overview.schema.json",
+  "title": "Research Asset Hub domain overview pointer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "slug",
+    "asset_id",
+    "representation_id",
+    "status",
+    "default_presentation",
+    "warning"
+  ],
+  "properties": {
+    "schema": {
+      "const": "research-asset-hub.domain-overview/v1"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+    },
+    "asset_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "representation_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "available",
+        "missing",
+        "network_required",
+        "not_provided",
+        "unavailable"
+      ]
+    },
+    "default_presentation": {
+      "type": "string",
+      "enum": [
+        "hub",
+        "original"
+      ]
+    },
+    "warning": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

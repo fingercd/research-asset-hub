@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "research-asset-hub"
+version = "0.3.0rc1"
+license = "MIT"
+description = "Local-first research asset management hub"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.14,<2",
+  "cryptography>=45,<50",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "keyring>=25.6,<26",
+  "pillow>=11.3,<13",
+  "pdfplumber>=0.11,<1",
+  "pypdf>=5.9,<7",
+  "pypdfium2>=4.30,<5",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.7,<3",
+  "PyYAML>=6,<7",
+  "sqlalchemy>=2.0,<3",
+  "tree-sitter-language-pack>=1.6,<2",
+  "uvicorn[standard]>=0.34,<1",
+  "mcp>=1.28,<2",
+  "pywin32>=311; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "editables>=0.5,<1",
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.9,<1",
+  "types-PyYAML>=6.0.12,<7",
+]
+[project.scripts]
+rah = "packages.cli.main:main"
+rah-api = "apps.api.main:run"
+rah-worker = "apps.worker.main:run"
+rah-asset-gateway = "apps.asset_gateway.main:run"
+
+[tool.hatch.build]
+dev-mode-exact = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps", "packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+cache-dir = "work/cache/ruff"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+cache_dir = "work/cache/mypy"
+
+[tool.pytest.ini_options]
+addopts = "--basetemp=work/pytest --import-mode=importlib"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+cache_dir = "work/cache/pytest"

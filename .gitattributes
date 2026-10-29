@@ -1,0 +1,2 @@
+# Imported manifests remain byte-level evidence, even in local ignored intakes.
+config/intake/**/manifest.json -text whitespace=cr-at-eol

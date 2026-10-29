@@ -1,0 +1,14 @@
+schema_version: research-asset-hub.domain-portal-landmarks/v2
+items:
+- id: landmark-1
+  title: Landmark 1
+  summary: Synthetic landmark.
+  asset_id: fixture-paper-1
+- id: landmark-2
+  title: Landmark 2
+  summary: Synthetic landmark.
+  asset_id: fixture-paper-2
+- id: landmark-3
+  title: Landmark 3
+  summary: Synthetic landmark.
+  asset_id: fixture-paper-3

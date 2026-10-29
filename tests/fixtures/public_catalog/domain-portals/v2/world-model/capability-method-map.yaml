@@ -1,0 +1,40 @@
+schema_version: research-asset-hub.domain-portal-capability-method-map/v2
+capabilities:
+- id: capability-1
+  title: Capability 1
+  summary: Synthetic capability.
+- id: capability-2
+  title: Capability 2
+  summary: Synthetic capability.
+- id: capability-3
+  title: Capability 3
+  summary: Synthetic capability.
+methods:
+- id: method-1
+  title: Method 1
+  summary: Synthetic method.
+- id: method-2
+  title: Method 2
+  summary: Synthetic method.
+- id: method-3
+  title: Method 3
+  summary: Synthetic method.
+cells:
+- capability_id: capability-1
+  method_ids:
+  - method-1
+  summary: Synthetic cell.
+  asset_ids:
+  - fixture-paper-1
+- capability_id: capability-2
+  method_ids:
+  - method-2
+  summary: Synthetic cell.
+  asset_ids:
+  - fixture-paper-2
+- capability_id: capability-3
+  method_ids:
+  - method-3
+  summary: Synthetic cell.
+  asset_ids:
+  - fixture-paper-3

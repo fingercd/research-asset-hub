@@ -1,0 +1,10 @@
+[
+  {
+    "id": 1,
+    "one_sentence": "A compact reinforcement-learning fixture.",
+    "lineage": {
+      "predecessors": ["A Prior Control Method"],
+      "successors": []
+    }
+  }
+]

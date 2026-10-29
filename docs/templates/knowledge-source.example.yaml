@@ -1,0 +1,70 @@
+# 这是一个完整参考文档。实际使用时，只把 sources 下的单个条目复制到
+# config/sources.yaml 的 sources 列表，并替换 source ID、domain、intake
+# 目录和 D:/ResearchAssets 下的永久资料路径。
+schema_version: 1
+
+sources:
+  - id: intake-example-paper-2026
+    label: 个人新增 · 示例论文
+    domain: example-research
+    adapter: generic_manifest
+    root: config/intake/intake-example-paper-2026
+    manifest: manifest.json
+    expected_records: 1
+    read_only: true
+    asset_roots:
+      pdf: D:/ResearchAssets/example-paper-2026
+      repository: D:/ResearchAssets/example-paper-2026
+      html: D:/ResearchAssets/example-paper-2026
+      note: D:/ResearchAssets/example-paper-2026
+    options:
+      record_selector: items
+      field_mapping:
+        source_record_id: id
+        title: title
+        title_zh: title_zh
+        authors: authors
+        year: year
+        venue: venue
+        abstract: abstract
+        summary: summary
+        tags: tags
+        source_urls: source_urls
+        doi: doi
+        arxiv: arxiv_id
+      representations:
+        - type: pdf
+          role: original
+          root_key: pdf
+          path_field: representations.pdf.path
+          url_field: representations.pdf.url
+          sha256_field: representations.pdf.sha256
+          mime_type: application/pdf
+        - type: repository
+          role: official
+          root_key: repository
+          path_field: representations.code.path
+          url_field: representations.code.url
+        - type: html
+          role: analysis
+          root_key: html
+          path_field: representations.html.path
+          mime_type: text/html
+        - type: html
+          role: original
+          root_key: html
+          path_field: representations.original_html.path
+          mime_type: text/html
+        - type: markdown
+          role: analysis
+          root_key: note
+          path_field: representations.note.path
+          mime_type: text/markdown
+      relations:
+        # related_record_ids is resolved only within this source's manifest.
+        # Keep it empty for the recommended one-knowledge-unit/one-source case.
+        # Never put an existing asset UUID or a source_record_id from another
+        # source here; create cross-source relations after import via the API.
+        - type: related_to
+          target_kind: source_record_id
+          target_field: relations.related_record_ids

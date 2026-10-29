@@ -1,0 +1,45 @@
+{
+  "paper_id": "example-token-compression-2026",
+  "title": "Example Token Compression for Long-Video Understanding",
+  "title_zh": "长视频理解的示例 Token 压缩方法",
+  "authors": ["Example Author", "Second Author"],
+  "year": 2026,
+  "venue": "Example Venue",
+  "doi": null,
+  "arxiv_id": "2601.01234",
+  "abstract": "This is placeholder fixture text for testing the renderer; it is not a real paper abstract.",
+  "summary": "这是用于验证渲染器的虚构测试记录，不应作为真实论文入库。",
+  "tags": ["fixture", "video-token-compression"],
+  "domain_slugs": ["video-llm-compression"],
+  "source_urls": [
+    {
+      "label": "示例来源",
+      "url": "https://example.org/papers/example-token-compression-2026"
+    }
+  ],
+  "pdf": {
+    "path": null,
+    "sha256": null,
+    "size": null,
+    "page_count": null,
+    "version": null
+  },
+  "analysis": {
+    "problem": "测试：如何在不伪造缺失事实的前提下呈现论文信息？",
+    "method": ["严格转义结构化字段", "对缺失值渲染待核验标记"],
+    "results": ["测试夹具只验证页面结构，不表达真实实验结果。"],
+    "limitations": ["这是一条虚构测试记录，不得进入正式论文目录。"],
+    "relationships": null,
+    "reproduction": ["运行单元测试", "运行独立验证器"]
+  },
+  "code": {
+    "status": "unknown",
+    "url": null,
+    "local_path": null,
+    "commit": null,
+    "license": null,
+    "evidence": null
+  },
+  "decision_evidence": ["明确标记为工具测试夹具。"],
+  "warnings": ["虚构记录：禁止正式入库。"]
+}

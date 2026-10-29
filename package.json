@@ -1,0 +1,13 @@
+{
+  "name": "research-asset-hub",
+  "private": true,
+  "version": "0.3.0-rc.1",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "pnpm --filter @research-asset-hub/desktop-ui build",
+    "lint": "pnpm --filter @research-asset-hub/desktop-ui lint",
+    "typecheck": "pnpm --filter @research-asset-hub/desktop-ui typecheck",
+    "test": "pnpm --filter @research-asset-hub/desktop-ui test",
+    "desktop": "pwsh -NoProfile -File scripts/desktop.ps1"
+  }
+}

@@ -1,0 +1,15 @@
+schema_version: 1
+domains: []
+domain_policy:
+  allow_unknown_during_dry_run: true
+  require_label_before_commit: true
+  stable_id_pattern: "^[a-z0-9][a-z0-9-]{1,63}$"
+reading_states:
+  - id: unread
+    label: 未读
+  - id: reading
+    label: 阅读中
+  - id: read
+    label: 已读
+access_levels: [private, internal, public]
+asset_types: [paper, repository, html, dataset, note, report, notebook, collection]

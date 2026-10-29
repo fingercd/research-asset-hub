@@ -1,0 +1,43 @@
+{
+  "domains": {
+    "video-llm-compression": {
+      "baseline_canonical": 1,
+      "source_records": 3,
+      "exact_reuse": 1,
+      "alternate_versions": 1,
+      "recovered_versions": 0,
+      "version_pages": 1,
+      "canonical_papers": 2,
+      "generated_html": 3,
+      "baseline_official_local": 0,
+      "baseline_announced_pending": 0,
+      "baseline_none_found": 1
+    },
+    "embodied-ai-compression": {
+      "baseline_canonical": 0,
+      "source_records": 1,
+      "exact_reuse": 0,
+      "alternate_versions": 0,
+      "recovered_versions": 0,
+      "version_pages": 0,
+      "canonical_papers": 1,
+      "generated_html": 1,
+      "baseline_official_local": 0,
+      "baseline_announced_pending": 0,
+      "baseline_none_found": 0
+    },
+    "navigation-compression": {
+      "baseline_canonical": 0,
+      "source_records": 1,
+      "exact_reuse": 0,
+      "alternate_versions": 0,
+      "recovered_versions": 0,
+      "version_pages": 0,
+      "canonical_papers": 1,
+      "generated_html": 1,
+      "baseline_official_local": 0,
+      "baseline_announced_pending": 0,
+      "baseline_none_found": 0
+    }
+  }
+}

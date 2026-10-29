@@ -1,0 +1,98 @@
+schema_version: 2
+queries:
+  - id: exact-doi-nature-dqn
+    query: 10.1038/nature14236
+    mode: exact
+    category: doi
+    exact: true
+    relevant_assets:
+      019f93e5-206a-798c-a924-389005f1d674: 3
+
+  - id: exact-arxiv-vae
+    query: 1312.6114
+    mode: exact
+    category: arxiv
+    exact: true
+    relevant_assets:
+      019f93e4-c8f2-71af-943e-5633e94b5cb8: 3
+
+  - id: exact-title-world-models
+    query: World Models
+    mode: exact
+    category: title
+    exact: true
+    relevant_assets:
+      019f93e5-2d90-762b-9614-e6a39902f171: 3
+
+  - id: exact-title-marl-survey
+    query: "Multi-agent Deep Reinforcement Learning: A Survey"
+    mode: exact
+    category: title
+    exact: true
+    relevant_assets:
+      019f93e5-1442-7626-bd3e-1e49a38f48d7: 3
+
+  - id: exact-code-symbol
+    query: AI2DDataset
+    mode: exact
+    category: code_symbol
+    exact: true
+    relevant_assets:
+      019f93e6-05c5-7fab-a52d-9127aba6f669: 3
+
+  - id: hybrid-dqn-atari
+    query: deep reinforcement learning human-level Atari control
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f93e5-206a-798c-a924-389005f1d674: 3
+
+  - id: hybrid-variational-lower-bound
+    query: variational autoencoder reparameterization lower bound
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f93e4-c8f2-71af-943e-5633e94b5cb8: 3
+
+  - id: hybrid-dream-controller
+    query: train an agent inside a learned world model dream
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f9d56-9380-7c99-8a2c-520e9dba9102: 3
+      019f93e5-31b0-7148-b410-f2e4ef649758: 2
+      019f93e5-2d90-762b-9614-e6a39902f171: 3
+
+  - id: hybrid-locally-linear-latent-control
+    query: locally linear latent dynamics control from raw images
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f93e5-4b67-78e2-9c54-93cf2a281dc3: 3
+
+  - id: hybrid-multi-agent-survey
+    query: multi-agent deep reinforcement learning survey taxonomy
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f9d56-9afa-773b-b99a-9ab19abd55cc: 3
+      019f93e5-1442-7626-bd3e-1e49a38f48d7: 3
+
+  - id: hybrid-megatron-model-parallelism
+    query: Megatron tensor model parallel transformer training
+    mode: keyword
+    category: concept
+    relevant_assets:
+      019f93e4-f42e-7bc4-b641-492e0c0d2cf4: 3
+      019f93e4-f4c9-7cb2-846c-0dcdbce98928: 3
+      019f93e6-05c5-7fab-a52d-9127aba6f669: 3
+
+  - id: semantic-world-model-control
+    query: learning an internal simulator for planning and control
+    mode: keyword
+    category: semantic
+    relevant_assets:
+      019f93e5-2d90-762b-9614-e6a39902f171: 3
+      019f93e5-4b67-78e2-9c54-93cf2a281dc3: 2
+      019f93e5-30f5-7b39-b23a-7d6474afba64: 3
+      019f93e5-5612-7fb8-af2c-65b484123654: 2

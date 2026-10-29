@@ -1,0 +1,22 @@
+schema_version: 1
+
+relations:
+  - {id: cites, inverse: cited_by, directed: true}
+  - {id: extends, inverse: extended_by, directed: true}
+  - {id: precedes, inverse: follows, directed: true}
+  - {id: related_to, inverse: related_to, directed: false}
+  - {id: implements, inverse: implemented_by, directed: true}
+  - {id: has_representation, inverse: representation_of, directed: true}
+  - {id: uses_method, inverse: method_used_by, directed: true}
+  - {id: uses_dataset, inverse: dataset_used_by, directed: true}
+  - {id: same_as, inverse: same_as, directed: false}
+  - {id: is_version_of, inverse: has_version, directed: true}
+  - {id: derived_from, inverse: generated, directed: true}
+  - {id: belongs_to_collection, inverse: contains, directed: true}
+  - {id: similar_to, inverse: similar_to, directed: false}
+
+evidence_policy:
+  require_source: true
+  inferred_default_confirmed: false
+  manual_default_confidence: 1.0
+

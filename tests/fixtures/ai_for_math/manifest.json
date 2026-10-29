@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "formal-math-research-frontier-survey",
+      "title": "From Solvers to Research: Large Language Model-Driven Formal Mathematics at the Research Frontier",
+      "title_zh": "从解题器到研究：研究前沿上的大语言模型驱动形式数学",
+      "authors": ["Jiang, Eric", "Liang, Xiao"],
+      "year": 2026,
+      "arxiv_id": "2607.07779",
+      "summary": "形式数学研究综述；仓库提供论文与书目导航。",
+      "source_urls": ["https://arxiv.org/abs/2607.07779"],
+      "representations": {
+        "pdf": {"url": "https://arxiv.org/pdf/2607.07779"},
+        "code": {
+          "url": "https://github.com/ericjiang18/Awesome-Formal-Mathematics",
+          "commit": "f42d16da1b567d353bd7beefda6b3cb3017aca9a"
+        }
+      }
+    }
+  ]
+}

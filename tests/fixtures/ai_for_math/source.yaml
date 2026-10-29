@@ -1,0 +1,35 @@
+domain: ai-for-math
+adapter: generic_manifest
+read_only: true
+options:
+  record_selector: items
+  representations:
+  - type: pdf
+    role: original
+    root_key: pdf
+    path_field: representations.pdf.path
+    url_field: representations.pdf.url
+    sha256_field: representations.pdf.sha256
+    mime_type: application/pdf
+  - type: html
+    role: analysis
+    root_key: html
+    path_field: representations.html.path
+    sha256_field: representations.html.sha256
+    mime_type: text/html
+  - type: repository
+    role: official
+    root_key: repository
+    path_field: representations.code.path
+    url_field: representations.code.url
+    commit_field: representations.code.commit
+  - type: markdown
+    role: supplemental
+    root_key: note
+    path_field: representations.note.path
+    mime_type: text/markdown
+id: math-fixture
+label: Synthetic bibliography adapter fixture
+root: .
+manifest: manifest.json
+expected_records: 1

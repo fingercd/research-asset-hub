@@ -1,0 +1,12 @@
+{
+  "papers": [
+    {
+      "paper_id": "generation-paper-001",
+      "summary": "A compact generation fixture.",
+      "relations": {
+        "predecessors": ["A Prior Generative Method"],
+        "successors": []
+      }
+    }
+  ]
+}

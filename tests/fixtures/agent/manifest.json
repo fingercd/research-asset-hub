@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "papers": [
+    {
+      "id": "agent-paper-001",
+      "slug": "agent-paper-001",
+      "title": "Agent Systems: A Small Study",
+      "title_zh": "智能体系统小型研究",
+      "authors": ["Ada Researcher"],
+      "year": 2024,
+      "venue": "ExampleConf",
+      "abstract": "A compact fixture record.",
+      "before": [],
+      "after": ["A Later Agent Study"],
+      "tags": ["agent"],
+      "pdf": "https://example.org/agent-paper.pdf",
+      "official": "https://example.org/agent-paper",
+      "official_code": "https://github.com/example/agent-paper",
+      "arxiv_id": "2401.00001"
+    }
+  ]
+}

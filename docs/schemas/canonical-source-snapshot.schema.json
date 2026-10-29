@@ -1,0 +1,888 @@
+{
+  "$defs": {
+    "AssetReference": {
+      "additionalProperties": false,
+      "description": "Reference a relation endpoint without inventing a local asset UUID.\n\nExactly one selector is required.  A missing ``source_id`` on a\n``source_record_id`` is filled from the containing ``NormalizedRecord``.",
+      "properties": {
+        "asset_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "external_identifier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExternalIdentifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        },
+        "source_record_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Record Id"
+        }
+      },
+      "title": "AssetReference",
+      "type": "object"
+    },
+    "CanonicalFieldPointer": {
+      "additionalProperties": false,
+      "description": "A normalized field's exact upstream JSON Pointer and input digest.",
+      "properties": {
+        "input_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Path"
+        },
+        "input_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Sha256"
+        },
+        "json_pointer": {
+          "title": "Json Pointer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "json_pointer"
+      ],
+      "title": "CanonicalFieldPointer",
+      "type": "object"
+    },
+    "CanonicalSnapshotInput": {
+      "additionalProperties": false,
+      "description": "One explicitly declared catalog/manifest input protected by a digest.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "CanonicalSnapshotInput",
+      "type": "object"
+    },
+    "CanonicalSnapshotItem": {
+      "additionalProperties": false,
+      "description": "One lossless normalized source record plus exact upstream payloads.",
+      "properties": {
+        "asset": {
+          "$ref": "#/$defs/NormalizedAsset"
+        },
+        "field_pointers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/CanonicalFieldPointer"
+          },
+          "title": "Field Pointers",
+          "type": "object"
+        },
+        "relations": {
+          "items": {
+            "$ref": "#/$defs/RelationCandidate"
+          },
+          "title": "Relations",
+          "type": "array"
+        },
+        "representations": {
+          "items": {
+            "$ref": "#/$defs/RepresentationCandidate"
+          },
+          "title": "Representations",
+          "type": "array"
+        },
+        "source_payload": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Source Payload",
+          "type": "object"
+        },
+        "source_record_id": {
+          "minLength": 1,
+          "title": "Source Record Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_record_id",
+        "asset"
+      ],
+      "title": "CanonicalSnapshotItem",
+      "type": "object"
+    },
+    "ExternalIdentifier": {
+      "additionalProperties": false,
+      "description": "An identifier from an external authority with a canonical match key.",
+      "properties": {
+        "canonical": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical"
+        },
+        "is_identity": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Identity"
+        },
+        "scheme": {
+          "title": "Scheme",
+          "type": "string"
+        },
+        "scope": {
+          "default": "",
+          "maxLength": 255,
+          "title": "Scope",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scheme",
+        "value"
+      ],
+      "title": "ExternalIdentifier",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "MaterializationKind": {
+      "enum": [
+        "file",
+        "directory",
+        "url",
+        "bundle"
+      ],
+      "title": "MaterializationKind",
+      "type": "string"
+    },
+    "NormalizedAsset": {
+      "additionalProperties": false,
+      "description": "Adapter-neutral asset metadata.\n\nKnown core asset types use :class:`AssetType`; plugins can add a type as a\nnamespaced value such as ``my_plugin:simulation``.  Domain slugs are open\nand therefore adding a seventh domain never requires a code change.",
+      "properties": {
+        "abstract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Abstract"
+        },
+        "analysis": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Analysis",
+          "type": "object"
+        },
+        "asset_id": {
+          "format": "uuid",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "asset_type": {
+          "default": "paper",
+          "title": "Asset Type",
+          "type": "string"
+        },
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Attributes",
+          "type": "object"
+        },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Authors",
+          "type": "array"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "domain_slugs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Domain Slugs",
+          "type": "array"
+        },
+        "external_identifiers": {
+          "items": {
+            "$ref": "#/$defs/ExternalIdentifier"
+          },
+          "title": "External Identifiers",
+          "type": "array"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "source_urls": {
+          "items": {
+            "format": "uri",
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Source Urls",
+          "type": "array"
+        },
+        "subtitle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subtitle"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tags",
+          "type": "array"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "title_zh": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title Zh"
+        },
+        "venue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Venue"
+        },
+        "version": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility",
+          "default": "private"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "maximum": 2200,
+              "minimum": 1450,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "NormalizedAsset",
+      "type": "object"
+    },
+    "RelationCandidate": {
+      "additionalProperties": false,
+      "description": "A typed, evidenced edge proposed by an adapter.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        },
+        "evidence": {
+          "$ref": "#/$defs/RelationEvidence"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "object": {
+          "$ref": "#/$defs/AssetReference"
+        },
+        "relation_type": {
+          "$ref": "#/$defs/RelationType"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssetReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "relation_type",
+        "object",
+        "evidence"
+      ],
+      "title": "RelationCandidate",
+      "type": "object"
+    },
+    "RelationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "details": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Details",
+          "type": "object"
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "RelationEvidence",
+      "type": "object"
+    },
+    "RelationType": {
+      "enum": [
+        "cites",
+        "cited_by",
+        "extends",
+        "extended_by",
+        "precedes",
+        "follows",
+        "related_to",
+        "implements",
+        "implemented_by",
+        "has_representation",
+        "uses_method",
+        "method_used_by",
+        "uses_dataset",
+        "dataset_used_by",
+        "same_as",
+        "is_version_of",
+        "has_version",
+        "derived_from",
+        "generated",
+        "belongs_to_collection",
+        "similar_to"
+      ],
+      "title": "RelationType",
+      "type": "string"
+    },
+    "RepresentationAvailability": {
+      "enum": [
+        "unknown",
+        "available",
+        "missing",
+        "stale",
+        "blocked"
+      ],
+      "title": "RepresentationAvailability",
+      "type": "string"
+    },
+    "RepresentationCandidate": {
+      "additionalProperties": false,
+      "description": "A file, directory or URL representation discovered by an adapter.",
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/RepresentationAvailability",
+          "default": "unknown"
+        },
+        "entrypoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entrypoint"
+        },
+        "materialization_kind": {
+          "$ref": "#/$defs/MaterializationKind",
+          "default": "file"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Metadata",
+          "type": "object"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
+        },
+        "mounts": {
+          "items": {
+            "$ref": "#/$defs/RepresentationMountCandidate"
+          },
+          "title": "Mounts",
+          "type": "array"
+        },
+        "network_required": {
+          "default": false,
+          "title": "Network Required",
+          "type": "boolean"
+        },
+        "path_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path Ref"
+        },
+        "representation_type": {
+          "$ref": "#/$defs/RepresentationType"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "role": {
+          "$ref": "#/$defs/RepresentationRole",
+          "default": "original"
+        },
+        "root_key": {
+          "default": "source",
+          "title": "Root Key",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "size_bytes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Size Bytes"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        },
+        "tree_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tree Digest"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "verified_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verified At"
+        }
+      },
+      "required": [
+        "representation_type"
+      ],
+      "title": "RepresentationCandidate",
+      "type": "object"
+    },
+    "RepresentationMountCandidate": {
+      "additionalProperties": false,
+      "description": "One read-only source subtree mounted into a representation bundle.",
+      "properties": {
+        "mount_path": {
+          "default": "/",
+          "title": "Mount Path",
+          "type": "string"
+        },
+        "path_ref": {
+          "title": "Path Ref",
+          "type": "string"
+        },
+        "priority": {
+          "default": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "read_only": {
+          "default": true,
+          "title": "Read Only",
+          "type": "boolean"
+        },
+        "root_key": {
+          "default": "source",
+          "title": "Root Key",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "path_ref"
+      ],
+      "title": "RepresentationMountCandidate",
+      "type": "object"
+    },
+    "RepresentationRole": {
+      "enum": [
+        "primary",
+        "original",
+        "official",
+        "mirror",
+        "analysis",
+        "guide",
+        "annotated",
+        "supplemental",
+        "snapshot",
+        "derived"
+      ],
+      "title": "RepresentationRole",
+      "type": "string"
+    },
+    "RepresentationType": {
+      "enum": [
+        "pdf",
+        "html",
+        "repository",
+        "source_code",
+        "annotation",
+        "guide",
+        "analysis",
+        "markdown",
+        "notebook",
+        "dataset",
+        "data",
+        "image",
+        "extracted_text",
+        "thumbnail",
+        "external_url"
+      ],
+      "title": "RepresentationType",
+      "type": "string"
+    },
+    "Visibility": {
+      "enum": [
+        "private",
+        "internal",
+        "public"
+      ],
+      "title": "Visibility",
+      "type": "string"
+    }
+  },
+  "$id": "https://research-asset-hub.local/schemas/canonical-source-snapshot.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable sidecar contract consumed by :class:`CanonicalSnapshotAdapter`.",
+  "properties": {
+    "domain_slugs": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Domain Slugs",
+      "type": "array"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "#/$defs/CanonicalSnapshotInput"
+      },
+      "title": "Inputs",
+      "type": "array"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/CanonicalSnapshotItem"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "profile": {
+      "minLength": 1,
+      "title": "Profile",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "research-asset-hub.canonical-source-snapshot/v1",
+      "default": "research-asset-hub.canonical-source-snapshot/v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+      "title": "Source Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_id",
+    "profile",
+    "domain_slugs",
+    "inputs",
+    "items"
+  ],
+  "title": "CanonicalSnapshotDocument",
+  "type": "object"
+}

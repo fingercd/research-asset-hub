@@ -1,0 +1,45 @@
+schema_version: 1
+
+exclude_directories:
+  - .git
+  - node_modules
+  - .venv
+  - venv
+  - __pycache__
+  - dist
+  - build
+  - .cache
+  - browser-profile
+
+exclude_file_patterns:
+  - "*.pyc"
+  - "*.pyo"
+  - "*.so"
+  - "*.dll"
+  - "*.exe"
+  - "*.bin"
+  - "*.ckpt"
+  - "*.safetensors"
+
+limits:
+  text_full_index_bytes: 5242880
+  tabular_full_index_bytes: 2097152
+  code_full_index_bytes: 2097152
+  binary_hash_bytes: 1073741824
+
+large_data_strategy:
+  json: schema_stats_sample
+  jsonl: schema_stats_sample
+  csv: schema_stats_sample
+  parquet: schema_stats_sample
+
+pdf:
+  low_text_density_chars_per_page: 80
+  ocr_fallback: true
+  preserve_page_anchors: true
+
+code:
+  index_all_non_excluded_text: true
+  parse_symbols_when_supported: true
+  fallback_to_plain_text: true
+
